@@ -82,7 +82,7 @@ def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | Non
 
 def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     from .analysis.segmentation import SegmentationResult
-    from .composite.compositor import Compositor, load_render_passes
+    from .composite.compositor import Compositor, LayerAccumulator, load_render_passes
     from .render.scene_spec import build_scene_spec
     from .video.encoder import EncodeSettings, VideoWriter, decode_frames, ffmpeg_exe, psnr
 
@@ -183,26 +183,33 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     enc = VideoWriter(out_path, plate.width, plate.height, fps, EncodeSettings(codec=codec),
                       log_path=work / "encode.log")
     frames = render_meta["frames"]
-    cache_src, cache_passes = None, None
     stats = []
     previews = []
     keyframes_dir = work / "quadros"
     keyframes_dir.mkdir(exist_ok=True)
     n = len(frames)
+    sample = sorted({1, max(1, n // 2), n})
+    masters: dict[int, np.ndarray] = {}
+    acc = LayerAccumulator(plate.height, plate.width, feather_px=max(6, plate.width // 120))
+    loaded_src = None
     for i, fr in enumerate(frames):
         src = fr.get("source")
         if src is None:
+            acc.reset()
             out8, st = comp.composite(fr["frame"], None, None, None)
         else:
-            if src != cache_src:
-                cache_passes = load_render_passes(work / "render" / "frames" / src)
-                cache_src = src
-            out8, st = comp.composite(fr["frame"], cache_passes[0], cache_passes[1], fr.get("border"))
+            if src != loaded_src and not fr.get("reused"):
+                rgba, sh = load_render_passes(work / "render" / "frames" / src)
+                acc.update(rgba, sh, fr.get("border"), fr.get("mode", "full"))
+                loaded_src = src
+            out8, st = comp.composite(fr["frame"], acc.rgba, acc.shadow, None)
         if not st.preserved_exact:
             enc.close()
             raise RuntimeError(f"Violação da preservação de pixels no quadro {fr['frame']}")
         stats.append(st)
         enc.write(out8)
+        if fr["frame"] in sample:
+            masters[fr["frame"]] = out8
         if i % max(1, n // 8) == 0 or i == n - 1:
             pth = keyframes_dir / f"quadro_{fr['frame']:05d}.jpg"
             Image.fromarray(out8).save(pth, quality=92)
@@ -217,19 +224,11 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     # ---------------------------------------------------------------- verificação do encode
     t = time.time()
     check = []
-    last_frame = len(frames)
-    sample = sorted({1, max(1, last_frame // 2), last_frame})
-    final_passes = cache_passes
     for idx, dec in decode_frames(out_path, plate.width, plate.height, sample):
-        fr = frames[idx - 1]
-        src = fr.get("source")
-        if src is None:
-            ref = plate8
-            untouched = np.ones(plate8.shape[:2], bool)
-        else:
-            rg, sh = load_render_passes(work / "render" / "frames" / src)
-            ref, _ = comp.composite(fr["frame"], rg, sh, fr.get("border"))
-            untouched = (ref == plate8).all(-1)
+        ref = masters.get(idx)
+        if ref is None:
+            continue
+        untouched = (ref == plate8).all(-1)
         check.append({"frame": idx, "psnr_total_db": round(psnr(dec, ref), 2),
                       "psnr_fundo_db": round(psnr(dec, plate8, untouched), 2)})
     timings["verificacao"] = time.time() - t

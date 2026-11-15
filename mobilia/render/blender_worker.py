@@ -724,6 +724,69 @@ def any_visible(items_rt: list[dict], f: int, fps: int) -> bool:
     return False
 
 
+def dynamic_parts(items_rt: list[dict], f: int, fps: int) -> list:
+    """Peças que mudam de aparência em torno do quadro f (movimento, fade ou desenrolar)."""
+    rest_key = ch.REST.key(4)
+    out = []
+    for rt in items_rt:
+        ur = rt.get("unroll_range")
+        unrolling = ur is not None and ur[0] - 1 <= f <= ur[1] + 1
+        for part in rt["parts"]:
+            plan = rt["plans"][part.name]
+            poses = [plan.pose((f - 1 + df) / fps) for df in (-1, 0, 1)]
+            if all(not p.visible for p in poses):
+                continue
+            if unrolling or any(p.key(4) != rest_key for p in poses):
+                out.append((rt, part, poses))
+    return out
+
+
+def _bbox_points(mn, mx, margin_m: float, sun_dir=None) -> list:
+    pts = [mathutils.Vector((x, y, z)) for x in (mn.x, mx.x) for y in (mn.y, mx.y) for z in (mn.z, mx.z)]
+    pts += [mathutils.Vector((x, y, 0.0)) for x in (mn.x - margin_m, mx.x + margin_m)
+            for y in (mn.y - margin_m, mx.y + margin_m)]
+    if sun_dir is not None and sun_dir[2] > 0.05:
+        # pegada da sombra do sol no piso (projeção dos cantos superiores ao longo de -sol)
+        for x in (mn.x, mx.x):
+            for y in (mn.y, mx.y):
+                t = mx.z / sun_dir[2]
+                pts.append(mathutils.Vector((x - sun_dir[0] * t, y - sun_dir[1] * t, 0.0)))
+    return pts
+
+
+def _project_border(sc, cam, pts) -> tuple[float, float, float, float] | None:
+    if not pts:
+        return None
+    xs, ys = [], []
+    for p in pts:
+        v = world_to_camera_view(sc, cam, p)
+        if v.z <= 0.01:
+            return (0.0, 0.0, 1.0, 1.0)      # ponto atrás da câmera: tela inteira por segurança
+        xs.append(v.x)
+        ys.append(v.y)
+    pad = 0.02
+    return (max(0.0, min(xs) - pad), max(0.0, min(ys) - pad), min(1.0, max(xs) + pad), min(1.0, max(ys) + pad))
+
+
+def incremental_border(sc, cam, dyn: list, margin_m: float, sun_dir=None):
+    """Região da tela que precisa ser re-renderizada: peças em movimento nas poses de
+    f−1, f e f+1 (cobre a posição anterior, apagando-a) + margem de sombra."""
+    pts = []
+    for rt, part, poses in dyn:
+        mn, mx = part["_rest_bbox_min"], part["_rest_bbox_max"]
+        mn = mathutils.Vector(mn); mx = mathutils.Vector(mx)
+        if part.data.shape_keys is not None:
+            mx = mathutils.Vector((mx.x, mx.y, mx.z + 0.3))       # rolo do tapete
+        s = float(rt["item"].get("scale", 1.0))
+        for p in poses:
+            grow = max(p.sx, p.sy, p.sz, 1.0)
+            ctr = (mn + mx) / 2
+            half = (mx - mn) / 2 * grow + mathutils.Vector((0.03, 0.03, 0.03))   # inclinações pequenas
+            off = mathutils.Vector((p.dx, p.dy, p.dz)) * s
+            pts += _bbox_points(ctr - half + off, ctr + half + off, margin_m, sun_dir)
+    return _project_border(sc, cam, pts)
+
+
 def compute_border(sc, cam, items_rt: list[dict], margin_m: float) -> tuple[float, float, float, float] | None:
     pts = []
     for rt in items_rt:
@@ -812,6 +875,11 @@ def main(spec_path: str) -> None:
                 pass
         items_rt.append(rt)
     bpy.context.view_layer.update()
+    for rt in items_rt:
+        for part in rt["parts"]:
+            mn, mx = _world_bbox([part])
+            part["_rest_bbox_min"] = list(mn)
+            part["_rest_bbox_max"] = list(mx)
     bake_animation(sc, items_rt, fps, n_frames)
     emit(event="log", level="info", message=f"Cena montada: {len(items_rt)} itens, dispositivo {dev}")
 
@@ -820,6 +888,14 @@ def main(spec_path: str) -> None:
     margin = float(spec["render"].get("border_margin_m", 0.6))
     meta = {"frames": [], "calibration": calib, "device": dev, "width": W, "height": H}
     last_sig, last_src, last_border = None, None, None
+    # Render incremental (só a região das peças em movimento) é EXPERIMENTAL: em testes
+    # reduziu a área renderizada em ~14%, mas o sombreamento suave de peças junto à parede
+    # pode ultrapassar a região e deixar emendas sutis. Qualidade primeiro: desligado.
+    incremental = bool(spec["render"].get("incremental", False)) and not spec["render"].get("only_frames")
+    margin_inc = float(spec["render"].get("incremental_margin_m", 0.8))
+    full_renders_since = 0
+    sun_spec = spec["lighting"].get("sun")
+    sun_dir = sun_spec["direction"] if sun_spec else None
     only = set(spec["render"].get("only_frames") or [])
     to_render = [f for f in range(1, n_frames + 1) if any_visible(items_rt, f, fps) and (not only or f in only)]
     done = 0
@@ -836,7 +912,17 @@ def main(spec_path: str) -> None:
             continue
         sc.frame_set(f)
         bpy.context.view_layer.update()
-        b = compute_border(sc, cam, items_rt, margin)
+        dyn = dynamic_parts(items_rt, f, fps)
+        mode = "full"
+        if incremental and last_src is not None and dyn and full_renders_since < 1000:
+            b = incremental_border(sc, cam, dyn, margin_inc, sun_dir)
+            mode = "incremental"
+        else:
+            b = compute_border(sc, cam, items_rt, margin)
+        if not dyn and last_src is not None and incremental:
+            # nada em movimento mas a assinatura mudou (ex.: fim do motion blur): quadro limpo completo
+            b = compute_border(sc, cam, items_rt, margin)
+            mode = "full"
         if b is None:
             meta["frames"].append({"frame": f, "source": None, "border": None})
             continue
@@ -850,7 +936,7 @@ def main(spec_path: str) -> None:
         # retângulo em pixels (origem no topo-esquerdo), igual ao usado pelo Cycles
         border_px = [int(math.floor(b[0] * W)), int(math.floor((1 - b[3]) * H)),
                      int(math.ceil(b[2] * W)), int(math.ceil((1 - b[1]) * H))]
-        meta["frames"].append({"frame": f, "source": name, "border": border_px})
+        meta["frames"].append({"frame": f, "source": name, "border": border_px, "mode": mode})
         last_sig, last_src, last_border = sig, name, border_px
         done += 1
         emit(event="render_progress", done=done, frame=f, n_frames=n_frames,

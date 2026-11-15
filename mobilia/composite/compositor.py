@@ -155,6 +155,64 @@ class Compositor:
         return out8, st
 
 
+class LayerAccumulator:
+    """Mantém as camadas 3D de tela cheia quando o render é incremental.
+
+    Quadros "full" substituem tudo; quadros "incremental" só re-renderizam a região das
+    peças em movimento, que é colada sobre o estado anterior com uma transição suave
+    (as duas renders mostram a mesma cena estática fora das peças em movimento).
+    """
+
+    def __init__(self, height: int, width: int, feather_px: int = 12):
+        self.H, self.W = height, width
+        self.feather = max(1, int(feather_px))
+        self.reset()
+
+    def reset(self) -> None:
+        self.rgba = np.zeros((self.H, self.W, 4), np.float32)
+        self.shadow = np.ones((self.H, self.W, 3), np.float32)
+        self.empty = True
+
+    def _weights(self, border: list[int]) -> tuple[tuple[slice, slice], np.ndarray]:
+        x0, y0, x1, y1 = [int(v) for v in border]
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(self.W, x1), min(self.H, y1)
+        h, w = max(0, y1 - y0), max(0, x1 - x0)
+        f = float(self.feather)
+        # rampa só nas bordas internas da região (na borda da imagem não há o que misturar)
+        yy = np.arange(h, dtype=np.float32) + 0.5
+        xx = np.arange(w, dtype=np.float32) + 0.5
+        dy = np.full(h, np.inf, np.float32)
+        dx = np.full(w, np.inf, np.float32)
+        if y0 > 0:
+            dy = np.minimum(dy, yy)
+        if y1 < self.H:
+            dy = np.minimum(dy, h - yy)
+        if x0 > 0:
+            dx = np.minimum(dx, xx)
+        if x1 < self.W:
+            dx = np.minimum(dx, w - xx)
+        wy = np.clip(dy / f, 0.0, 1.0)
+        wx = np.clip(dx / f, 0.0, 1.0)
+        return (slice(y0, y1), slice(x0, x1)), np.outer(wy, wx).astype(np.float32)
+
+    def update(self, rgba: np.ndarray, shadow: np.ndarray | None, border: list[int] | None, mode: str) -> None:
+        if shadow is None:
+            shadow = np.ones(rgba.shape[:2] + (3,), np.float32)
+        if border is None:
+            border = [0, 0, self.W, self.H]
+        sl, wgt = self._weights(border)
+        if mode != "incremental" or self.empty:
+            self.reset()
+            self.rgba[sl] = rgba[sl]
+            self.shadow[sl] = shadow[sl]
+            self.empty = False
+            return
+        w4 = wgt[..., None]
+        self.rgba[sl] = self.rgba[sl] * (1 - w4) + rgba[sl] * w4
+        self.shadow[sl] = self.shadow[sl] * (1 - w4) + shadow[sl] * w4
+
+
 def load_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:
     """Lê Combined (RGBA) e Shadow Catcher (RGB) de um EXR multi-part do Blender 5."""
     import OpenEXR

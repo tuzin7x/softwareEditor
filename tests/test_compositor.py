@@ -73,3 +73,28 @@ def test_noise_below_eps_does_not_touch_pixels(plate):
     obj = rgba[..., 3] > 0
     assert st.shadow_pixels == 0
     assert np.array_equal(out[~obj], plate[~obj])
+
+
+def test_layer_accumulator_incremental_paste_is_seamless():
+    from mobilia.composite.compositor import LayerAccumulator
+
+    H, W = 60, 80
+    acc = LayerAccumulator(H, W, feather_px=6)
+    full = np.zeros((H, W, 4), np.float32)
+    full[20:40, 10:30] = (0.2, 0.2, 0.2, 1.0)           # peça estática
+    sh = np.ones((H, W, 3), np.float32)
+    acc.update(full, sh, [0, 0, W, H], "full")
+    assert np.allclose(acc.rgba, full)
+    # quadro incremental: re-render só da região da peça móvel; fora dela o render
+    # é zero (border do Cycles) e não pode apagar a peça estática
+    inc = np.zeros_like(full)
+    inc[30:50, 50:70] = (0.8, 0.1, 0.1, 1.0)
+    acc.update(inc, sh, [40, 20, 80, 60], "incremental")
+    assert np.allclose(acc.rgba[20:40, 10:30], full[20:40, 10:30])       # estática preservada
+    assert np.allclose(acc.rgba[35:45, 60:70], inc[35:45, 60:70])         # interior da região: novo render
+    # na borda interna da região a mistura é gradual (sem degrau)
+    col = acc.rgba[40, 40:47, 3]
+    assert col[0] < col[-1] or np.allclose(col, 0)
+    # um quadro "full" substitui tudo
+    acc.update(full, sh, [0, 0, W, H], "full")
+    assert np.allclose(acc.rgba, full)
