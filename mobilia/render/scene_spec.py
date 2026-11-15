@@ -65,7 +65,8 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                      seg: SegmentationResult, work_dir: Path, assets_dir: Path, *, fps: int = 30,
                      samples: int = 64, device: str = "AUTO", texture_res: str = "1k",
                      hold_start: float = 0.8, hold_end: float = 2.5, motion_blur: bool = True,
-                     seed: int = 7, calibrate: bool = True, threads: int = 0, sun: dict | None = None) -> dict:
+                     seed: int = 7, calibrate: bool = True, threads: int = 0, sun: dict | None = None,
+                     occluders: tuple | None = None) -> dict:
     H, W = plate8.shape[:2]
     intr = room.intr().scaled(W, H)
     stats = surface_stats(plate8, seg)
@@ -95,6 +96,10 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
         else:
             raise ValueError(f"asset desconhecido: {it.asset_id}")
         raw_items.append(spec_item)
+    occ_path = None
+    if occluders is not None and len(occluders[1]):
+        occ_path = work_dir / "occluders.npz"
+        np.savez_compressed(occ_path, verts=occluders[0], faces=occluders[1])
     scheduled, end_anim = ch.schedule_items(raw_items, hold_start=hold_start)
     n_frames = int(math.ceil(ch.timeline_length(end_anim, hold_end) * fps))
     spec = {
@@ -105,6 +110,7 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
         "cam_to_room": room.cam_to_room,
         "room": {"walls": [asdict(w) for w in room.walls], "openings": [asdict(o) for o in room.openings],
                  "ceiling_height": room.ceiling_height, "extent": extent},
+        "occluders": str(occ_path) if occ_path else None,
         "albedo_scale": stats["albedo_scale"],
         "albedo_mean": stats["albedo_mean"],
         "illuminant": stats["illuminant"],

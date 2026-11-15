@@ -277,7 +277,29 @@ def build_room(sc, spec: dict, photo_img) -> list:
                 poly.flip()
         objs.append(ob)
     objs += closure_walls(spec, ch_h, means.get("wall", [0.6, 0.6, 0.6]), k)
+    objs += build_occluders(spec, photo_img, k, means, illum)
     return objs
+
+
+def build_occluders(spec: dict, photo_img, k: float, means: dict, illum) -> list:
+    """Objetos que já existem na foto (bancadas, armários, porta aberta) como catchers:
+    ocultam móveis atrás deles e recebem as sombras dos móveis na frente."""
+    path = spec.get("occluders")
+    if not path or not Path(path).exists():
+        return []
+    d = np.load(path)
+    verts, faces = d["verts"].astype(np.float64), d["faces"].astype(np.int64)
+    if len(faces) == 0:
+        return []
+    # orienta as faces para a câmera
+    cam = np.asarray(spec["cam_to_room"], dtype=np.float64)[:3, 3]
+    v0, v1, v2 = verts[faces[:, 0]], verts[faces[:, 1]], verts[faces[:, 2]]
+    n = np.cross(v1 - v0, v2 - v0)
+    flip = (n * (cam - v0)).sum(1) < 0
+    faces[flip] = faces[flip][:, [0, 2, 1]]
+    mat = proxy_material("proxy_occluders", photo_img, k, means.get("wall", [0.5, 0.5, 0.5]), illum)
+    ob = _mesh_object("proxy_occluders", verts.tolist(), faces.tolist(), mat)
+    return [ob]
 
 
 def closure_walls(spec: dict, height: float, wall_mean: list[float], k: float) -> list:

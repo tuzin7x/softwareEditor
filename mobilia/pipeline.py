@@ -118,8 +118,12 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     rgb, geo, seg, room, grid = analyze_photo(req.photo_path, an_dir, device=prof.torch_device, emitter=em_an)
     em.preview(an_dir / "analise_overlay.jpg")
     q_room = room.quality
+    from .analysis.depth_mesh import occluder_mesh
     from .analysis.sunlight import detect_sun
 
+    occ = occluder_mesh(geo, seg, room)
+    if len(occ[1]):
+        em.log(f"Objetos existentes na foto viram oclusores 3D ({len(occ[1])} triângulos)")
     sun = detect_sun(room, seg, rgb)
     if sun is not None:
         (an_dir / "sol.json").write_text(json.dumps(sun.to_dict(), indent=1), encoding="utf-8")
@@ -159,7 +163,7 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
                             fps=q["fps"], samples=q["samples"], device=prof.render_device,
                             texture_res=q["texture_res"], hold_start=hold_start, hold_end=hold_end,
                             motion_blur=q["motion_blur"], seed=req.seed,
-                            sun=sun.to_dict() if sun is not None else None)
+                            sun=sun.to_dict() if sun is not None else None, occluders=occ)
     em.stage("assets", 1.0, f"{len(spec['items'])} modelos prontos")
     timings["assets"] = time.time() - t
 
