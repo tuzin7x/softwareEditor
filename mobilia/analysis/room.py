@@ -295,6 +295,15 @@ def build_room_model(geo: GeometryResult, seg: SegmentationResult, photo_rgb8: n
         inl_xy = WP2[l["inliers"], :2]
         inl_z = WP2[l["inliers"], 2]
         s = (inl_xy - c) @ dvec
+        # extensão robusta: maior trecho contínuo de inliers (lacunas > 0,35 m separam
+        # segmentos — evita que pontos espúrios alinhados "estiquem" a parede)
+        order = np.sort(s)
+        gaps = np.flatnonzero(np.diff(order) > 0.35)
+        bounds = np.r_[0, gaps + 1, len(order)]
+        seg_i = int(np.argmax(np.diff(bounds)))
+        lo_i, hi_i = bounds[seg_i], bounds[seg_i + 1]
+        keep_s = (s >= order[lo_i]) & (s <= order[hi_i - 1])
+        s, inl_xy, inl_z = s[keep_s], inl_xy[keep_s], inl_z[keep_s]
         s0, s1 = np.percentile(s, 1), np.percentile(s, 99)
         off = (inl_xy - c) @ nrm
         c = c + nrm * float(np.median(off))

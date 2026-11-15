@@ -79,6 +79,32 @@ def _cmd_batch(a) -> int:
     return 0 if ok == len(results) else 1
 
 
+def _cmd_prefetch(a) -> int:
+    """Baixa pesos dos modelos de IA e assets 3D para uso 100% offline (primeiro uso/instalador)."""
+    from .assets.polyhaven import prefetch_catalog
+    from .config import (ASSETS_DIR, GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL,
+                         SEGMENTATION_MODEL_ID)
+
+    def emit(ev):
+        if a.json:
+            print(json.dumps(ev, ensure_ascii=False), flush=True)
+        elif ev.get("event") == "progress":
+            print(f"[{ev['fraction'] * 100:5.1f}%] {ev['message']}", flush=True)
+
+    from huggingface_hub import snapshot_download
+
+    repos = [GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL, SEGMENTATION_MODEL_ID]
+    for i, repo in enumerate(repos):
+        emit({"event": "progress", "stage": "modelos", "fraction": round(0.6 * i / len(repos), 3),
+              "message": f"Baixando modelo de IA {repo}"})
+        snapshot_download(repo, allow_patterns=["*.json", "*.pt", "*.bin", "*.safetensors", "*.txt"])
+    failed = prefetch_catalog(ASSETS_DIR, ("1k", "2k"), progress=lambda f, pid: emit(
+        {"event": "progress", "stage": "assets", "fraction": round(0.6 + 0.4 * f, 3),
+         "message": f"Baixando modelo 3D {pid}"}))
+    emit({"event": "done", "failed": failed})
+    return 0 if not failed else 1
+
+
 def _cmd_hardware(a) -> int:
     from .hardware import choose_profile, detect_hardware
 
@@ -125,8 +151,11 @@ def main(argv=None) -> int:
     b.add_argument("--manifest", default=None, help="CSV opcional: arquivo,ambiente")
     b.add_argument("--quality", default="auto", choices=["auto", "previa", "final"])
     b.add_argument("--seed", type=int, default=7)
+    pf = sub.add_parser("prefetch", help="baixa modelos de IA e assets 3D (uso offline)")
+    pf.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
-    return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch}[a.cmd](a)
+    return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch,
+            "prefetch": _cmd_prefetch}[a.cmd](a)
 
 
 if __name__ == "__main__":

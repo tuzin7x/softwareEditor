@@ -86,11 +86,13 @@ def configure_render(sc, spec: dict) -> str:
     sc.cycles.use_adaptive_sampling = True
     sc.cycles.adaptive_threshold = float(r.get("adaptive_threshold", 0.015))
     sc.cycles.use_denoising = bool(r.get("denoise", True))
-    try:
-        sc.cycles.denoiser = "OPENIMAGEDENOISE"
-        sc.cycles.denoising_use_gpu = dev != "CPU"
-    except (AttributeError, TypeError):
-        pass
+    for attr, val in (("denoiser", "OPENIMAGEDENOISE"), ("denoising_use_gpu", dev != "CPU"),
+                      ("denoising_prefilter", "ACCURATE"), ("denoising_quality", "HIGH"),
+                      ("denoising_input_passes", "RGB_ALBEDO_NORMAL")):
+        try:
+            setattr(sc.cycles, attr, val)
+        except (AttributeError, TypeError, ValueError):
+            pass
     sc.cycles.seed = int(r.get("seed", 7))
     sc.cycles.use_animated_seed = False          # ruído estável entre quadros
     sc.cycles.max_bounces = 8

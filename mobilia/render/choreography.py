@@ -86,7 +86,8 @@ def motion_drop(t: float, dur: float, height: float, size: float = 1.0, wobble: 
     if t < 0:
         return HIDDEN
     t_fall = dur * 0.55
-    fade = smoothstep(0.0, t_fall * 0.45, t)
+    # fade curto: a peça fica opaca no primeiro terço da queda (evita o aspecto "fantasma")
+    fade = smoothstep(0.0, t_fall * 0.3, t)
     if t < t_fall:
         x = t / t_fall
         dz = height * (1 - x * x)                    # queda acelerada (t^2)
@@ -195,7 +196,7 @@ def drop_height(role: str, size_z: float, mount: str) -> float:
     if mount == "on_top":
         return 0.22
     if role in ("sofa", "bed", "tv_console", "dresser", "shelf", "desk", "dining_table"):
-        return 0.55
+        return 0.48
     return max(0.3, min(0.55, 0.35 + 0.2 * size_z))
 
 

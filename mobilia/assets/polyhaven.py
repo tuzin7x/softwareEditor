@@ -63,6 +63,27 @@ def _md5(p: Path) -> str:
     return h.hexdigest()
 
 
+def prefetch_catalog(cache_dir: Path, resolutions: tuple[str, ...] = ("1k", "2k"), progress=None) -> list[str]:
+    """Baixa todos os modelos Poly Haven do catálogo (usado no primeiro uso / instalador),
+    para que o software funcione 100% offline depois. Retorna os ids com falha."""
+    from ..layout.catalog import CATALOG
+
+    ids = sorted({a.asset_id[3:] for a in CATALOG if a.asset_id.startswith("ph:")})
+    failed = []
+    total = len(ids) * len(resolutions)
+    k = 0
+    for pid in ids:
+        for res in resolutions:
+            k += 1
+            try:
+                ensure_model(pid, cache_dir, res)
+            except Exception:
+                failed.append(f"{pid}@{res}")
+            if progress:
+                progress(k / total, pid)
+    return failed
+
+
 def ensure_model(asset_id: str, cache_dir: Path, res: str = "1k") -> Path:
     """Garante o glTF do asset no cache e devolve o caminho do arquivo .gltf."""
     base = Path(cache_dir) / "polyhaven" / asset_id / res

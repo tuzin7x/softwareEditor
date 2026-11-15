@@ -19,6 +19,84 @@ from ..photo import srgb_to_linear
 from . import choreography as ch
 
 
+_RUG_PATTERN_MAP = {"geometrico": "berber", "berbere": "berber", "berber": "berber", "listras": "stripes",
+                    "stripes": "stripes", "persa": "solid_border", "borda": "solid_border", "liso": "solid_border",
+                    "solid_border": "solid_border"}
+
+
+def _rgb(c):
+    """Cor do layout (sRGB 0..1, 0..255 ou hex) -> lista sRGB 0..1."""
+    if c is None:
+        return None
+    if isinstance(c, str):
+        h = c.lstrip("#")
+        return [int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+    v = [float(x) for x in c][:3]
+    return [x / 255.0 for x in v] if max(v) > 1.0 else v
+
+
+def _hex(c) -> str | None:
+    v = _rgb(c)
+    return None if v is None else "#" + "".join(f"{int(round(min(1, max(0, x)) * 255)):02x}" for x in v)
+
+
+def _metal_finish(c) -> str:
+    v = _rgb(c)
+    if v is None:
+        return "black"
+    r, g, b = v
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    if r > b * 1.35 and lum > 0.25:
+        return "brass"
+    if lum > 0.55:
+        return "chrome"
+    return "matte_black" if lum < 0.12 else "black"
+
+
+def normalize_procedural_params(kind: str, params: dict) -> dict:
+    """Adapta os parâmetros semânticos do layout (paleta/estilo) ao vocabulário dos
+    geradores procedurais. Valores desconhecidos viram padrões seguros; luminárias
+    ficam SEMPRE apagadas (a iluminação da foto não pode mudar)."""
+    p = dict(params)
+    out: dict = {k: p[k] for k in ("size", "width", "depth", "height", "seed") if k in p}
+    if kind == "rug":
+        out["pattern"] = _RUG_PATTERN_MAP.get(str(p.get("pattern", "solid_border")).lower(), "solid_border")
+        out["color"] = _hex(p.get("color"))
+        out["accent"] = _hex(p.get("accent", p.get("pattern_color")))
+        if "fringe" in p:
+            out["fringe"] = bool(p["fringe"])
+    elif kind in ("floor_lamp", "table_lamp"):
+        out["metal"] = p["metal"] if p.get("metal") in ("black", "brass", "chrome", "matte_black") \
+            else _metal_finish(p.get("metal_color"))
+        out["shade_color"] = _hex(p.get("shade_color"))
+        if kind == "table_lamp":
+            out["base_color"] = _hex(p.get("base_color"))
+    elif kind == "bed":
+        out["fabric_color"] = _hex(p.get("fabric_color", p.get("frame_color")))
+        lin = _hex(p.get("duvet_color", p.get("linen_color")))
+        out["duvet_color"] = lin
+        out["sheet_color"] = _hex(p.get("sheet_color", p.get("linen_color")))
+        if p.get("accent_color") is not None:
+            out["pillow_colors"] = [lin, _hex(p["accent_color"])]
+    elif kind == "desk":
+        top = _rgb(p.get("top_color"))
+        out["wood"] = "walnut" if top is not None and (0.2126 * top[0] + 0.7152 * top[1] + 0.0722 * top[2]) < 0.3 else "oak"
+        leg = _rgb(p.get("leg_color"))
+        out["legs"] = "black" if leg is not None and max(leg) < 0.35 else "wood"
+    elif kind in ("throw_blanket", "throw"):
+        out["color"] = _hex(p.get("color"))
+        if p.get("accent") is not None:
+            out["accent"] = _hex(p["accent"])
+        pat = str(p.get("pattern", "stripes")).lower()
+        out["pattern"] = "stripes" if pat in ("stripes", "listras") else "solid"
+    elif kind == "curtain":
+        out["color"] = _hex(p.get("color"))
+        for k in ("sheer", "panels", "coverage"):
+            if k in p:
+                out[k] = p[k]
+    return {k: v for k, v in out.items() if v is not None}
+
+
 def surface_stats(photo8: np.ndarray, seg: SegmentationResult) -> dict:
     """Cor média linear de piso/parede/teto e escala de albedo (parede clara ≈ 0,8)."""
     lin = srgb_to_linear(photo8.astype(np.float32) / 255.0)
@@ -90,9 +168,11 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
             gltf = ensure_model(it.asset_id[3:], assets_dir, texture_res)
             spec_item["source"] = {"type": "gltf", "path": str(gltf)}
         elif it.asset_id.startswith("proc:"):
+            kind = it.asset_id[5:]
             params = dict(it.params)
             params.setdefault("size", list(it.size))
-            spec_item["source"] = {"type": "procedural", "kind": it.asset_id[5:], "params": params}
+            spec_item["source"] = {"type": "procedural", "kind": kind,
+                                   "params": normalize_procedural_params(kind, params)}
         else:
             raise ValueError(f"asset desconhecido: {it.asset_id}")
         raw_items.append(spec_item)

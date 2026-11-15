@@ -82,7 +82,10 @@ def _clear_window_rects(room: RoomModel, seg: SegmentationResult, rays: np.ndarr
     return out
 
 
-def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_dice: float = 0.45) -> SunEstimate | None:
+def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_dice: float = 0.5,
+               diag: dict | None = None) -> SunEstimate | None:
+    """``diag`` (opcional) recebe os números do diagnóstico (manchas, Dice, precisão...)."""
+    diag = diag if diag is not None else {}
     from shapely.geometry import MultiPoint, Polygon
     from shapely.ops import unary_union
 
@@ -121,6 +124,7 @@ def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_d
             continue
         patches.append(hull)
         ratios.append(float(np.median(lum[comp]) / max(1e-4, np.median(base[comp]))))
+    diag["patches"] = len(patches)
     if not patches:
         return None
     P = unary_union(patches)
@@ -145,13 +149,16 @@ def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_d
             return 0.0, d, used
         Q = unary_union(quads).intersection(V)
         inter = Q.intersection(P).area
-        # Dice: robusto a caixilhos/travessas, que dividem a mancha real em faixas
-        den = Q.area + P.area
-        return (2 * inter / den if den > 0 else 0.0), d, used
+        # F0,5: prioriza EXPLICAR as manchas (precisão) — robusto a caixilhos/travessas
+        # (que dividem a mancha real em faixas) e evita soluções degeneradas de sol muito
+        # baixo, cujas projeções longas cobrem tudo
+        prec = inter / max(1e-9, P.area)
+        rec = inter / max(1e-9, Q.area)
+        return ((1.25 * prec * rec / (0.25 * prec + rec)) if inter > 0 else 0.0), d, used
 
     best = (0.0, None, [], 0.0, 0.0)
     for az in np.radians(np.arange(0, 360, 3)):
-        for el in np.radians(np.arange(10, 81, 3)):
+        for el in np.radians(np.arange(15, 81, 3)):
             s, d, used = score(az, el)
             if s > best[0]:
                 best = (s, d, used, az, el)
@@ -160,7 +167,7 @@ def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_d
     _, _, _, az0, el0 = best
     for az in az0 + np.radians(np.arange(-3, 3.01, 0.5)):
         for el in el0 + np.radians(np.arange(-3, 3.01, 0.5)):
-            if not (np.radians(5) < el < np.radians(85)):
+            if not (np.radians(14) < el < np.radians(85)):
                 continue
             s, d, used = score(az, el)
             if s > best[0]:
@@ -176,6 +183,9 @@ def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_d
     inter = Q.intersection(P).area
     precision = inter / max(1e-9, P.area)        # quanto das manchas é explicado
     recall = inter / max(1e-9, Q.area)           # quanto da projeção cai em mancha
+    diag.update(dice=round(float(dice), 3), precision=round(float(precision), 3), recall=round(float(recall), 3),
+                azimuth_deg=round(float(np.degrees(az)) % 360, 1), elevation_deg=round(float(np.degrees(el)), 1),
+                windows=sorted(used))
     if dice < min_dice or precision < 0.6 or recall < 0.3:
         return None
     iou = dice
