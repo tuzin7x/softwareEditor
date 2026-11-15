@@ -118,6 +118,13 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     rgb, geo, seg, room, grid = analyze_photo(req.photo_path, an_dir, device=prof.torch_device, emitter=em_an)
     em.preview(an_dir / "analise_overlay.jpg")
     q_room = room.quality
+    from .analysis.sunlight import detect_sun
+
+    sun = detect_sun(room, seg, rgb)
+    if sun is not None:
+        (an_dir / "sol.json").write_text(json.dumps(sun.to_dict(), indent=1), encoding="utf-8")
+        em.log(f"Sol direto detectado: elevação {sun.elevation_deg:.0f}°, {sun.patches} mancha(s) no piso "
+               f"(precisão {sun.precision:.0%})")
     em.log(f"Sala: câmera a {room.camera_height:.2f} m, pé-direito {room.ceiling_height:.2f} m, "
            f"{len(room.walls)} paredes, {len(room.openings)} aberturas, FOV {q_room.get('fov_x_deg', 0):.0f}°")
     timings["analise"] = time.time() - t
@@ -130,9 +137,9 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     layout = plan_layout(room, grid, req.room_type, rgb, seed=req.seed, seg=seg)
     (work / "layout.json").write_text(layout.to_json(), encoding="utf-8")
     try:
-        from .layout.debug import draw_layout_overlay
+        from .layout.debug import layout_overlay
 
-        ov = draw_layout_overlay(rgb, room, layout)
+        ov = layout_overlay(rgb, room, layout)
         Image.fromarray(ov).save(work / "layout_overlay.jpg", quality=88)
         em.preview(work / "layout_overlay.jpg")
     except Exception as e:  # visualização é opcional
@@ -151,7 +158,8 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     spec = build_scene_spec(room, layout, plate8, work / "plate.png", seg_plate, work, cfg.assets_dir,
                             fps=q["fps"], samples=q["samples"], device=prof.render_device,
                             texture_res=q["texture_res"], hold_start=hold_start, hold_end=hold_end,
-                            motion_blur=q["motion_blur"], seed=req.seed)
+                            motion_blur=q["motion_blur"], seed=req.seed,
+                            sun=sun.to_dict() if sun is not None else None)
     em.stage("assets", 1.0, f"{len(spec['items'])} modelos prontos")
     timings["assets"] = time.time() - t
 
@@ -238,6 +246,7 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
                  "qualidade": room.quality},
         "layout": json.loads(layout.to_json()),
         "calibracao_luz": render_meta.get("calibration"),
+        "sol": sun.to_dict() if sun is not None else None,
         "render": {"dispositivo": render_meta.get("device"), "tempos": render_meta.get("timings")},
         "preservacao": {
             "quadros": len(stats),

@@ -258,6 +258,7 @@ def build_room(sc, spec: dict, photo_img) -> list:
     ceil = _mesh_object("proxy_ceiling", [(xmin - pad, ymin - pad, ch_h), (xmin - pad, ymax + pad, ch_h),
                                           (xmax + pad, ymax + pad, ch_h), (xmax + pad, ymin - pad, ch_h)],
                         [(0, 1, 2, 3)], m_ceil)
+    ceil.visible_shadow = False        # o teto estendido além da sala não pode tapar o sol da janela
     objs.append(ceil)
     m_wall = proxy_material("proxy_wall", photo_img, k, means.get("wall", [0.6, 0.6, 0.6]), illum)
     for w in room["walls"]:
@@ -305,7 +306,9 @@ def closure_walls(spec: dict, height: float, wall_mean: list[float], k: float) -
     out = []
     for i, (a, c) in enumerate(quads):
         verts = [(a[0], a[1], 0.0), (c[0], c[1], 0.0), (c[0], c[1], height), (a[0], a[1], height)]
-        out.append(_mesh_object(f"proxy_closure_{i}", verts, [(0, 1, 2, 3)], mat))
+        ob = _mesh_object(f"proxy_closure_{i}", verts, [(0, 1, 2, 3)], mat)
+        ob.visible_shadow = False      # o sol atravessa: a parede real com janela é a ajustada
+        out.append(ob)
     return out
 
 
@@ -348,17 +351,32 @@ def build_lights(sc, spec: dict) -> dict:
              (x_axis.z, y_axis.z, z_axis.z, 0), (0, 0, 0, 1)))
         ob.visible_camera = False
         windows.append((ob, width * height))
+    sun = None
+    sun_spec = lt.get("sun")
+    if sun_spec:
+        sd = bpy.data.lights.new("sol", "SUN")
+        sd.angle = math.radians(float(sun_spec.get("angle_deg", 0.6)))
+        sd.color = tuple(sun_spec.get("color", [1.0, 0.96, 0.9]))
+        sd.energy = 0.0
+        sun = bpy.data.objects.new("sol", sd)
+        sc.collection.objects.link(sun)
+        d = mathutils.Vector(sun_spec["direction"]).normalized()
+        # o sol emite ao longo de -Z local: -Z local = -d (do sol para a cena)
+        sun.rotation_euler = d.to_track_quat("Z", "Y").to_euler()
     world = bpy.data.worlds.new("World")
     sc.world = world
     world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
     bg.inputs["Color"].default_value = (*lt.get("world_color", [1.0, 1.0, 1.0]), 1.0)
-    return {"windows": windows, "world_bg": bg}
+    return {"windows": windows, "world_bg": bg, "sun": sun}
 
 
-def set_light_strengths(lights: dict, window_power_per_m2: float, ambient_strength: float) -> None:
+def set_light_strengths(lights: dict, window_power_per_m2: float, ambient_strength: float,
+                        sun_strength: float = 0.0) -> None:
     for ob, area in lights["windows"]:
         ob.data.energy = float(window_power_per_m2 * area)
+    if lights.get("sun") is not None:
+        lights["sun"].data.energy = float(sun_strength)
     mat = bpy.data.materials.get("proxy_closure")
     if mat is not None:
         mat.node_tree.nodes.get("Principled BSDF").inputs["Emission Strength"].default_value = float(ambient_strength)
@@ -400,8 +418,10 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
     sc.render.use_motion_blur = False
     set_catchers(room_objs, False)
     renders = []
-    for case in ("windows", "ambient"):
-        set_light_strengths(lights, 1.0 if case == "windows" else 0.0, 0.0 if case == "windows" else 1.0)
+    cases = ["windows", "ambient"] + (["sun"] if lights.get("sun") is not None else [])
+    for case in cases:
+        set_light_strengths(lights, 1.0 if case == "windows" else 0.0, 1.0 if case == "ambient" else 0.0,
+                            1.0 if case == "sun" else 0.0)
         p = str(out_dir / f"calib_{case}.exr")
         sc.render.filepath = p
         sc.frame_set(1)
@@ -413,28 +433,45 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
     photo = np.where(photo <= 0.04045, photo / 12.92, ((photo + 0.055) / 1.055) ** 2.4)
     mask = np.asarray(Image.open(spec["lighting"]["calib_mask_path"]).convert("L").resize((w, h), Image.NEAREST)) > 127
     lum = np.array([0.2126, 0.7152, 0.0722], np.float32)
-    A = np.stack([(renders[0] @ lum)[mask], (renders[1] @ lum)[mask]], 1)
+    A = np.stack([(r @ lum)[mask] for r in renders], 1)
     b = (photo @ lum)[mask]
-    sol = _nnls2(A, b)
+    sol = _nnls(A, b)
     tot = A @ sol
     amb_share = float((A[:, 1] * sol[1]).sum() / max(1e-9, tot.sum()))
     if amb_share > AMBIENT_MAX_SHARE and A[:, 0].any():
         # refaz com o ambiente limitado (luz da parte não fotografada não pode dominar)
         amb = AMBIENT_MAX_SHARE * float(b.mean()) / max(1e-9, float(A[:, 1].mean()))
-        win = max(0.0, float(A[:, 0] @ (b - A[:, 1] * amb)) / max(1e-9, float(A[:, 0] @ A[:, 0])))
-        sol = np.array([win, amb])
+        others = [j for j in range(A.shape[1]) if j != 1]
+        sub = _nnls(A[:, others], b - A[:, 1] * amb)
+        sol = np.zeros(A.shape[1])
+        sol[1] = amb
+        sol[others] = sub
     pred = A @ sol
     rel_rms = float(np.sqrt(np.mean((pred - b) ** 2)) / max(1e-6, np.mean(b)))
     # balanço de cor: razão por canal entre foto e predição (aplicada às luzes)
-    full = sol[0] * renders[0] + sol[1] * renders[1]
+    full = sum(sol[j] * renders[j] for j in range(len(renders)))
     ratio = photo[mask].sum(0) / np.maximum(full[mask].sum(0), 1e-6)
     ratio = ratio / max(1e-6, float(ratio @ lum))
     ratio = np.clip(ratio, 0.85, 1.15)
     sc.render.resolution_percentage, sc.cycles.samples, sc.render.use_motion_blur = old
     res = {"window_power_per_m2": float(sol[0]), "ambient_strength": float(sol[1]),
+           "sun_strength": float(sol[2]) if len(sol) > 2 else 0.0,
            "color_ratio": ratio.tolist(), "rel_rms": rel_rms, "pixels": int(mask.sum()),
            "seconds": round(time.time() - t0, 1)}
     return res
+
+
+def _nnls(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Mínimos quadrados não negativos (scipy), com fallback fechado para 2 incógnitas."""
+    try:
+        from scipy.optimize import nnls
+
+        x, _ = nnls(A.astype(np.float64), b.astype(np.float64))
+        return x
+    except Exception:
+        if A.shape[1] == 2:
+            return _nnls2(A, b)
+        raise
 
 
 def _nnls2(A: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -710,13 +747,14 @@ def main(spec_path: str) -> None:
     if lt.get("calibrate", True):
         emit(event="log", level="info", message="Calibrando a luz pela foto...")
         calib = calibrate(sc, spec, room_objs, lights, out_dir)
-        wp, ws = calib["window_power_per_m2"], calib["ambient_strength"]
+        wp, ws, sun_s = calib["window_power_per_m2"], calib["ambient_strength"], calib["sun_strength"]
         ratio = calib["color_ratio"]
         # a cor da luz vem do iluminante estimado da foto; a razão por canal é só diagnóstico
         emit(event="calibration", **calib)
     else:
         wp, ws = float(lt.get("window_power_per_m2", 10.0)), float(lt.get("ambient_strength", 0.3))
-    set_light_strengths(lights, wp, ws)
+        sun_s = float((lt.get("sun") or {}).get("strength", 0.0))
+    set_light_strengths(lights, wp, ws, sun_s)
     set_catchers(room_objs, True)
 
     # --- itens

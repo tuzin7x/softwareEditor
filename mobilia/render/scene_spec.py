@@ -65,7 +65,7 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                      seg: SegmentationResult, work_dir: Path, assets_dir: Path, *, fps: int = 30,
                      samples: int = 64, device: str = "AUTO", texture_res: str = "1k",
                      hold_start: float = 0.8, hold_end: float = 2.5, motion_blur: bool = True,
-                     seed: int = 7, calibrate: bool = True, threads: int = 0) -> dict:
+                     seed: int = 7, calibrate: bool = True, threads: int = 0, sun: dict | None = None) -> dict:
     H, W = plate8.shape[:2]
     intr = room.intr().scaled(W, H)
     stats = surface_stats(plate8, seg)
@@ -109,7 +109,10 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
         "albedo_mean": stats["albedo_mean"],
         "illuminant": stats["illuminant"],
         "lighting": {"calibrate": calibrate, "calib_mask_path": str(mask_path),
-                     "window_color": stats["illuminant"], "world_color": stats["illuminant"]},
+                     "window_color": stats["illuminant"], "world_color": stats["illuminant"],
+                     "sun": ({"direction": sun["direction"], "angle_deg": 0.6,
+                              "color": [float(c) for c in np.clip(np.asarray(stats["illuminant"]) * [1.04, 1.0, 0.94], 0.5, 1.6)]}
+                             if sun else None)},
         "items": scheduled,
         "render": {"fps": fps, "n_frames": n_frames, "samples": samples, "device": device, "denoise": True,
                    "motion_blur": motion_blur, "shutter": 0.5, "seed": seed, "threads": threads,
