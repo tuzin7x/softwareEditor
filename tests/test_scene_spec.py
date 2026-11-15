@@ -11,7 +11,7 @@ def test_rug_pattern_and_colors_are_mapped():
 
 
 def test_unknown_rug_pattern_falls_back_safely():
-    assert normalize_procedural_params("rug", {"pattern": "persa"})["pattern"] == "solid_border"
+    assert normalize_procedural_params("rug", {"pattern": "persa"})["pattern"] == "persian"
     assert normalize_procedural_params("rug", {"pattern": "xyz"})["pattern"] == "solid_border"
 
 

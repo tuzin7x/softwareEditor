@@ -55,3 +55,21 @@ def test_books_enter_one_by_one():
     plans = ch.plan_parts(item, names)
     starts = [p.start for p in sorted(plans, key=lambda p: p.name)]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)
+
+
+def test_procedural_part_tags_take_priority():
+    item = {"start": 0.0, "duration": 1.0, "role": "curtain", "motion": "slide", "size": [1.6, 0.12, 2.5]}
+    tags = {"curtain_rod": (0, "slide"), "curtain_panel_l": (1, "unfold"), "curtain_panel_r": (1, "unfold")}
+    plans = {p.name: p for p in ch.plan_parts(item, list(tags), tags)}
+    assert plans["curtain_rod"].motion == "slide"
+    assert plans["curtain_panel_l"].motion == "unfold"
+    assert plans["curtain_panel_l"].start > plans["curtain_rod"].start
+    p = plans["curtain_panel_l"]
+    assert p.pose(p.start + 0.05).sz < 0.5 and abs(p.pose(p.start + 5).sz - 1) < 1e-9
+
+
+def test_settle_lands_softly():
+    p = ch.PartPlan("duvet", "settle", start=0.0, duration=0.8)
+    assert p.pose(0.0).dz > 0 and p.pose(0.0).fade == 0.0
+    assert all(p.pose(t / 100).dz >= -1e-9 for t in range(0, 200))
+    assert p.pose(10).key() == ch.REST.key()

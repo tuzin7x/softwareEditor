@@ -69,6 +69,10 @@ contêiner Linux sem GPU): `python -m mobilia.cli hardware` ou `scripts/diagnost
 Blender roda em **outro processo** (a VRAM do PyTorch já foi devolvida). Em GPUs RTX o Cycles usa OptiX;
 o denoiser OIDN roda na GPU.
 
+**Render incremental (experimental, desligado):** re-renderizar só a região das peças em movimento
+reduziu a área renderizada em ~14% na cena de teste. Mas sombras suaves junto à parede ultrapassam a
+região e deixaram emendas sutis, então a qualidade venceu e o modo fica desligado (`render.incremental`).
+
 **Otimizações de render (implementadas):**
 - *border* por quadro: só a região da tela ocupada pelos móveis (+ margem de sombra) é renderizada;
 - quadros estáticos são reaproveitados (assinatura de pose; o "hold" final custa 1 render);
@@ -119,6 +123,18 @@ luz. A cor da luz é a do iluminante da foto (teto ou paredes claras), então m�
 mesmo "branco" da foto. Na foto de teste, o erro relativo do ajuste foi de 20–29%. É um modelo de luz
 simples, mas a exposição e o balanço de branco dos móveis ficam coerentes com a foto.
 
+**Sol direto (validado na foto de teste):** manchas de sol no piso são detectadas e a direção do sol é
+estimada por busca global (azimute × elevação). O critério é que as partes transparentes das janelas,
+projetadas no piso, expliquem as manchas (F0,5 entre projeção e manchas; precisão ≥ 60%). Na foto de
+teste, o resultado foi azimute ~139° e elevação ~51°, consistente em 1536 e 1920 px, com 95–99% da
+área das manchas explicada. A luz solar entra pelos recortes das janelas e sua intensidade é a 3ª
+base da calibração. Sem manchas confiáveis, o sol não é usado.
+
+**Objetos que já existem na foto** (armários, eletrodomésticos, porta aberta, colunas) viram uma malha
+de oclusão triangulada a partir da nuvem de pontos do MoGe-2, recuada 1,2% ao longo do raio. Ela também
+é *shadow catcher*: oculta os móveis atrás dela e recebe as sombras dos móveis à frente (validado na
+foto da cozinha de teste).
+
 **Correções automáticas de assets:** vidro de quadros/vitrines vira "vidro arquitetônico" (senão o
 Cycles bloqueia a luz e a arte fica preta); peças com frente fora de −Y recebem `yaw_fix`.
 
@@ -155,12 +171,27 @@ o vídeo mostra exatamente essas funções.
 - A UI (PySide6) segue o fluxo importar foto → escolher ambiente → gerar → exportar. O pipeline roda
   sempre num **processo separado**, com eventos JSON linha a linha (`mobilia/jobs.py`). Isso dá
   isolamento de falhas, liberação de VRAM e cancelamento seguro.
-- Lote: a CLI (`python -m mobilia.cli run ...`) e a fila da UI usam o mesmo contrato. Cada trabalho
-  tem sua pasta com todos os intermediários e um `report.json`.
+- Lote: a CLI (`python -m mobilia.cli run ...`, `python -m mobilia.cli batch --dir fotos/ --out videos/`
+  com CSV opcional `arquivo,ambiente`) e a fila da UI usam o mesmo contrato. Cada trabalho tem sua pasta
+  com todos os intermediários e um `report.json`.
+- Uso offline: `python -m mobilia.cli prefetch` baixa os pesos dos modelos e todos os assets do
+  catálogo; depois disso nada mais é baixado.
 - Empacotamento Windows: um `.exe` leve (UI) e um *runtime* pesado (Python + PyTorch CUDA + Blender
   bpy + modelos), instalado no primeiro uso em `%LOCALAPPDATA%\MobiliaStudio`. Detalhes em `packaging/`.
 
-## 9. Pastas de um trabalho
+## 9. Confirmação independente (pesquisa no código-fonte do Cycles)
+
+A pesquisa técnica (`PESQUISA_TECNOLOGIAS.md`) leu o código-fonte do Cycles e confirmou, sem
+contradições, os comportamentos medidos aqui:
+- `Combined` contém só o CG, com alfa pré-multiplicado; o passe Shadow Catcher é a razão
+  (completo − matte) / só-catcher, e a composição é `C.rgb + (1 − C.a)·foto·SC`;
+- catcher emissivo dilui a sombra;
+- luzes criadas via Python contam como luz "real" e o *world* também.
+
+Melhoria futura sugerida: material de catcher com `Light Path › Is Camera Ray` (difuso para a câmera,
+emissão da foto para os demais raios), para os móveis refletirem o ambiente real sem diluir sombras.
+
+## 10. Pastas de um trabalho
 
 ```
 <trabalho>/

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import sys
 import time
 from pathlib import Path
@@ -433,7 +432,7 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
     from PIL import Image
 
     t0 = time.time()
-    W, H = spec["width"], spec["height"]
+    W = spec["width"]
     cw = int(spec["render"].get("calib_width", 240))
     pct = max(5, min(100, int(round(100 * cw / W))))
     old = (sc.render.resolution_percentage, sc.cycles.samples, sc.render.use_motion_blur)
@@ -835,7 +834,6 @@ def main(spec_path: str) -> None:
         emit(event="log", level="info", message="Calibrando a luz pela foto...")
         calib = calibrate(sc, spec, room_objs, lights, out_dir)
         wp, ws, sun_s = calib["window_power_per_m2"], calib["ambient_strength"], calib["sun_strength"]
-        ratio = calib["color_ratio"]
         # a cor da luz vem do iluminante estimado da foto; a razão por canal é só diagnóstico
         emit(event="calibration", **calib)
     else:
@@ -866,7 +864,7 @@ def main(spec_path: str) -> None:
 
                 f0 = max(1, int(round(item["start"] * fps)))
                 f1 = int(round((item["start"] + item["duration"]) * fps))
-                rt["unroll"] = (lambda r=root, a=f0, b=f1: animate_rug_unroll(r, a, b))
+                rt["unroll"] = (lambda r=root, a=f0, b=f1: animate_rug_unroll(r, a, b, substeps=2))
                 rt["unroll_range"] = (f0, f1)
                 # durante o desenrolar a peça já aparece (fade rápido) sem "esticar"
                 for p in parts:

@@ -20,7 +20,7 @@ from . import choreography as ch
 
 
 _RUG_PATTERN_MAP = {"geometrico": "berber", "berbere": "berber", "berber": "berber", "listras": "stripes",
-                    "stripes": "stripes", "persa": "solid_border", "borda": "solid_border", "liso": "solid_border",
+                    "stripes": "stripes", "persa": "persian", "persian": "persian", "borda": "solid_border", "liso": "solid_border",
                     "solid_border": "solid_border"}
 
 

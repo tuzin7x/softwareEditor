@@ -1,0 +1,61 @@
+{"event": "progress", "stage": "preparo", "fraction": 0.0, "message": "Detectando hardware"}
+{"event": "log", "level": "info", "message": "Perfil: cpu — Sem GPU NVIDIA utilizável: modo CPU (lento, qualidade de prévia). | qualidade: previa"}
+{"event": "progress", "stage": "preparo", "fraction": 0.02, "message": "Foto 1920×1440 → vídeo 960×720"}
+{"event": "progress", "stage": "analise", "fraction": 0.029, "message": "Estimando profundidade e câmera (MoGe-2)"}
+{"event": "progress", "stage": "analise", "fraction": 0.119, "message": "Identificando piso, paredes, janelas e portas (OneFormer)"}
+{"event": "progress", "stage": "analise", "fraction": 0.182, "message": "Reconstruindo a sala em 3D"}
+{"event": "preview", "path": "/tmp/claude-0/poc_sala/analise/analise_overlay.jpg"}
+{"event": "log", "level": "info", "message": "Sol direto detectado: elevação 52°, 2 mancha(s) no piso (precisão 95%)"}
+{"event": "log", "level": "info", "message": "Sala: câmera a 1.69 m, pé-direito 2.45 m, 4 paredes, 4 aberturas, FOV 65°"}
+{"event": "progress", "stage": "layout", "fraction": 0.205, "message": "Escolhendo móveis e posições ideais"}
+{"event": "preview", "path": "/tmp/claude-0/poc_sala/layout_overlay.jpg"}
+{"event": "log", "level": "info", "message": "Layout: 13 itens, estilo moderno"}
+{"event": "progress", "stage": "assets", "fraction": 0.255, "message": "Baixando/verificando modelos 3D (CC0)"}
+{"event": "progress", "stage": "assets", "fraction": 0.3, "message": "13 modelos prontos"}
+{"event": "progress", "stage": "render", "fraction": 0.3, "message": "Montando a cena 3D e calibrando a luz pela foto"}
+{"event": "log", "level": "info", "message": "Calibrando a luz pela foto..."}
+{"event": "log", "level": "info", "message": "Luz calibrada pela foto (erro relativo 23%)"}
+{"event": "log", "level": "info", "message": "Cena montada: 13 itens, dispositivo CPU"}
+{"event": "progress", "stage": "render", "fraction": 0.3026, "message": "Renderizando quadro 1/231 (24.6 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3052, "message": "Renderizando quadro 2/231 (19.1 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3078, "message": "Renderizando quadro 3/231 (13.8 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3104, "message": "Renderizando quadro 4/231 (13.9 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.313, "message": "Renderizando quadro 5/231 (13.0 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3156, "message": "Renderizando quadro 6/231 (14.8 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3182, "message": "Renderizando quadro 7/231 (9.9 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3208, "message": "Renderizando quadro 8/231 (9.9 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3234, "message": "Renderizando quadro 9/231 (10.3 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.326, "message": "Renderizando quadro 10/231 (10.1 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3286, "message": "Renderizando quadro 11/231 (10.7 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3312, "message": "Renderizando quadro 12/231 (10.5 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3338, "message": "Renderizando quadro 13/231 (10.6 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3364, "message": "Renderizando quadro 14/231 (11.2 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.339, "message": "Renderizando quadro 15/231 (11.8 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3416, "message": "Renderizando quadro 16/231 (11.0 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3442, "message": "Renderizando quadro 17/231 (11.6 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3468, "message": "Renderizando quadro 18/231 (11.8 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3494, "message": "Renderizando quadro 19/231 (12.4 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3519, "message": "Renderizando quadro 20/231 (26.5 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3545, "message": "Renderizando quadro 21/231 (28.7 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3571, "message": "Renderizando quadro 22/231 (26.6 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3597, "message": "Renderizando quadro 23/231 (25.4 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3623, "message": "Renderizando quadro 24/231 (26.1 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3649, "message": "Renderizando quadro 25/231 (23.2 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3675, "message": "Renderizando quadro 26/231 (29.1 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3701, "message": "Renderizando quadro 27/231 (27.6 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3727, "message": "Renderizando quadro 28/231 (23.4 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3753, "message": "Renderizando quadro 29/231 (30.2 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3779, "message": "Renderizando quadro 30/231 (31.1 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3805, "message": "Renderizando quadro 31/231 (26.5 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3831, "message": "Renderizando quadro 32/231 (21.2 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3857, "message": "Renderizando quadro 33/231 (21.7 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3883, "message": "Renderizando quadro 34/231 (19.3 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3909, "message": "Renderizando quadro 35/231 (19.3 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3935, "message": "Renderizando quadro 36/231 (37.5 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3961, "message": "Renderizando quadro 37/231 (39.8 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.3987, "message": "Renderizando quadro 38/231 (35.8 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.4013, "message": "Renderizando quadro 39/231 (30.5 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.4039, "message": "Renderizando quadro 40/231 (26.0 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.4065, "message": "Renderizando quadro 41/231 (26.2 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.4091, "message": "Renderizando quadro 42/231 (25.7 s/quadro)"}
+{"event": "progress", "stage": "render", "fraction": 0.4117, "message": "Renderizando quadro 43/231 (26.9 s/quadro)"}

@@ -21,7 +21,7 @@ from PIL import Image
 
 from . import __version__
 from .config import AppConfig
-from .hardware import choose_profile, detect_hardware, nvenc_available
+from .hardware import choose_profile, detect_hardware
 from .jobs import JobRequest, JobResult, ProgressEmitter
 from .photo import load_photo
 
@@ -84,7 +84,7 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     from .analysis.segmentation import SegmentationResult
     from .composite.compositor import Compositor, LayerAccumulator, load_render_passes
     from .render.scene_spec import build_scene_spec
-    from .video.encoder import EncodeSettings, VideoWriter, decode_frames, ffmpeg_exe, psnr
+    from .video.encoder import EncodeSettings, VideoWriter, decode_frames, psnr
 
     cfg = AppConfig()
     t0 = time.time()

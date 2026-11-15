@@ -140,8 +140,30 @@ def motion_spread(t: float, dur: float) -> Pose:
     return Pose(sy=0.02 + 0.98 * x, fade=smoothstep(0.0, dur * 0.25, t))
 
 
+def motion_unfold(t: float, dur: float) -> Pose:
+    """Cortinas: o painel "desce" a partir do varão (escala Z de 0 a 1 no pivô do topo)."""
+    if t < 0:
+        return HIDDEN
+    x = ease_out_cubic(t / dur)
+    sway = 0.012 * damped_spring(t - dur * 0.85, 1.6, 0.4)
+    return Pose(sz=max(0.02, x), rx=sway, fade=smoothstep(0.0, dur * 0.2, t))
+
+
+def motion_settle(t: float, dur: float, height: float = 0.06) -> Pose:
+    """Tecidos (edredom, manta, almofadas): pousam de pouca altura e "assentam" com squash leve."""
+    if t < 0:
+        return HIDDEN
+    t_fall = dur * 0.45
+    fade = smoothstep(0.0, t_fall * 0.5, t)
+    if t < t_fall:
+        x = t / t_fall
+        return Pose(dz=height * (1 - x * x), fade=fade)
+    sq = 0.035 * damped_spring(t - t_fall, 2.0, 0.6)
+    return Pose(sx=1 + sq * 0.4, sy=1 + sq * 0.4, sz=1 - sq, fade=1.0)
+
+
 MOTIONS = {"drop": motion_drop, "slide": motion_slide_down, "grow": motion_grow, "rise": motion_rise,
-           "spread": motion_spread}
+           "spread": motion_spread, "unfold": motion_unfold, "settle": motion_settle}
 
 
 # ------------------------------------------------------------------ linha do tempo
@@ -171,6 +193,8 @@ class PartPlan:
             return fn(t, self.duration, self.params.get("start_scale", 0.15))
         if self.motion == "rise":
             return fn(t, self.duration, self.params.get("depth", 0.06))
+        if self.motion == "settle":
+            return fn(t, self.duration, self.params.get("settle_height", 0.06))
         return fn(t, self.duration)
 
     @property
@@ -247,7 +271,11 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
     motion = item.get("motion", "drop")
     size_z = item.get("size", [0, 0, 1])[2] or 1.0
     h = drop_height(role, size_z, item.get("mount", "floor"))
-    if motion in ("slide", "unroll", "spread") or len(part_names) <= 1:
+    # assets procedurais trazem o movimento de cada peça (ex.: cortina = varão desliza,
+    # painéis desdobram); eles têm prioridade sobre o movimento genérico do papel
+    tagged = bool(part_tags) and motion != "unroll" and any(
+        part_tags.get(n, (0, ""))[1] in MOTIONS for n in part_names)
+    if not tagged and (motion in ("slide", "unroll", "spread") or len(part_names) <= 1):
         m = "spread" if motion == "unroll" else motion
         params = {"height": h, "size": size_z, "dist": 0.22}
         return [PartPlan(n, m, start, dur, params) for n in part_names]
