@@ -1,0 +1,91 @@
+"""Linha de comando / processo de trabalho.
+
+Uso:
+  python -m mobilia.cli run --photo sala.jpg --room sala --out video.mp4 [--quality final] [--json]
+  python -m mobilia.cli hardware [--json]
+  python -m mobilia.cli analyze --photo sala.jpg --out pasta/
+
+Com ``--json`` cada evento de progresso é impresso como uma linha JSON (protocolo em
+mobilia/jobs.py) — é assim que a interface gráfica acompanha o trabalho.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import traceback
+
+
+def _cmd_run(a) -> int:
+    from .jobs import JobRequest, ProgressEmitter
+    from .pipeline import run_job
+
+    def human(ev):
+        if ev["event"] == "progress":
+            print(f"[{ev['fraction'] * 100:5.1f}%] {ev['message']}", flush=True)
+        elif ev["event"] in ("log", "error"):
+            print(f"{ev['event'].upper()}: {ev['message']}", flush=True)
+        elif ev["event"] == "done":
+            print(f"Pronto: {ev['output']}", flush=True)
+
+    em = ProgressEmitter(stream=sys.stdout) if a.json else ProgressEmitter(callback=human)
+    req = JobRequest(photo_path=a.photo, room_type=a.room, output_path=a.out, quality=a.quality,
+                     work_dir=a.work_dir, seed=a.seed)
+    try:
+        req.validate()
+        res = run_job(req, em)
+        em.done(res)
+        return 0
+    except KeyboardInterrupt:
+        em.error("Cancelado pelo usuário.")
+        return 130
+    except Exception as e:  # erro reportado à UI com detalhe técnico
+        em.error(str(e) or e.__class__.__name__, traceback.format_exc())
+        return 1
+
+
+def _cmd_hardware(a) -> int:
+    from .hardware import choose_profile, detect_hardware
+
+    rep = detect_hardware()
+    prof = choose_profile(rep)
+    if a.json:
+        out = json.loads(rep.to_json())
+        out["profile"] = prof.__dict__
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(rep.to_json())
+        print(f"Perfil: {prof.name} — {prof.description}")
+    return 0
+
+
+def _cmd_analyze(a) -> int:
+    from .pipeline import analyze_photo
+
+    analyze_photo(a.photo, a.out)
+    print(f"Análise salva em {a.out}")
+    return 0
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="mobilia", description="Mobília Studio — decoração virtual em vídeo")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run", help="gera o vídeo de decoração a partir de uma foto")
+    r.add_argument("--photo", required=True)
+    r.add_argument("--room", required=True, help="sala | quarto | cozinha | banheiro | escritorio | sala_jantar")
+    r.add_argument("--out", required=True)
+    r.add_argument("--quality", default="auto", choices=["auto", "previa", "final"])
+    r.add_argument("--work-dir", default=None)
+    r.add_argument("--seed", type=int, default=7)
+    r.add_argument("--json", action="store_true", help="eventos de progresso em JSON (uso pela UI)")
+    h = sub.add_parser("hardware", help="mostra GPU/VRAM detectadas e o perfil escolhido")
+    h.add_argument("--json", action="store_true")
+    an = sub.add_parser("analyze", help="só a análise da foto (debug)")
+    an.add_argument("--photo", required=True)
+    an.add_argument("--out", required=True)
+    a = p.parse_args(argv)
+    return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
