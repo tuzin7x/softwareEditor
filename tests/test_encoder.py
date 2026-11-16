@@ -74,3 +74,42 @@ def test_codec_choice(monkeypatch):
     assert encoder.choose_codec(gpu=True) == "libx264"
     assert EncodeSettings().preset == "medium"
     assert "-preset" in (a := encoder._codec_args(EncodeSettings(codec="h264_nvenc"), 24)) and "p7" in a
+
+
+def test_nvenc_probe_uses_real_encode_options(monkeypatch):
+    """O teste do NVENC roda com as opções do encode do vídeo (preset p7, AQ temporal...): uma GPU
+    que abre o NVENC "puro" mas não tem um desses recursos não pode passar no teste e derrubar o
+    FFmpeg no primeiro quadro, já com o render em andamento. O teste pode correr numa thread no
+    início do trabalho (o resultado é guardado uma vez por processo)."""
+    import subprocess
+    import threading
+
+    from mobilia import hardware
+    from mobilia.video import encoder
+
+    cmds = []
+
+    class R:
+        returncode = 0
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: cmds.append(cmd) or R())
+    monkeypatch.setattr(encoder, "_NVENC", {})
+    monkeypatch.delenv(encoder.ENV_CODEC, raising=False)
+    assert encoder.nvenc_available() is True and len(cmds) == 1
+    want = encoder._codec_args(EncodeSettings(codec="h264_nvenc"), 24)
+    cmd = cmds[0]
+    i = cmd.index("-c:v")
+    assert cmd[i:i + len(want)] == want and "-temporal-aq" in cmd and "p7" in cmd
+    assert encoder.nvenc_available() is True and len(cmds) == 1          # uma vez por processo
+    # sem opções extras, o teste antigo continua disponível
+    assert hardware.nvenc_available("ffmpeg") is True and "-temporal-aq" not in cmds[-1]
+
+    monkeypatch.setattr(encoder, "_NVENC", {})
+    done = threading.Event()
+    monkeypatch.setattr(encoder, "nvenc_available", lambda: done.set())
+    monkeypatch.setenv(encoder.ENV_CODEC, "libx264")
+    encoder.probe_nvenc_background()                     # codec forçado: nem testa
+    assert not done.wait(0.2)
+    monkeypatch.delenv(encoder.ENV_CODEC)
+    encoder.probe_nvenc_background()
+    assert done.wait(5)

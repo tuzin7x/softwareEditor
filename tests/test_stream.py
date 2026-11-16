@@ -213,3 +213,27 @@ def test_stream_failure_stops_and_keeps_exr(tmp_path, monkeypatch):
     assert not (d / "f_00002.exr").exists()             # já escrito e conferido antes da falha
     assert (d / "f_00004.exr").exists() and (d / "f_00007.exr").exists()
     assert not (tmp_path / "v.mp4").exists() and not list(tmp_path.glob("v.partial*"))
+
+
+def test_plate_is_read_only_for_the_compositor(tmp_path, monkeypatch):
+    """A referência da verificação é o mesmo buffer que o compositor lê (e os quadros só-foto são
+    ele): uma escrita nele em memória mudaria tudo junto sem nenhuma conferência perceber. A placa
+    do fluxo é uma cópia só de leitura: o trabalho para, sem MP4, e a foto de quem chamou fica
+    intacta."""
+    from mobilia import pipeline
+    from mobilia.composite.compositor import Compositor
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _job(tmp_path)
+    before = plate8.copy()
+    orig = Compositor.composite
+
+    def buggy(self, frame, *a, **kw):
+        out, st = orig(self, frame, *a, **kw)
+        self.photo8[H - 1, W - 1] = 0                    # "otimização" que escreve na placa
+        return out, st
+
+    monkeypatch.setattr(Compositor, "composite", buggy)
+    with pytest.raises(RuntimeError, match="read-only|somente leitura"):
+        pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7, ProgressEmitter())
+    assert np.array_equal(plate8, before) and not (tmp_path / "v.mp4").exists()

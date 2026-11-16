@@ -77,7 +77,11 @@ class StreamComposer:
         self.t0 = time.perf_counter()
         self.work = Path(work)
         self.frames_dir = self.work / "render" / "frames"
-        self.plate8 = plate8
+        # placa imutável também na memória: o compositor lê este mesmo buffer, a verificação o usa
+        # como referência e os quadros só-foto são ele. Uma escrita nele (bug) mudaria os três
+        # juntos sem nenhuma conferência perceber; só de leitura, ela vira erro na hora.
+        self.plate8 = np.array(plate8, copy=True)        # o Compositor ainda exige uint8
+        self.plate8.flags.writeable = False
         self.H, self.W = plate8.shape[:2]
         self.fps = int(fps)
         self.em = em

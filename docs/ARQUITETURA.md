@@ -218,9 +218,12 @@ renderiza os quadros seguintes: depois do último render sobra só a "cauda".
   foto, e dentro dele cada valor intermediário é igual ao do quadro inteiro: a saída é a mesma byte
   a byte (testado; na sala de teste os 251 quadros mestres saíram idênticos aos da versão anterior).
   As camadas vêm do EXR recortado direto para esse retângulo, sem buffers do quadro inteiro.
-- A placa (ruído, nitidez e grão da foto) é estimada numa thread logo no início do render.
+- A placa (ruído, nitidez e grão da foto) é estimada numa thread logo no início do render. Na
+  memória ela é uma cópia só de leitura: o compositor, a verificação e os quadros só-foto usam o
+  mesmo buffer, e uma escrita nele (bug) vira erro em vez de mudar os três juntos sem ninguém ver.
 - Codificador: NVENC quando a GPU NVIDIA consegue codificar (`MOBILIA_CODIFICADOR` força um),
-  senão libx264 CRF 14 preset `medium` (~1,7× mais rápido que `slow`, −0,3 dB de PSNR).
+  senão libx264 CRF 14 preset `medium` (~1,7× mais rápido que `slow`, −0,3 dB de PSNR). O teste do
+  NVENC usa as mesmas opções do encode (preset, AQ temporal...) e roda numa thread durante a análise.
 - Se o worker não anunciar os quadros (versão antiga), tudo é composto no fim a partir do
   `frames.json`; se os anúncios não baterem com o arquivo, o trabalho para com erro.
 - `recompor` usa o mesmo caminho com todos os quadros de uma vez: na sala de teste a 960 × 720 (251

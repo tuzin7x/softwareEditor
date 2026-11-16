@@ -56,16 +56,28 @@ _NVENC_LOCK = threading.Lock()
 def nvenc_available() -> bool:
     """O FFmpeg consegue abrir o NVENC nesta máquina? (GPU NVIDIA + driver; testado uma vez por
     processo com um encode minúsculo de verdade, porque o encoder pode estar compilado no FFmpeg
-    sem haver GPU que o rode)."""
+    sem haver GPU que o rode). O teste usa as MESMAS opções do encode do vídeo (``_codec_args``):
+    se a GPU não tiver um recurso pedido (p. ex. AQ temporal), o vídeo sai em x264 em vez de o
+    FFmpeg morrer no primeiro quadro, já com o render em andamento."""
     with _NVENC_LOCK:
         if "ok" not in _NVENC:
             from ..hardware import nvenc_available as probe
 
             try:
-                _NVENC["ok"] = bool(probe(ffmpeg_exe()))
+                _NVENC["ok"] = bool(probe(ffmpeg_exe(), _codec_args(EncodeSettings(codec="h264_nvenc"), 24)))
             except Exception:
                 _NVENC["ok"] = False
         return _NVENC["ok"]
+
+
+def probe_nvenc_background() -> None:
+    """Faz o teste do NVENC (~1 s: FFmpeg + contexto CUDA) numa thread, já no início do trabalho,
+    para ele não ficar no caminho crítico logo antes do render (``choose_codec`` espera o
+    resultado, se ainda não saiu). Não faz nada quando ``MOBILIA_CODIFICADOR`` força o codec."""
+    forced = os.environ.get(ENV_CODEC, "").strip().lower()
+    if (forced and forced != "auto") or "ok" in _NVENC:
+        return
+    threading.Thread(target=nvenc_available, name="teste-nvenc", daemon=True).start()
 
 
 def choose_codec(gpu: bool) -> str:

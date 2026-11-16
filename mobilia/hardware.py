@@ -207,12 +207,18 @@ def choose_profile(rep: HardwareReport) -> Profile:
                    f"{gpu.name} ({vram // 1024} GB): pouca VRAM, modelo de geometria menor.")
 
 
-def nvenc_available(ffmpeg_exe: str) -> bool:
-    """Testa se o FFmpeg consegue abrir o encoder NVENC (requer GPU NVIDIA + driver)."""
+def nvenc_available(ffmpeg_exe: str, codec_args: list[str] | None = None) -> bool:
+    """Testa se o FFmpeg consegue abrir o encoder NVENC (requer GPU NVIDIA + driver).
+
+    ``codec_args`` são as opções do encode de verdade (preset, AQ temporal, perfil...): uma GPU
+    que abre o NVENC "puro" mas não tem um desses recursos passaria no teste e só falharia no
+    meio do trabalho, sem volta para o x264."""
+    args = list(codec_args) if codec_args else ["-c:v", "h264_nvenc"]
     try:
         res = subprocess.run(
             [ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-             "color=c=black:s=256x256:d=0.1", "-c:v", "h264_nvenc", "-f", "null", "-"],
+             "color=c=black:s=256x256:d=0.1", "-vf", "format=yuv420p", *args, "-pix_fmt", "yuv420p",
+             "-f", "null", "-"],
             capture_output=True, text=True, timeout=30,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )

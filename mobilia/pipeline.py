@@ -161,6 +161,10 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             em.stage("preparo", 0.0, "Detectando hardware")
             hw = detect_hardware()
             prof = choose_profile(hw)
+            if prof.torch_device == "cuda":
+                from .video.encoder import probe_nvenc_background
+
+                probe_nvenc_background()        # teste do NVENC durante a análise, fora do caminho crítico
             q = _quality(req, prof)
             em.log(f"Perfil: {prof.name} — {prof.description} | qualidade: {q['name']}")
             if first:
