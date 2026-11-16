@@ -270,7 +270,7 @@ def unroll_strip(out_dir: Path, size_px: int, samples: int, device: str, n_frame
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Prévia dos assets procedurais do Mobília Studio")
+    ap = argparse.ArgumentParser(description="Prévia dos assets procedurais do 7xAi")
     ap.add_argument("--out", default="/tmp/claude-0/proc_assets")
     ap.add_argument("--samples", type=int, default=32)
     ap.add_argument("--size", type=int, default=480)

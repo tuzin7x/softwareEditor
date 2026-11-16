@@ -56,7 +56,7 @@ STEP_LABELS = {
     "python": "Baixando o Python embutido",
     "pip": "Preparando o instalador de pacotes",
     "dependencias": "Instalando PyTorch (CUDA), Blender e bibliotecas de IA (~4 GB)",
-    "app": "Copiando o motor do Mobília Studio",
+    "app": "Copiando o motor do 7xAi",
     "modelos": "Baixando os modelos de IA (~2 GB)",
     "ativos": "Baixando os móveis 3D do catálogo (texturas 2k)",
     "aquecimento": "Preparando a GPU: kernels de render e modelos de IA (só desta vez)",

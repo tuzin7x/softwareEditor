@@ -180,7 +180,7 @@ def _cmd_analyze(a) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="mobilia", description="Mobília Studio — decoração virtual em vídeo")
+    p = argparse.ArgumentParser(prog="mobilia", description="7xAi — decoração virtual em vídeo")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="gera o vídeo de decoração a partir de uma foto")
     r.add_argument("--photo", required=True)

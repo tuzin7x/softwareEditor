@@ -175,5 +175,18 @@ def test_setup_dialog_text_for_update(app):
     title, text = intro_text({"done": [s for s in bootstrap.STEPS if s != "aquecimento"]})
     assert title.startswith("Atualização") and "preparando a GPU" in text
     _, text = intro_text({"done": ["python", "pip"]})
-    assert "instalando PyTorch" in text and "copiando o motor do Mobília Studio" in text
+    assert "instalando PyTorch" in text and "copiando o motor do 7xAi" in text
     assert "baixando os modelos de IA" in text
+
+
+def test_layout_1280x720_compact_fits(app, win):
+    """Tela baixa (1280x720 / 1366x768): modo compacto, nada passa da janela, botão principal visível."""
+    win.set_compact(True); app.processEvents()          # como faz _fit_to_screen ao abrir numa tela baixa
+    win.resize(1280, 720); app.processEvents()
+    assert win.size().height() == 720 and win._compact
+    win.load_photo(str(FX)); win.select_room("sala"); app.processEvents()
+    _shot(win, "6_1280x720_foto_e_ambiente")
+    bottom = win.btn_generate.mapTo(win, win.btn_generate.rect().bottomLeft()).y()
+    assert win.btn_generate.isVisible() and bottom < win.statusBar().y()
+    win.resize(1360, 820); app.processEvents()
+    assert not win._compact

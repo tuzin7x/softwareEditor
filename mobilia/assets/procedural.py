@@ -1863,7 +1863,7 @@ def animate_rug_unroll(root: bpy.types.Object, frame_start: int, frame_end: int,
     ``substeps``: shape keys por quadro (2 deixa o motion blur mais fiel).
     """
     if "mobilia_rug" not in root:
-        raise ValueError("O objeto não é um tapete procedural do Mobília Studio")
+        raise ValueError("O objeto não é um tapete procedural do 7xAi")
     if frame_end <= frame_start:
         raise ValueError("frame_end deve ser maior que frame_start")
     info = json.loads(root["mobilia_rug"])

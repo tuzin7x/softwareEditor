@@ -2,7 +2,7 @@
 
 A interface gráfica NUNCA roda o pipeline no próprio processo: ela inicia o
 processo de trabalho (``mobilia-worker run ...`` ou, no executável congelado,
-``MobiliaStudio.exe --worker run ...``) e lê eventos JSON, um por linha, na saída
+``7xAi.exe --worker run ...``) e lê eventos JSON, um por linha, na saída
 padrão. Isso isola falhas, libera a VRAM ao final e permite cancelar com segurança.
 
 Eventos (um objeto JSON por linha, campo "event"):

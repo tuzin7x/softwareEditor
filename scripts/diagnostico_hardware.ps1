@@ -1,4 +1,4 @@
-# Diagnóstico de hardware do Mobília Studio (Windows 10/11).
+# Diagnóstico de hardware do 7xAi (Windows 10/11).
 # Uso: clique com o botão direito > "Executar com o PowerShell"
 #   ou, num terminal:  powershell -ExecutionPolicy Bypass -File .\diagnostico_hardware.ps1
 # Não instala nada e não envia dados: só lê as informações e grava um relatório
@@ -8,7 +8,7 @@ $ErrorActionPreference = "SilentlyContinue"
 $out = New-Object System.Collections.Generic.List[string]
 function Linha($t) { $out.Add($t); Write-Host $t }
 
-Linha "=== Mobília Studio — diagnóstico de hardware ==="
+Linha "=== 7xAi — diagnóstico de hardware ==="
 Linha ("Data: " + (Get-Date -Format "yyyy-MM-dd HH:mm"))
 $os = Get-CimInstance Win32_OperatingSystem
 Linha ("Windows: " + $os.Caption + " build " + $os.BuildNumber + " (" + $os.OSArchitecture + ")")
