@@ -1,6 +1,6 @@
 # 7xAi V3: plano de implementação
 
-Data: 16/11/2026. Este plano junta 3 pesquisas (`r_staging`, `r_removal`, `r_catalog`), 3 protótipos em CPU (`p_staging`, `p_removal`, `p_cutout`) e 2 críticas (`critic_realism`, `critic_feasibility`), todos na pasta `scratchpad/v3/`. Nada no repositório foi alterado.
+Data: 16/11/2026. Este plano junta 2 pesquisas (`r_staging`, `r_removal`), 2 protótipos em CPU (`p_staging`, `p_removal`) e 2 críticas (`critic_realism`, `critic_feasibility`), todos na pasta `scratchpad/v3/`. Nada no repositório foi alterado.
 
 Comparativo visual do melhor quadro de cada abordagem: `scratchpad/v3/comparativo.jpg`.
 
@@ -15,7 +15,7 @@ Comparativo visual do melhor quadro de cada abordagem: `scratchpad/v3/comparativ
 1. **O motor principal da V3 deixa de ser o render 3D e passa a ser composição 2D com camadas feitas de pixels de foto real.** Um único motor de camadas atende os dois modos:
    - **Modo B, "foto mobiliada"** (o pedido atual do usuário, implementado **primeiro**): o software tira os móveis por trás. O vídeo começa na sala vazia, os móveis **da própria foto** voltam um a um com animação, e o vídeo termina **exatamente** na foto original.
    - **Modo A, "sala vazia → mobiliada"** (depois): um modelo de difusão com licença comercial (SDXL/RealVisXL + ControlNet de profundidade) **pinta** os móveis dentro da foto, guiado pelo layout automático atual. O mesmo motor de camadas do modo B separa e anima essas peças. A foto vazia real do cliente serve de fundo, então nesse modo não há inpainting de sala vazia.
-2. **A ideia de "PNG de móveis reais tirados da internet" fica descartada como motor.** O catálogo só serve como referência de estilo (fotos CC0 ou do próprio usuário), nunca colado na imagem.
+2. **PNG de móveis recortados não entra no 7xAi** (testado e reprovado: cara de adesivo, ângulo errado e licenças que não permitem uso comercial).
 3. **O motor v2 (Blender Cycles + Poly Haven CC0) fica como fallback determinístico** e como fonte do passe de profundidade (Z) do modo A. Não é apagado.
 
 ### 1.2 Evidências
@@ -23,10 +23,6 @@ Comparativo visual do melhor quadro de cada abordagem: `scratchpad/v3/comparativ
 | Abordagem | Nota do crítico (1–10) | Evidência | Por que sim ou não |
 |---|---|---|---|
 | v2 atual, render 3D | rejeitado pelo usuário | `comparativo.jpg`, painel 1 | "Parece 3D." |
-| PNG recortado, layout automático (p_cutout A) | **2** | `p_cutout/out/comp_A/composite_1440.jpg` | Erro de azimute de 50–85° entre a foto da peça e a parede. |
-| PNG recortado, melhor caso (p_cutout B) | **4,5** | `p_cutout/zoom_100pct.jpg` | "Adesivo": luz de cada peça diferente, halos, lixo da foto de origem (cesto, caneca, livro), elevação de câmera errada. A simulação de homografia (`r_catalog/sim/viewpoint_error.py`) mostra que um recorte só aguenta ±3–4° de ângulo. Seriam 180–360 fotos por peça. |
-| Híbrido PNG + SD1.5 (H55) | **5,5** | `p_cutout/out/comp_H55/composite_1440.jpg` | Mais fotográfico, mas muda o produto (SSIM 0,27–0,60) e continua preso à baixa resolução e à elevação das fontes. |
-| Licença do catálogo PNG | — | `r_catalog/RELATORIO.md` | Unsplash, Pexels e Pixabay proíbem embutir as fotos como biblioteca [M]. 3D-FUTURE, ABO e IKEA são não comerciais. O CC0 moderno praticamente não existe: no Commons só há fotos históricas, e os resultados CC0 do Openverse são ilustrações ou peças de museu. |
 | SDXL sobre o render CG (H1) | **2,5** | `p_staging/final_H1_full.jpg` | Mantém o visual CG. |
 | SDXL + depth no lugar (R2) | **4,5** | `p_staging/final_R2_full.jpg`, `critic_realism/r2_grid.jpg` | É o caminho certo para o modo A: escala e perspectiva corretas e aparência de foto em miniatura. Ainda tem móveis moles (upscale de 1,875×), objetos derretidos e, na animação, partes ocultas expostas (luminária sem base, poltrona sem metade). Só 1 de 13 gerações saiu boa. |
 | **Modo B: esvaziar e devolver (p_removal)** | **5** (o protótipo se deu 6) | `p_removal/out/antes_vazio_depois.jpg`, `p_removal/out/cmp_all.jpg`, `p_removal/out/video_final/video.mp4` | **Os móveis ficam 9/10**, porque são pixels reais. O último quadro é `array_equal` à foto (verificado também pelo crítico, após decodificar o MKV sem perdas). O ponto fraco é o 1º quadro, a sala vazia, que tem nota 3. |
@@ -383,6 +379,6 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
 - Comparativo: `scratchpad/v3/comparativo.jpg`.
 - Modo B: `p_removal/out/antes_vazio_depois.jpg`, `p_removal/out/cmp_all.jpg`, `p_removal/out/video_final/video.mp4`, `p_removal/out/video_final/video_log.json`.
 - Crítica: `critic_realism/rem_grid.jpg`, `critic_realism/rem_residuo.png`, `critic_realism/r2_grid.jpg`.
-- Modo A: `p_staging/final_R2_full.jpg`, `p_staging/video_staging_R2.mp4`, `p_cutout/folha_comparacao.jpg`.
-- Licenças: `critic_feasibility/RELATORIO.md` §1, `r_staging/RELATORIO.md`, `r_removal/RELATORIO.md`, `r_catalog/RELATORIO.md`.
+- Modo A: `p_staging/final_R2_full.jpg`, `p_staging/video_staging_R2.mp4`.
+- Licenças: `critic_feasibility/RELATORIO.md` §1, `r_staging/RELATORIO.md`, `r_removal/RELATORIO.md`.
 - Hashes dos pesos: `p_staging/models_sha256.txt`, `r_removal/RELATORIO.md` (big-lama).
