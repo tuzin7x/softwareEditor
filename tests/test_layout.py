@@ -581,7 +581,10 @@ def test_designer_narrative_rules_synthetic():
     assert front_feet_on_rug(sofa, rug_ok) and not front_feet_on_rug(sofa, rug_short)
     assert "pés dianteiros do sofá" in rug_sentence(rug_ok, [sofa, rug_ok], sofa)
     assert "pés dianteiros" not in rug_sentence(rug_short, [sofa, rug_short], sofa)
-    art = PlacedItem("wall_art_0", "wall_art", "proc:canvas_art", [0.1, 3.47, 1.2], 180.0,
+    # concordância: "da poltrona", não "do poltrona"
+    chair = PlacedItem("armchair_0", "armchair", "ph:x", [0.0, 3.0, 0.0], 0.0, size=[0.8, 0.9, 0.8])
+    assert "pés dianteiros da poltrona sobre ele" in rug_sentence(rug_ok, [chair, rug_ok], None)
+    art =PlacedItem("wall_art_0", "wall_art", "proc:canvas_art", [0.1, 3.47, 1.2], 180.0,
                      size=[1.2, 0.035, 0.8], mount="wall", wall_id=0)
     plant = PlacedItem("plant_large_0", "plant_large", "ph:potted_plant_01", [1.6, 3.2, 0.0], size=[0.6, 0.6, 1.1])
     assert item_below_art(art, [sofa, plant, rug_ok]) is sofa

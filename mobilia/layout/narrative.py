@@ -90,6 +90,11 @@ def _art(lbl: str) -> str:
     return "uma" if lbl in _FEM else "um"
 
 
+def _do(lbl: str) -> str:
+    """Contração "do"/"da" de acordo com o gênero do rótulo ("do sofá", "da poltrona")."""
+    return f"da {lbl}" if lbl in _FEM else f"do {lbl}"
+
+
 def _count(lbl: str, n: int) -> str:
     if n == 1:
         return lbl
@@ -255,9 +260,9 @@ def rug_sentence(rug: PlacedItem, items: list[PlacedItem], anc: PlacedItem | Non
         s += ", sob a cama"
     elif seats and len(on) == len(seats):
         s += ", com os pés dianteiros de todos os assentos sobre ele" if len(seats) > 1 \
-            else f", com os pés dianteiros do {label(seats[0].role)} sobre ele"
+            else f", com os pés dianteiros {_do(label(seats[0].role))} sobre ele"
     elif on:
-        s += f", com os pés dianteiros do {label(on[0].role)} sobre ele"
+        s += f", com os pés dianteiros {_do(label(on[0].role))} sobre ele"
     tables = [it for it in items if it.role in ("coffee_table", "dining_table") and _inside(rug, it.position[:2])]
     if tables:
         s += f"; {label(tables[0].role)} inteira sobre o tapete" if all(
