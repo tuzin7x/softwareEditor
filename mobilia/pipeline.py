@@ -22,6 +22,7 @@ from PIL import Image
 from . import __version__
 from .config import AppConfig
 from .hardware import choose_profile, detect_hardware
+from .render.layers import samples_by_layer
 from .jobs import JobRequest, JobResult, ProgressEmitter
 from .photo import load_photo
 from .telemetry import (ENV_T_CLIQUE, ETAPAS, Stopwatch, VramMonitor, env_time, stages_sum, torch_peak_mb,
@@ -38,9 +39,13 @@ def _quality(req: JobRequest, prof) -> dict:
     if q == "auto":
         q = "final" if gpu else "previa"
     if q == "previa":
-        return {"name": "previa", "long_edge": min(960, prof.max_long_edge), "samples": 24 if not gpu else 48,
+        s = 24 if not gpu else 48
+        return {"name": "previa", "long_edge": min(960, prof.max_long_edge), "samples": s,
+                "samples_layers": samples_by_layer(s, preview=True),
                 "fps": 24, "texture_res": "1k", "motion_blur": True}
-    return {"name": "final", "long_edge": prof.max_long_edge, "samples": prof.render_samples, "fps": 30,
+    # 24 fps (cinematográfico; o desfoque de movimento já está ligado): 20% menos quadros que 30
+    return {"name": "final", "long_edge": prof.max_long_edge, "samples": prof.render_samples,
+            "samples_layers": dict(prof.layer_samples), "fps": 24,
             "texture_res": "2k" if gpu else "1k", "motion_blur": True}
 
 
@@ -225,7 +230,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             seg.id2label, seg.model_id)
         hold_start, hold_end = cfg.video.hold_start_s, cfg.video.hold_end_s
         spec = build_scene_spec(room, layout, plate8, work / "plate.png", seg_plate, work, cfg.assets_dir,
-                                fps=q["fps"], samples=q["samples"], device=prof.render_device,
+                                fps=q["fps"], samples=q["samples"], samples_layers=q.get("samples_layers"),
+                                device=prof.render_device,
                                 texture_res=q["texture_res"], hold_start=hold_start, hold_end=hold_end,
                                 motion_blur=q["motion_blur"], seed=req.seed,
                                 sun=sun.to_dict() if sun is not None else None, occluders=occ)
@@ -387,6 +393,7 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
             "blender": tele.get("blender"),
             "threads": tele.get("threads"),
             "amostras_config": tele.get("samples_config", q.get("samples")),
+            "amostras_camadas": tele.get("samples_camadas", q.get("samples_layers")),
             "desempenho": summ["desempenho"],
             "orcamento": {"previsto_s": None, "spp_dinamico": None, "spp_marcos": None, "escala_cg": None,
                           "motivo": "controle de orçamento ainda não ativo"},

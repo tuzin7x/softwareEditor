@@ -53,9 +53,16 @@ class Profile:
     geometry_model: str          # id HF do MoGe
     geometry_tokens: int | None  # resolução interna do MoGe (None = padrão)
     render_device: str           # OPTIX | CUDA | CPU
-    render_samples: int
+    render_samples: int          # amostras do quadro final (hold); as outras camadas derivam dele
     max_long_edge: int
     description: str
+    layer_samples: dict | None = None   # {"final", "marco", "dinamico"} (ver render/layers.py)
+
+    def __post_init__(self) -> None:
+        from .render.layers import clamp_layers, samples_by_layer
+
+        self.layer_samples = clamp_layers(self.layer_samples or samples_by_layer(self.render_samples),
+                                          self.render_samples)
 
 
 def _ram_gb() -> float | None:

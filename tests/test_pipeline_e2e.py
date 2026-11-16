@@ -123,6 +123,7 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     # render: dispositivo efetivo, denoiser, camadas, por quadro, quadros
     r = rep["render"]
     assert r["dispositivo"] == "CPU" and r["denoiser_dispositivo"] == "CPU" and r["optix"] is False
+    assert set(r["amostras_camadas"]) == {"final", "marco", "dinamico"}
     q = r["quadros"]
     assert q["total"] == q["renderizados"] + q["reutilizados"] + q["so_foto"] and q["reutilizados"] > 0
     assert len(r["por_quadro"]) == q["renderizados"]

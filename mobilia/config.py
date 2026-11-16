@@ -36,7 +36,7 @@ SEGMENTATION_MODEL_ID = "shi-labs/oneformer_ade20k_swin_large"  # OneFormer ADE2
 class RenderSettings:
     """Parâmetros do render/vídeo. Os perfis de hardware ajustam estes valores."""
 
-    fps: int = 30
+    fps: int = 24                      # cinematográfico (desfoque de movimento ligado)
     max_long_edge: int = 1920          # resolução máxima do vídeo (lado maior)
     samples: int = 128                 # amostras Cycles por pixel (com denoise)
     preview_samples: int = 16

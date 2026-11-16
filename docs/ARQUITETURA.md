@@ -57,17 +57,26 @@ A análise do hardware é feita **na máquina do usuário** (este repositório f
 contêiner Linux sem GPU): `python -m mobilia.cli hardware` ou `scripts/diagnostico_hardware.ps1`
 (PowerShell puro, sem instalar nada). O perfil é escolhido automaticamente pela VRAM:
 
-| Perfil | VRAM | Geometria | Render | Resolução máx. | Amostras |
+| Perfil | VRAM | Geometria | Render | Resolução máx. | Amostras (final / marco / dinâmico) |
 |---|---|---|---|---|---|
-| ultra | ≥ 11 GB | MoGe-2 ViT-L fp16 | OptiX | 2560 px | 192 |
-| alta | 7,5–11 GB | MoGe-2 ViT-L fp16 | OptiX | 1920 px | 128 |
-| média | 5,5–7,5 GB | MoGe-2 ViT-L fp16 (tokens reduzidos) | OptiX | 1920 px | 96 |
-| econômica | < 5,5 GB | MoGe-2 ViT-B | OptiX/CUDA | 1600 px | 64 |
-| cpu | sem GPU NVIDIA | MoGe-2 ViT-B | CPU | 1280 px | 32 |
+| ultra | ≥ 11 GB | MoGe-2 ViT-L fp16 | OptiX | 2560 px | 192 / 96 / 48 |
+| alta | 7,5–11 GB | MoGe-2 ViT-L fp16 | OptiX | 1920 px | 128 / 64 / 32 |
+| média | 5,5–7,5 GB | MoGe-2 ViT-L fp16 (tokens reduzidos) | OptiX | 1920 px | 96 / 48 / 24 |
+| econômica | < 5,5 GB | MoGe-2 ViT-B | OptiX/CUDA | 1600 px | 64 / 32 / 16 |
+| cpu | sem GPU NVIDIA | MoGe-2 ViT-B | CPU | 1280 px | 32 / 32 / 16 |
+
+As amostras são **por camada de quadro** (`render/layers.py`, gravadas em `scene.json` como
+`render.samples_layers`): `final` é a cena completa em repouso (o *hold*, que nunca perde amostras),
+`marco` um quadro parado com parte dos itens e `dinamico` um quadro com alguma peça em movimento (o
+desfoque de movimento esconde o ruído residual). A amostragem adaptativa tem limiar 0,02 e mínimo
+explícito (8 nos dinâmicos, 32 nos parados). Enquanto cada quadro ainda é a cena inteira (antes do
+render em camadas), os 3 quadros dinâmicos logo antes de um quadro parado sobem as amostras em
+progressão geométrica, para o ruído não "pular" na entrada do *hold*. Vídeo final a 24 fps.
 
 **Gestão de VRAM:** nunca há dois modelos na GPU ao mesmo tempo. MoGe-2 → libera → OneFormer → libera →
 Blender roda em **outro processo** (a VRAM do PyTorch já foi devolvida). Em GPUs RTX o Cycles usa OptiX;
-o denoiser OIDN roda na GPU.
+o denoiser (guiado por albedo e normal) roda na GPU: OIDN quando o Cycles acha uma GPU compatível,
+senão o do OptiX; só sem GPU de render ele fica na CPU.
 
 **Render incremental (experimental, desligado):** re-renderizar só a região das peças em movimento
 reduziu a área renderizada em ~14% na cena de teste. Mas sombras suaves junto à parede ultrapassam a
@@ -78,7 +87,14 @@ região e deixaram emendas sutis, então a qualidade venceu e o modo fica deslig
 - quadros estáticos são reaproveitados (assinatura de pose; o "hold" final custa 1 render);
 - quadros sem móveis não são renderizados (são a própria foto);
 - semente fixa (`use_animated_seed = False`) → ruído estável, sem "fervura" entre quadros;
-- `use_persistent_data` entre quadros; amostragem adaptativa + denoise.
+- `use_persistent_data` entre quadros; amostragem adaptativa + denoise;
+- rebatimentos: difusos 4, brilho 2, transparência 8 (a calibração da luz usa os mesmos);
+- só os passes usados são gravados: um nó File Output no compositor grava Combined (RGBA) e Shadow
+  Catcher; os passes "Noisy" que o denoise acrescenta ao resultado ficam fora do EXR (valores
+  idênticos aos do `write_still`, que continua como plano B);
+- o mix transparente do fade só fica ligado enquanto a peça está em fade-in: depois o material volta
+  ao original (sem BSDF transparente, os raios de sombra não precisam avaliar o material);
+- a cauda invisível do assentamento não é renderizada (ver a seção 6).
 
 ## 4. Análise da cena (validado na foto de teste)
 
@@ -153,7 +169,14 @@ o vídeo mostra exatamente essas funções.
 
 - Ordem: tapete, depois peças grandes de trás para frente, depois médias, luminárias e plantas,
   quadros e por fim a decoração pequena (almofadas, vaso, bowl, livros).
-- Sobreposição: cada peça começa quando a anterior completou ~55% da sua duração.
+- Sobreposição: cada peça começa quando a anterior completou ~55% da sua duração, com no máximo
+  3 itens mudando na imagem ao mesmo tempo (o item só espera quando o limite seria passado; na sala
+  de teste isso nunca acontece e a linha do tempo fica igual).
+- Fim do assentamento: quando o deslocamento projetado de qualquer ponto da peça cai abaixo de
+  0,3 px (com a ampliação da câmera perto do item, `px_per_m` no `scene.json`) e o fade já terminou,
+  a pose vira **exatamente** a de repouso. Os quadros dessa cauda são iguais ao final e reaproveitados;
+  o fim nominal (início + 2,2 × duração) e o início do *hold* não mudam. Na sala de teste a 1920 px:
+  200 quadros renderizados a 30 fps antes, 153 a 24 fps agora.
 - Movimentos:
   - **queda** com aceleração e toque com squash sutil (≤ 2%), acomodação por mola amortecida;
   - **crescimento** das plantas (ease-out-back + balanço);

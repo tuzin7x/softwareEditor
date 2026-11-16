@@ -17,6 +17,7 @@ from ..layout import catalog
 from ..layout.model import Layout
 from ..photo import srgb_to_linear
 from . import choreography as ch
+from .layers import ADAPTIVE_MIN, ADAPTIVE_THRESHOLD, RAMP_FRAMES, clamp_layers
 
 
 _RUG_PATTERN_MAP = {"geometrico": "berber", "berbere": "berber", "berber": "berber", "listras": "stripes",
@@ -185,9 +186,34 @@ def wall_extensions(walls: list[dict], ext: float = 0.35, step: float = 0.01,
     return out
 
 
+def item_px_per_m(position, size, yaw_deg: float, cam_from_room: np.ndarray, intr: dict,
+                   safety: float = 1.15) -> float:
+    """Maior ampliação (px por m de deslocamento) da projeção na caixa do item em repouso.
+
+    Para um ponto da câmera (x, y, z), ‖∂(u, v)/∂p‖ = f/z · √(1 + (x/z)² + (y/z)²). O máximo
+    nos cantos e no centro da caixa, com uma folga, é o que ``choreography`` usa para decidir
+    quando o resto do assentamento fica abaixo de ``SNAP_PX``."""
+    w, d, h = (float(v) for v in (list(size) + [0, 0, 0])[:3])
+    c, s_ = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+    x0, y0, z0 = (float(v) for v in position)
+    pts = [[x0, y0, z0 + h / 2]]
+    for lx in (-w / 2, w / 2):
+        for ly in (-d / 2, d / 2):
+            for z in (z0, z0 + h):
+                pts.append([x0 + c * lx - s_ * ly, y0 + s_ * lx + c * ly, z])
+    P = np.asarray(pts) @ cam_from_room[:3, :3].T + cam_from_room[:3, 3]
+    f = max(float(intr["fx"]), float(intr["fy"]))
+    if np.any(P[:, 2] <= 0.05):
+        return round(ch.DEFAULT_PX_PER_M * safety, 1)
+    z = np.maximum(P[:, 2], 0.3)
+    gain = f / z * np.sqrt(1 + (P[:, 0] / z) ** 2 + (P[:, 1] / z) ** 2)
+    return round(float(gain.max()) * safety, 1)
+
+
 def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_path: Path,
-                     seg: SegmentationResult, work_dir: Path, assets_dir: Path, *, fps: int = 30,
-                     samples: int = 64, device: str = "AUTO", texture_res: str = "1k",
+                     seg: SegmentationResult, work_dir: Path, assets_dir: Path, *, fps: int = 24,
+                     samples: int = 64, samples_layers: dict | None = None, device: str = "AUTO",
+                     texture_res: str = "1k",
                      hold_start: float = 0.8, hold_end: float = 2.5, motion_blur: bool = True,
                      seed: int = 7, calibrate: bool = True, threads: int = 0, sun: dict | None = None,
                      occluders: tuple | None = None) -> dict:
@@ -203,8 +229,10 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                   max(extent[2], w.p0[0], w.p1[0]), max(extent[3], w.p0[1], w.p1[1])]
 
     raw_items = []
+    cam_from_room = room.cam_from_room()
     for it in layout.items:
         spec_item = asdict(it)
+        spec_item["px_per_m"] = item_px_per_m(it.position, it.size, it.yaw_deg, cam_from_room, intr.to_dict())
         try:
             a = catalog.get(it.asset_id)
             spec_item["yaw_fix"] = a.yaw_fix
@@ -248,7 +276,11 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                               "color": [float(c) for c in np.clip(np.asarray(stats["illuminant"]) * [1.04, 1.0, 0.94], 0.5, 1.6)]}
                              if sun else None)},
         "items": scheduled,
-        "render": {"fps": fps, "n_frames": n_frames, "samples": samples, "device": device, "denoise": True,
+        # ``samples`` = quadro final; ``samples_layers`` por camada (ver render/layers.py)
+        "render": {"fps": fps, "n_frames": n_frames, "samples": int(samples),
+                   "samples_layers": clamp_layers(samples_layers, samples),
+                   "adaptive_threshold": ADAPTIVE_THRESHOLD, "adaptive_min_samples": dict(ADAPTIVE_MIN),
+                   "sample_ramp_frames": RAMP_FRAMES, "device": device, "denoise": True,
                    "motion_blur": motion_blur, "shutter": 0.5, "seed": seed, "threads": threads,
                    "out_dir": str(work_dir / "render"), "border_margin_m": 0.6, "calib_width": 240},
     }

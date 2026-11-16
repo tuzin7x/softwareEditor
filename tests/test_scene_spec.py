@@ -1,4 +1,6 @@
 """Adaptador entre os parâmetros do layout e os geradores procedurais."""
+from pathlib import Path
+
 from mobilia.render.scene_spec import normalize_procedural_params
 
 
@@ -44,3 +46,108 @@ def test_wall_extension_never_passes_in_front_of_another_wall():
     assert ext[2][1] < 0.15
     # quinas de 90° (parede 0 x parede 1) continuam fechadas com a extensão cheia
     assert ext[0][0] == 0.35 and ext[1][1] == 0.35
+
+
+# ------------------------------------------------------------------ PT3: amostras por camada
+
+FX = Path(__file__).parent / "fixtures"
+
+
+def _rtx_8gb():
+    from mobilia.hardware import GpuInfo, HardwareReport, choose_profile
+
+    rep = HardwareReport("Windows", "cpu", 16, 16.0, [GpuInfo("NVIDIA GeForce RTX 5070 Laptop GPU", 8151,
+                                                             compute_capability="12.0")], torch_cuda=True)
+    return choose_profile(rep)
+
+
+def test_profile_samples_per_layer():
+    from mobilia.render.layers import LAYERS
+
+    prof = _rtx_8gb()
+    assert prof.name == "alta" and prof.render_samples == 128
+    assert prof.layer_samples == {"final": 128, "marco": 64, "dinamico": 32}
+    assert set(prof.layer_samples) == set(LAYERS)
+    from mobilia.hardware import HardwareReport, choose_profile
+
+    cpu = choose_profile(HardwareReport("Linux", "cpu", 4, 8.0))
+    assert cpu.layer_samples["final"] == cpu.render_samples
+    assert cpu.layer_samples["dinamico"] <= cpu.layer_samples["marco"] <= cpu.layer_samples["final"]
+
+
+def test_final_quality_is_24fps_with_layers():
+    from mobilia.jobs import JobRequest
+    from mobilia.pipeline import _quality
+
+    prof = _rtx_8gb()
+    q = _quality(JobRequest("x.jpg", "sala", "y.mp4", quality="final"), prof)
+    assert q["fps"] == 24 and q["samples"] == 128
+    assert q["samples_layers"] == prof.layer_samples
+    p = _quality(JobRequest("x.jpg", "sala", "y.mp4", quality="previa"), prof)
+    assert p["fps"] == 24 and p["samples_layers"]["final"] == p["samples"]
+    assert p["samples_layers"]["dinamico"] < p["samples"]
+
+
+def test_scene_json_has_samples_per_layer(tmp_path, monkeypatch):
+    """scene.json leva amostras por camada, mínimo adaptativo explícito e a ampliação de cada item."""
+    import json
+
+    import numpy as np
+    from PIL import Image
+
+    from mobilia.analysis.room import RoomModel
+    from mobilia.analysis.segmentation import SegmentationResult
+    from mobilia.layout.model import Layout, PlacedItem
+    from mobilia.render import scene_spec
+
+    room = RoomModel.from_json((FX / "rooms/stafford/room.json").read_text(encoding="utf-8"))
+    seg = SegmentationResult.load(FX / "rooms/stafford/seg.npz")
+    W, H = 320, 240
+    plate = np.asarray(Image.open(FX / "photos/sala_vazia_stafford.jpg").convert("RGB").resize((W, H)))
+    Image.fromarray(plate).save(tmp_path / "plate.png")
+    rs = lambda a: np.asarray(Image.fromarray(a).resize((W, H), Image.NEAREST))  # noqa: E731
+    seg = SegmentationResult(rs(seg.labels), rs(seg.groups), seg.id2label, seg.model_id)
+    items = [PlacedItem("rug_0", "rug", "proc:rug", [-2.0, 3.27, 0.0], 90.0, size=[2.0, 1.4, 0.012], order=0),
+             PlacedItem("lamp_0", "floor_lamp", "proc:floor_lamp", [-3.1, 4.17, 0.0], 90.0,
+                        size=[0.42, 0.42, 1.62], order=1)]
+    layout = Layout("sala", "moderno", {}, items)
+    prof = _rtx_8gb()
+    spec = scene_spec.build_scene_spec(room, layout, plate, tmp_path / "plate.png", seg, tmp_path, tmp_path,
+                                       samples=prof.render_samples, samples_layers=prof.layer_samples)
+    on_disk = json.loads((tmp_path / "scene.json").read_text(encoding="utf-8"))
+    for s in (spec, on_disk):
+        r = s["render"]
+        assert r["fps"] == 24
+        assert r["samples"] == 128
+        assert r["samples_layers"] == {"final": 128, "marco": 64, "dinamico": 32}
+        assert r["adaptive_min_samples"] == {"final": 32, "marco": 32, "dinamico": 8}
+        assert abs(r["adaptive_threshold"] - 0.02) < 1e-12
+        assert r["sample_ramp_frames"] >= 1
+    # uma qualidade mais baixa (prévia/teste) nunca faz uma camada passar do quadro final
+    small = scene_spec.build_scene_spec(room, layout, plate, tmp_path / "plate.png", seg, tmp_path, tmp_path,
+                                        samples=8, samples_layers=prof.layer_samples)
+    assert small["render"]["samples_layers"] == {"final": 8, "marco": 8, "dinamico": 8}
+    # px_per_m: 1 cm de deslocamento em qualquer direção projeta no máximo px_per_m/100 pixels
+    intr = room.intr().scaled(W, H)
+    Minv = room.cam_from_room()
+    for it, pi in zip(spec["items"], items):
+        assert it["px_per_m"] > 0
+        x, y, z = pi.position
+        base = np.array([[x, y, z + pi.size[2] / 2]])
+        uv0 = intr.project(base @ Minv[:3, :3].T + Minv[:3, 3])
+        for d in np.eye(3) * 0.01:
+            uv = intr.project((base + d) @ Minv[:3, :3].T + Minv[:3, 3])
+            assert np.linalg.norm(uv - uv0) <= it["px_per_m"] * 0.01
+
+
+def test_frame_samples_ramp_before_static_frames():
+    from mobilia.render.layers import adaptive_min, frame_samples
+
+    spl = {"final": 128, "marco": 64, "dinamico": 32}
+    seq = ["dinamico"] * 6 + ["marco"] + ["dinamico"] * 2 + ["final"]
+    s = frame_samples(seq, spl, ramp=3)
+    assert s[:3] == [32, 32, 32]                       # longe do quadro parado: o mínimo da camada
+    assert s[3] < s[4] < s[5] < s[6] == 64              # sobe até o marco
+    assert s[7] < s[8] < s[9] == 128                    # rampa curta (só 2 dinâmicos) até o final
+    assert frame_samples(seq, spl, ramp=0) == [spl[c] for c in seq]
+    assert adaptive_min("dinamico", 32) == 8 and adaptive_min("final", 128) == 32 and adaptive_min("final", 16) == 16

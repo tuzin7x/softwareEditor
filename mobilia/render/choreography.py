@@ -172,6 +172,33 @@ MOTIONS = {"drop": motion_drop, "slide": motion_slide_down, "grow": motion_grow,
 # ------------------------------------------------------------------ linha do tempo
 
 
+# Fim do "assentamento invisível": quando o deslocamento projetado de qualquer ponto da peça
+# fica abaixo de SNAP_PX pixels (e o fade já está completo), a pose passa a ser EXATAMENTE a de
+# repouso. Os quadros dessa cauda ficam iguais ao quadro final e são reaproveitados
+# (``frame_signature``) em vez de renderizados de novo por uma diferença que ninguém vê.
+SNAP_PX = 0.3
+FADE_SNAP = 1.0 / 512          # 1 − fade abaixo de meio nível de 8 bits
+SNAP_DT = 1.0 / 480            # passo da busca do instante de assentamento (s)
+DEFAULT_PX_PER_M = 2000.0      # sem a câmera: escala conservadora (perto e de frente, 2560 px)
+SETTLE_FACTOR = 2.2            # fim nominal do movimento = início + 2,2 × duração
+
+
+def pose_residual_px(p: Pose, extent=(1.0, 1.0, 1.0), px_per_m: float = DEFAULT_PX_PER_M) -> float:
+    """Limite superior do deslocamento (px) de qualquer ponto da peça entre ``p`` e o repouso.
+
+    ``extent`` = (largura, profundidade, altura) em m do item (limita o braço de alavanca de
+    giros e escalas, com o pivô em qualquer lugar da caixa); ``px_per_m`` = maior ampliação
+    da projeção perto do item. Peça invisível ou ainda em fade nunca é "repouso" (inf)."""
+    if not p.visible or 1.0 - p.fade > FADE_SNAP:
+        return math.inf
+    w, d, h = (abs(float(v)) for v in extent)
+    diag = math.sqrt(w * w + d * d + h * h)
+    m = (math.sqrt(p.dx * p.dx + p.dy * p.dy + p.dz * p.dz)
+         + (abs(p.rx) + abs(p.ry) + abs(p.rz)) * diag
+         + abs(p.sx - 1) * w + abs(p.sy - 1) * d + abs(p.sz - 1) * h)
+    return m * px_per_m
+
+
 @dataclass
 class PartPlan:
     name: str
@@ -179,13 +206,14 @@ class PartPlan:
     start: float           # s, relativo ao início do vídeo
     duration: float
     params: dict = field(default_factory=dict)
+    px_per_m: float | None = None              # ampliação da projeção perto do item (scene_spec)
+    extent: tuple | None = None                # tamanho do item (m), para o resíduo de giro/escala
+    _settle: float | None = field(default=None, init=False, repr=False, compare=False)
 
-    def pose(self, time_s: float) -> Pose:
-        t = time_s - self.start
+    def raw_pose(self, t: float) -> Pose:
+        """Pose do movimento em t s desde o início da peça, sem o corte do assentamento."""
         if t < 0:
             return HIDDEN
-        if t > self.duration * 2.2:          # já acomodado: pose final exata
-            return REST
         fn = MOTIONS[self.motion]
         if self.motion == "drop":
             return fn(t, self.duration, self.params.get("height", 0.45), self.params.get("size", 1.0),
@@ -201,8 +229,42 @@ class PartPlan:
         return fn(t, self.duration)
 
     @property
+    def settle_time(self) -> float:
+        """Instante (s desde o início da peça) a partir do qual a pose é exatamente o repouso.
+
+        É o fim do último trecho com resíduo projetado ≥ ``SNAP_PX``; nunca passa de
+        ``SETTLE_FACTOR`` × duração (o fim nominal, que continua definindo a linha do tempo)."""
+        if self._settle is None:
+            T = self.duration * SETTLE_FACTOR
+            ext = tuple(self.extent) if self.extent else (1.0, 1.0, 1.0)
+            ppm = float(self.px_per_m or DEFAULT_PX_PER_M)
+            n = int(math.ceil(T / SNAP_DT))
+            settle = 0.0
+            for k in range(n, -1, -1):          # de trás para a frente: acha o último pico visível
+                t = min(T, k * SNAP_DT)
+                if pose_residual_px(self.raw_pose(t), ext, ppm) >= SNAP_PX:
+                    settle = T if k == n else t + SNAP_DT
+                    break
+            self._settle = settle
+        return self._settle
+
+    def pose(self, time_s: float) -> Pose:
+        t = time_s - self.start
+        if t < 0:
+            return HIDDEN
+        T = self.duration * SETTLE_FACTOR
+        if t > T or (self.settle_time < T and t >= self.settle_time):
+            return REST                      # já acomodado: pose final exata
+        return self.raw_pose(t)
+
+    @property
     def end(self) -> float:
-        return self.start + self.duration * 2.2
+        return self.start + self.duration * SETTLE_FACTOR
+
+    @property
+    def settle_end(self) -> float:
+        """Instante absoluto (s) em que a peça para de mudar na imagem."""
+        return self.start + self.settle_time
 
 
 # Duração (s) e movimento padrão por papel
@@ -236,24 +298,82 @@ def drop_height(role: str, size_z: float, mount: str) -> float:
     return max(0.3, min(0.55, 0.35 + 0.2 * size_z))
 
 
+# No máximo MAX_MOVERS itens mudando na imagem ao mesmo tempo (do início até o assentamento
+# invisível, ver ``PartPlan.settle_time``). Menos peças simultâneas = recorte dinâmico menor e
+# uma montagem mais legível; o item só espera quando o limite seria passado.
+MAX_MOVERS = 3
+SMALL_ROLES = ("vase", "bowl", "books", "pillows", "throw", "kitchen_decor", "basket")
+
+
+def item_extent(item: dict) -> tuple | None:
+    sz = item.get("size")
+    if not sz or len(sz) < 3 or max(abs(float(v)) for v in sz[:3]) <= 0:
+        return None
+    return tuple(float(v) for v in sz[:3])
+
+
+def item_motion_window(item: dict) -> float:
+    """Duração (s) em que o item muda na imagem: do início ao assentamento invisível da peça
+    principal (mais as levas, para livros). Aproximação por item, sem conhecer as peças do
+    modelo; o desenrolar do tapete dura exatamente ``duration``."""
+    dur, role = float(item["duration"]), item["role"]
+    motion = item.get("motion", "drop")
+    if motion == "unroll":
+        return dur
+    size_z = (item.get("size") or [0, 0, 1])[2] or 1.0
+    quick = item.get("mount", "floor") == "on_top" or role == "books"
+    params = {"height": ON_TOP_DROP if quick else drop_height(role, size_z, item.get("mount", "floor")),
+              "size": size_z, "dist": 0.22}
+    if quick:
+        params["fall"] = ON_TOP_FALL
+    m = "spread" if motion == "spread" else motion if motion in MOTIONS else "drop"
+    plan = PartPlan("_item", m, 0.0, dur, params, item.get("px_per_m"), item_extent(item))
+    extra = (ON_TOP_WAVES - 1) * ON_TOP_STEP if role == "books" else 0.0
+    return plan.settle_time + extra
+
+
 def schedule_items(items: list[dict], hold_start: float = 0.8, gap_factor: float = 0.55,
-                   min_gap: float = 0.32) -> tuple[list[dict], float]:
+                   min_gap: float = 0.32, max_movers: int | None = MAX_MOVERS) -> tuple[list[dict], float]:
     """Define o instante de início de cada item (ordenados por ``order``).
 
     O próximo item começa quando o anterior completou ``gap_factor`` da sua duração,
     gerando sobreposição fluida (sem "fila" mecânica). Decoração pequena entra mais rápido.
+    Se já houver ``max_movers`` itens em movimento nesse instante, o item espera o primeiro
+    deles assentar (só então a linha do tempo cresce, e só o necessário).
     Retorna (itens com 'start' e 'duration', fim da última animação).
     """
     t = hold_start
     out = []
+    windows: list[tuple[float, float]] = []          # (início, fim do movimento visível)
     for it in sorted(items, key=lambda i: i["order"]):
         dur, motion = ROLE_TIMING.get(it["role"], (0.9, "drop"))
-        it = dict(it, start=round(t, 4), duration=dur, motion=it.get("motion", motion))
+        it = dict(it, duration=dur, motion=it.get("motion", motion))
+        if max_movers:
+            while True:
+                active = sorted(e for s0, e in windows if s0 <= t + 1e-9 and t + 1e-9 < e)
+                if len(active) < max_movers:
+                    break
+                # espera o assentamento (arredondado para cima, para não sobrepor por 0,1 ms)
+                t = math.ceil(active[len(active) - max_movers] * 1e4 - 1e-6) / 1e4
+        it["start"] = round(t, 4)
+        windows.append((it["start"], it["start"] + item_motion_window(it)))
         out.append(it)
-        small = it["role"] in ("vase", "bowl", "books", "pillows", "throw", "kitchen_decor", "basket")
+        small = it["role"] in SMALL_ROLES
         t += max(min_gap * (0.75 if small else 1.0), dur * gap_factor * (0.7 if small else 1.0))
-    end = max((i["start"] + i["duration"] * 2.2 for i in out), default=hold_start)
+    end = max((i["start"] + i["duration"] * SETTLE_FACTOR for i in out), default=hold_start)
     return out, end
+
+
+def max_concurrent(windows: list[tuple[float, float]]) -> int:
+    """Maior número de janelas (início, fim) abertas ao mesmo tempo."""
+    eps = 1e-9                                       # janelas que só se tocam não se sobrepõem
+    ev = sorted([(s0, 1) for s0, _ in windows] + [(e - eps, -1) for _, e in windows],
+                key=lambda x: (x[0], x[1]))
+    n = best = 0
+    for _, d in ev:
+        n += d
+        best = max(best, n)
+    return best
 
 
 # Ordem de montagem de peças de um mesmo asset (por palavra-chave no nome da malha)
@@ -289,6 +409,7 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
     quick = on_top or role == "books"
     if quick:
         h = ON_TOP_DROP
+    ppm, ext = item.get("px_per_m"), item_extent(item)
     # assets procedurais trazem o movimento de cada peça (ex.: cortina = varão desliza,
     # painéis desdobram); eles têm prioridade sobre o movimento genérico do papel
     tagged = bool(part_tags) and motion != "unroll" and any(
@@ -298,7 +419,7 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
         params = {"height": h, "size": size_z, "dist": 0.22}
         if quick:
             params["fall"] = ON_TOP_FALL
-        return [PartPlan(n, m, start, dur, params) for n in part_names]
+        return [PartPlan(n, m, start, dur, params, ppm, ext) for n in part_names]
     if part_tags:
         ranked = sorted(part_names, key=lambda n: (part_tags.get(n, (1, ""))[0], n))
         ranks = {n: part_tags.get(n, (1, ""))[0] for n in part_names}
@@ -334,7 +455,7 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
                   "wobble": 1.0 if level == 0 else 0.6, "start_scale": 0.12, "depth": 0.05}
         if quick:
             params["fall"] = ON_TOP_FALL
-        plans.append(PartPlan(n, m, round(s, 4), d, params))
+        plans.append(PartPlan(n, m, round(s, 4), d, params, ppm, ext))
     return plans
 
 

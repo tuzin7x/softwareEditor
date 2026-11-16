@@ -222,7 +222,10 @@ class LayerAccumulator:
 
 
 def load_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:
-    """Lê Combined (RGBA) e Shadow Catcher (RGB) de um EXR multi-part do Blender 5."""
+    """Lê Combined (RGBA) e Shadow Catcher (RGB) de um EXR multi-part do Blender 5.
+
+    Aceita o EXR do ``write_still`` ("ViewLayer.Combined.R", com os passes "Noisy ...") e o do
+    nó File Output do worker ("Combined.R", só os dois passes usados)."""
     import OpenEXR
 
     f = OpenEXR.File(str(exr_path), separate_channels=True)
@@ -230,9 +233,9 @@ def load_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:
     for part in f.parts:
         for name, c in part.channels.items():
             chs[name] = np.asarray(c.pixels, dtype=np.float32)
-    comb = [k for k in chs if k.endswith("Combined.R")][0][:-2]
+    comb = [k for k in chs if k.endswith("Combined.R") and "Noisy" not in k][0][:-2]
     rgba = np.stack([chs[comb + ".R"], chs[comb + ".G"], chs[comb + ".B"], chs[comb + ".A"]], -1)
-    sk = [k for k in chs if "Shadow Catcher" in k and k.endswith(".R")]
+    sk = [k for k in chs if k.endswith("Shadow Catcher.R") and "Noisy" not in k]
     shadow = None
     if sk:
         b = sk[0][:-2]

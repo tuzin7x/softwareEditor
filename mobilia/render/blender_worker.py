@@ -32,6 +32,7 @@ import numpy as np
 from bpy_extras.object_utils import world_to_camera_view
 
 from mobilia.render import choreography as ch
+from mobilia.render import layers as lay
 from mobilia.telemetry import RenderStatsCollector
 
 FADE_PROP = "mobilia_fade"
@@ -140,6 +141,38 @@ def configure_device(sc, device: str, quiet: bool = False) -> str:
     return "CPU"
 
 
+def configure_denoiser(sc, dev: str, quiet: bool = False) -> str:
+    """Denoiser na GPU sempre que possível, guiado por albedo e normal.
+
+    OIDN na GPU quando o Cycles acha um dispositivo compatível; senão, em placa com OptiX, o
+    denoiser do OptiX (também na GPU); a CPU só fica para quando não há GPU de render.
+    Devolve o nome do denoiser escolhido."""
+    name, use_gpu = "OPENIMAGEDENOISE", False
+    if dev != "CPU":
+        oidn_gpu = optix_gpu = False
+        try:
+            prefs = bpy.context.preferences.addons["cycles"].preferences
+            oidn_gpu = bool(prefs.has_oidn_gpu_devices())
+            optix_gpu = dev == "OPTIX" and bool(prefs.has_optixdenoiser_gpu_devices())
+        except Exception:
+            pass
+        if oidn_gpu:
+            use_gpu = True
+        elif optix_gpu:
+            name = "OPTIX"
+        elif not quiet:
+            emit(event="log", level="warning",
+                 message="Nenhuma GPU compatível com o denoiser: o denoise roda na CPU (mais lento).")
+    for attr, val in (("denoiser", name), ("denoising_use_gpu", use_gpu),
+                      ("denoising_prefilter", "ACCURATE"), ("denoising_quality", "HIGH"),
+                      ("denoising_input_passes", "RGB_ALBEDO_NORMAL")):
+        try:
+            setattr(sc.cycles, attr, val)
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return name
+
+
 def configure_render(sc, spec: dict) -> str:
     r = spec["render"]
     sc.render.engine = "CYCLES"
@@ -151,24 +184,23 @@ def configure_render(sc, spec: dict) -> str:
     sc.render.film_transparent = True
     sc.render.fps = int(r["fps"])
     sc.frame_start, sc.frame_end = 1, int(r["n_frames"])
+    # amostras do quadro final; o laço de quadros troca por camada (ver render/layers.py)
     sc.cycles.samples = int(r["samples"])
     sc.cycles.use_adaptive_sampling = True
-    sc.cycles.adaptive_threshold = float(r.get("adaptive_threshold", 0.015))
+    sc.cycles.adaptive_threshold = float(r.get("adaptive_threshold", lay.ADAPTIVE_THRESHOLD))
+    amin = r.get("adaptive_min_samples") or lay.ADAPTIVE_MIN
+    sc.cycles.adaptive_min_samples = min(int(r["samples"]), int(amin.get("final", lay.ADAPTIVE_MIN["final"])))
     sc.cycles.use_denoising = bool(r.get("denoise", True))
-    for attr, val in (("denoiser", "OPENIMAGEDENOISE"), ("denoising_use_gpu", dev != "CPU"),
-                      ("denoising_prefilter", "ACCURATE"), ("denoising_quality", "HIGH"),
-                      ("denoising_input_passes", "RGB_ALBEDO_NORMAL")):
-        try:
-            setattr(sc.cycles, attr, val)
-        except (AttributeError, TypeError, ValueError):
-            pass
+    configure_denoiser(sc, dev, quiet=r.get("device", "AUTO") == "CPU")
     sc.cycles.seed = int(r.get("seed", 7))
     sc.cycles.use_animated_seed = False          # ruído estável entre quadros
+    # rebatimentos: difusos continuam em 4 (luz da sala nos móveis); brilho e transparência
+    # além de 2 e 8 não aparecem num quadro de sala e custam caro (a calibração usa os mesmos)
     sc.cycles.max_bounces = 8
     sc.cycles.diffuse_bounces = 4
-    sc.cycles.glossy_bounces = 4
+    sc.cycles.glossy_bounces = 2
     sc.cycles.transmission_bounces = 8
-    sc.cycles.transparent_max_bounces = 16
+    sc.cycles.transparent_max_bounces = 8
     sc.cycles.sample_clamp_indirect = 8.0
     sc.cycles.caustics_reflective = False
     sc.cycles.caustics_refractive = False
@@ -620,6 +652,56 @@ def _wrap_fade(mat) -> None:
     nt.links.new(src, mix.inputs[2])
     nt.links.new(mix.outputs["Shader"], surf)
     mat["mobilia_fade_wrapped"] = True
+    mat["mobilia_fade_mix"] = mix.name
+    mat["mobilia_fade_out"] = out.name
+
+
+def set_fade_shader(mat, on: bool) -> bool:
+    """Liga/desliga o Mix(Transparente, original) de ``_wrap_fade``. Desligado, a saída do
+    material volta a ser o shader original: sem BSDF transparente, os raios de sombra não
+    precisam avaliar o material (a peça volta a ser opaca para o Cycles). Devolve se mudou."""
+    nt = mat.node_tree
+    mix, out = nt.nodes.get(mat.get("mobilia_fade_mix", "")), nt.nodes.get(mat.get("mobilia_fade_out", ""))
+    if mix is None or out is None or not mix.inputs[2].links:
+        return False
+    surf = out.inputs["Surface"]
+    want = mix.outputs["Shader"] if on else mix.inputs[2].links[0].from_socket
+    cur = surf.links[0].from_socket if surf.links else None
+    if cur == want:
+        return False
+    nt.links.new(want, surf)
+    return True
+
+
+def fade_materials(items_rt: list[dict]) -> dict:
+    """{material: [(rt, peça), ...]} dos materiais com o mix de fade."""
+    mats: dict = {}
+    for rt in items_rt:
+        for part in rt["parts"]:
+            for slot in getattr(part, "material_slots", []):
+                m = slot.material
+                if m is not None and m.get("mobilia_fade_mix"):
+                    mats.setdefault(m, []).append((rt, part))
+    return mats
+
+
+def update_fade_shaders(mats: dict, f: int, fps: int) -> int:
+    """O mix transparente fica ligado só enquanto alguma peça do material está em fade-in em
+    torno do quadro f (f−1..f+1); depois o material volta ao original. Devolve quantos mudaram."""
+    changed = 0
+    for m, users in mats.items():
+        on = False
+        for rt, part in users:
+            plan = rt["plans"][part.name]
+            for df in (-1, 0, 1):
+                p = plan.pose((f - 1 + df) / fps)
+                if p.visible and p.fade < 1.0:
+                    on = True
+                    break
+            if on:
+                break
+        changed += set_fade_shader(m, on)
+    return changed
 
 
 def _fix_glass(mat) -> None:
@@ -1066,6 +1148,73 @@ def compute_border(sc, cam, items_rt: list[dict], margin_m: float) -> tuple[floa
     return (max(0.0, min(xs) - pad), max(0.0, min(ys) - pad), min(1.0, max(xs) + pad), min(1.0, max(ys) + pad))
 
 
+# ---------------------------------------------------------------------------- saída dos passes
+# Com o denoise ligado o Cycles acrescenta "Noisy Image" e "Noisy Shadow Catcher" ao resultado,
+# e o EXR multicamada do ``write_still`` grava os dois (quase o dobro de canais para comprimir e
+# escrever por quadro). Um nó File Output no compositor grava só o que a composição usa:
+# Combined (RGBA, já sem ruído) e Shadow Catcher. Os valores são idênticos aos do write_still.
+PASS_OUTPUTS = (("Combined", "Image"), ("Shadow Catcher", "Shadow Catcher"))
+
+
+def setup_pass_output(sc, directory: Path):
+    """Monta o compositor (Render Layers → File Output). Devolve o nó, ou None se não der."""
+    import warnings
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            ng = bpy.data.node_groups.new("mobilia_passes", "CompositorNodeTree")
+            sc.compositing_node_group = ng
+        rl = ng.nodes.new("CompositorNodeRLayers")
+        rl.scene = sc
+        rl.layer = sc.view_layers[0].name
+        fo = ng.nodes.new("CompositorNodeOutputFile")
+        fmt = fo.format
+        fmt.media_type = "MULTI_LAYER_IMAGE"
+        fmt.color_depth = sc.render.image_settings.color_depth
+        fmt.exr_codec = sc.render.image_settings.exr_codec
+        fo.directory = str(directory)
+        fo.file_output_items.clear()
+        for name, sock in PASS_OUTPUTS:
+            fo.file_output_items.new("RGBA", name)
+            ng.links.new(rl.outputs[sock], fo.inputs[name])
+        sc.render.use_compositing = True
+        try:
+            sc.render.compositor_device = "CPU"      # só cópia de passes: sem contexto de GPU
+        except (AttributeError, TypeError, ValueError):
+            pass
+        return fo
+    except Exception as e:
+        sc.render.use_compositing = False
+        emit(event="log", level="warning",
+             message=f"Saída só com os passes usados indisponível ({e}); gravando o EXR completo.")
+        return None
+
+
+def render_frame(sc, path: Path, out: dict) -> dict:
+    """Renderiza o quadro atual em ``path`` (EXR com Combined + Shadow Catcher).
+
+    ``out["node"]`` é o File Output (ou None: ``write_still`` com todos os passes). Se o arquivo
+    não aparecer onde esperado, salva o resultado do render e volta ao ``write_still``."""
+    sc.render.filepath = str(path)
+    fo = out.get("node")
+    if fo is None:
+        return timed_render(sc, write_still=True)
+    fo.file_name = path.stem
+    st = timed_render(sc, write_still=False)
+    if not path.exists():
+        cands = sorted(path.parent.glob(path.stem + "*.exr"), key=lambda q: q.stat().st_mtime)
+        if cands:
+            cands[-1].replace(path)
+        else:
+            bpy.data.images["Render Result"].save_render(str(path))
+            out["node"] = None
+            sc.render.use_compositing = False
+            emit(event="log", level="warning",
+                 message="O nó File Output não gravou o quadro; gravando o EXR completo daqui em diante.")
+    return st
+
+
 def frame_layer(items_rt: list[dict], f: int, fps: int, dyn: list, final_sig: tuple) -> str:
     """Camada do quadro para a telemetria: "dinamico" (peça em movimento), "final" (cena completa
     em repouso, igual ao último quadro) ou "marco" (parado, com parte dos itens)."""
@@ -1185,6 +1334,22 @@ def main(spec_path: str) -> None:
     only = set(spec["render"].get("only_frames") or [])
     to_render = [f for f in range(1, n_frames + 1) if any_visible(items_rt, f, fps) and (not only or f in only)]
     final_sig = frame_signature(items_rt, n_frames, fps)
+    # amostras por camada (final > marco > dinâmico), com rampa antes dos quadros parados
+    rs = spec["render"]
+    spl = lay.clamp_layers(rs.get("samples_layers"), int(rs["samples"]))
+    amin = rs.get("adaptive_min_samples") or lay.ADAPTIVE_MIN
+    planned, prev_sig = [], None
+    for f in to_render:
+        sig = frame_signature(items_rt, f, fps)
+        if sig != prev_sig:
+            planned.append((f, frame_layer(items_rt, f, fps, dynamic_parts(items_rt, f, fps), final_sig)))
+        prev_sig = sig
+    spp_plan = dict(zip((f for f, _ in planned),
+                        lay.frame_samples([c for _, c in planned], spl,
+                                          int(rs.get("sample_ramp_frames", lay.RAMP_FRAMES)))))
+    fade_mats = fade_materials(items_rt)
+    pass_out = {"node": setup_pass_output(sc, out_dir / "frames")}
+    meta["passes"] = [n for n, _ in PASS_OUTPUTS] if pass_out["node"] is not None else "todos"
     por_quadro: list[dict] = []
     layer_s = {"final": 0.0, "marco": 0.0, "dinamico": 0.0}
     done = 0
@@ -1220,23 +1385,27 @@ def main(spec_path: str) -> None:
         sc.render.use_border = True
         sc.render.use_crop_to_border = False
         sc.render.border_min_x, sc.render.border_min_y, sc.render.border_max_x, sc.render.border_max_y = b
+        camada = frame_layer(items_rt, f, fps, dyn, final_sig)
+        spp = int(spp_plan.get(f, spl[camada]))
+        sc.cycles.samples = spp
+        sc.cycles.adaptive_min_samples = min(spp, int(amin.get(camada, lay.adaptive_min(camada, spp))))
+        fades = update_fade_shaders(fade_mats, f, fps)
         name = f"f_{f:05d}.exr"
-        sc.render.filepath = str(out_dir / "frames" / name)
         t_prep = time.perf_counter() - t_it
-        st = timed_render(sc, write_still=True)
+        st = render_frame(sc, out_dir / "frames" / name, pass_out)
         # retângulo em pixels (origem no topo-esquerdo), igual ao usado pelo Cycles
         border_px = [int(math.floor(b[0] * W)), int(math.floor((1 - b[3]) * H)),
                      int(math.ceil(b[2] * W)), int(math.ceil((1 - b[1]) * H))]
         meta["frames"].append({"frame": f, "source": name, "border": border_px, "mode": mode})
         last_sig, last_src, last_border = sig, name, border_px
         done += 1
-        camada = frame_layer(items_rt, f, fps, dyn, final_sig)
         area = max(0, border_px[2] - border_px[0]) * max(0, border_px[3] - border_px[1])
         wall = time.perf_counter() - t_it
         layer_s[camada] += wall
         por_quadro.append({"quadro": f, "camada": camada, "itens": visible_items(items_rt, f, fps),
                            "pecas_em_movimento": len(dyn), "area_px": area,
                            "cobertura": round(area / max(1, W * H), 4), "spp": int(sc.cycles.samples),
+                           "spp_min": int(sc.cycles.adaptive_min_samples), "materiais_fade_trocados": fades,
                            "amostras": st.get("amostras"), "amostragem_s": st.get("amostragem_s"),
                            "denoise_s": st.get("denoise_s"), "gravacao_s": st.get("gravacao_s"),
                            "sincronizacao_s": st.get("sincronizacao_s"), "kernels_s": st.get("kernels_s"),
@@ -1263,6 +1432,8 @@ def main(spec_path: str) -> None:
                     "reutilizados": sum(1 for fr in frames if fr.get("reused")),
                     "so_foto": sum(1 for fr in frames if fr.get("source") is None)},
         "samples_config": int(spec["render"]["samples"]),
+        "samples_camadas": spl,
+        "passes": meta["passes"],
     }
     (out_dir / "frames.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     emit(event="render_done", rendered=done, meta=str(out_dir / "frames.json"))
@@ -1407,10 +1578,7 @@ def warmup_main(out_dir: str) -> dict:
     results = []
     for i, kind in enumerate(kinds):
         dev = configure_device(sc, kind)
-        try:
-            sc.cycles.denoising_use_gpu = dev != "CPU"
-        except (AttributeError, TypeError):
-            pass
+        configure_denoiser(sc, dev, quiet=True)
         emit(event="progress", fraction=round(0.1 + 0.85 * i / len(kinds), 3),
              message=f"Preparando os kernels de render ({kind}) — na primeira vez pode levar alguns minutos")
         res = {"dispositivo": dev, "gpus": list(DEVICE_INFO.get("gpus") or []) if dev != "CPU" else [],
