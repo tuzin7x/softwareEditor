@@ -442,7 +442,11 @@ class StreamComposer:
                     f"pixel(s) fora da máscara de influência mudaram (diferença máx. {res['fora_mascara_max']}; "
                     f"fora de móvel+sombra: {st.max_diff_outside})")
             out8 = res["out8"]
-            st = res["st"] if it.kind == "novo" else replace(res["st"], frame=int(fr["frame"]))
+            st = res["st"]
+            if it.kind != "novo" or st.frame != int(fr["frame"]):
+                # cache, ou marco já composto como base de outro quadro (PT6): estatísticas
+                # próprias deste quadro, sem compartilhar o objeto
+                st = replace(st, frame=int(fr["frame"]))
         te = time.perf_counter()
         self._enc.write(out8)
         t_enc = time.perf_counter() - te

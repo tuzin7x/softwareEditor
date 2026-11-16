@@ -512,3 +512,44 @@ def test_layered_stream_catches_byte_outside_union_mask(tmp_path, monkeypatch):
     monkeypatch.setattr(Compositor, "composite", bad)
     with pytest.raises(PreservationError, match="quadro 4"):
         pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7, ProgressEmitter(), workers=2)
+
+
+def test_layered_stream_catches_milestone_byte_outside_its_mask(tmp_path, monkeypatch):
+    """Um byte da foto mudado pelo MARCO (base dos quadros dinâmicos), dentro da máscara da camada
+    dinâmica mas fora da do marco, derruba o vídeo: a base é verificada sozinha contra a foto, a
+    união das máscaras não o esconde."""
+    from mobilia import pipeline
+    from mobilia.composite.compositor import Compositor
+    from mobilia.composite.stream import PreservationError
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _layered_job(tmp_path)
+    orig = Compositor.composite
+
+    def bad(self, frame, *a, **kw):
+        out, st = orig(self, frame, *a, **kw)
+        if frame == 2 and kw.get("base") is None and a[0] is not None and a[0][..., 3].max() > 0 \
+                and kw.get("origin") == (56, 36):          # o marco m_00002 (peça A)
+            out = out.copy()
+            out[22, 14, 0] ^= 1                         # sob a peça B dos quadros 2–5, longe de A
+        return out, st
+
+    monkeypatch.setattr(Compositor, "composite", bad)
+    with pytest.raises(PreservationError, match="marco m_00002"):
+        pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7, ProgressEmitter(), workers=2)
+
+
+def test_layered_stream_stats_carry_own_frame(tmp_path):
+    """O marco composto como base e depois mostrado como quadro parado entra nas estatísticas com o
+    número do quadro mostrado (e não do primeiro que o usou)."""
+    from mobilia.composite.stream import StreamComposer
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _layered_job(tmp_path)
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "w.mp4", 12, 7, ProgressEmitter(), streaming=False,
+                        workers=2, n_frames=len(meta["frames"]))
+    for fr in meta["frames"]:
+        sc.push(dict(fr))
+    sc.finish(meta)
+    assert [s.frame for s in sc.stats] == [fr["frame"] for fr in meta["frames"]]
+    assert len({id(s) for s in sc.stats}) == len(sc.stats)
