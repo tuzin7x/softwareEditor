@@ -27,6 +27,16 @@ def intro_text(state: dict) -> tuple[str, str]:
             "Só falta: " + "; ".join(pend) + ". O que já está instalado não é baixado de novo.")
 
 
+def _chip(icon: str, text: str) -> QFrame:
+    """Etiqueta grafite com filete latão: um fato da instalação, fácil de ler de relance."""
+    f = QFrame(); f.setObjectName("chip")
+    row = QHBoxLayout(f); row.setContentsMargins(12, 6, 14, 6); row.setSpacing(8)
+    ic = QLabel(); ic.setPixmap(theme.line_icon(icon, 14, theme.ACCENT_HI).pixmap(14, 14))
+    lb = QLabel(text); lb.setObjectName("chiptext"); lb.setMinimumWidth(lb.sizeHint().width())
+    row.addWidget(ic); row.addWidget(lb)
+    return f
+
+
 class _Bridge(QObject):
     progress = Signal(str, float, str)
     done = Signal(bool, str)
@@ -38,7 +48,7 @@ class SetupDialog(QDialog):
         theme.load_fonts()
         self.setWindowTitle(f"{APP_NAME} — instalação do motor")
         self.setWindowIcon(theme.window_icon())
-        self.setMinimumWidth(640)
+        self.setMinimumWidth(720)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(32, 28, 32, 28)
         lay.setSpacing(0)
@@ -46,15 +56,22 @@ class SetupDialog(QDialog):
                                             bootstrap.payload_fingerprints(runtime.payload_root()))
         title, text = intro_text(state)
         head = QHBoxLayout(); head.setSpacing(0)
-        mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(20)); mark.setAccessibleName(APP_NAME)
+        icon = QLabel(); icon.setPixmap(brand.app_icon_pixmap(40, self.devicePixelRatioF() or 2.0))
+        mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(24)); mark.setAccessibleName(APP_NAME)
         rule = QFrame(); rule.setObjectName("vrule"); rule.setFixedSize(1, 18)
         cap = QLabel("INSTALAÇÃO DO MOTOR"); cap.setObjectName("section"); theme.tracked(cap)
+        head.addWidget(icon, 0, Qt.AlignVCenter); head.addSpacing(14)
         head.addWidget(mark, 0, Qt.AlignVCenter); head.addSpacing(18); head.addWidget(rule, 0, Qt.AlignVCenter)
         head.addSpacing(18); head.addWidget(cap, 0, Qt.AlignVCenter); head.addStretch(1)
         t = QLabel(title)
         t.setObjectName("title"); t.setWordWrap(True)
         info = QLabel(text)
         info.setWordWrap(True); info.setObjectName("subtitle")
+        chips = QHBoxLayout(); chips.setSpacing(8)
+        for ico, txt in (("export", "~7 GB, uma única vez"), ("wifi-off", "Depois funciona sem internet"),
+                         ("refresh", "Retoma se a conexão cair")):
+            chips.addWidget(_chip(ico, txt))
+        chips.addStretch(1)
         card = QFrame(); card.setObjectName("card")
         cl = QVBoxLayout(card); cl.setContentsMargins(20, 18, 20, 20); cl.setSpacing(0)
         top = QHBoxLayout()
@@ -73,13 +90,18 @@ class SetupDialog(QDialog):
         cancel.clicked.connect(self.reject)
         row = QHBoxLayout(); row.setSpacing(10); row.addStretch(1); row.addWidget(cancel); row.addWidget(self.btn)
         lay.addLayout(head); lay.addSpacing(30)
-        lay.addWidget(t); lay.addSpacing(10); lay.addWidget(info); lay.addSpacing(24)
+        lay.addWidget(t); lay.addSpacing(10); lay.addWidget(info); lay.addSpacing(18)
+        lay.addLayout(chips); lay.addSpacing(22)
         lay.addWidget(card); lay.addSpacing(24)
         lay.addLayout(row)
         self.bridge = _Bridge()
         self.bridge.progress.connect(self._on_progress)
         self.bridge.done.connect(self._on_done)
         self.ok = False
+
+    def showEvent(self, e):  # noqa: N802
+        super().showEvent(e)
+        theme.dark_title_bar(self)
 
     def start(self) -> None:
         self.btn.setEnabled(False); self.btn.setText("Instalando…")

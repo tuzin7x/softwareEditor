@@ -40,6 +40,8 @@ ACCENT_LINE = "#5E5038"   # latão a ~35%
 OK = "#8FCB9B"            # sálvia
 DANGER = "#EB8F84"
 NOTICE_TEXT = "#E9D3A6"
+TRACK = "#45454D"         # trilho da barra de progresso (visível já em 0 %)
+PENDING_MARK = "#6E6A63"  # contorno das etapas pendentes: 3.2:1 sobre o cartão (WCAG 1.4.11)
 
 # compatibilidade com nomes antigos
 BORDER = HAIRLINE_STRONG
@@ -80,6 +82,12 @@ QLabel#stepnum {{ color: {ACCENT}; font-family: {FONT_DISPLAY}; font-size: 12px;
 QLabel#muted {{ color: {MUTED}; }}
 QLabel#hint, QLabel#caption {{ color: {MUTED}; font-size: 12px; }}
 QLabel#filename {{ font-size: 15px; font-weight: 600; }}
+QLabel#result {{ font-family: {FONT_DISPLAY}; font-size: 26px; font-weight: 500; }}
+QLabel#privacy {{ color: {MUTED}; font-size: 12px; }}
+QLabel#trust {{ color: {TEXT_2}; font-size: 12px; }}
+QLabel#stagecap {{ color: {MUTED}; font-size: 12px; font-style: italic; }}
+QFrame#chip {{ background: {SURFACE}; border: 1px solid {ACCENT_LINE}; border-radius: 15px; }}
+QLabel#chiptext {{ color: {TEXT_2}; font-size: 12px; }}
 QLabel#pct {{ font-family: {FONT_DISPLAY}; }}
 QLabel#notice {{ color: {NOTICE_TEXT}; background: {SELECTED_BG}; border: 1px solid {ACCENT_LINE};
                  border-radius: 10px; padding: 10px 12px; font-size: 12px; }}
@@ -138,8 +146,8 @@ QComboBox QAbstractItemView::item {{ min-height: 32px; padding: 0 10px; border-r
 QComboBox QAbstractItemView::item:selected {{ background: {SELECTED_BG}; color: {ACCENT_HI}; }}
 
 /* progresso */
-QProgressBar {{ background: #2A2A30; border: none; border-radius: 2px; min-height: 4px; max-height: 4px; }}
-QProgressBar::chunk {{ border-radius: 2px;
+QProgressBar {{ background: {TRACK}; border: none; border-radius: 3px; min-height: 6px; max-height: 6px; }}
+QProgressBar::chunk {{ border-radius: 3px;
                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT_LO}, stop:1 {ACCENT_HI}); }}
 
 /* caixa de seleção */
@@ -343,6 +351,22 @@ def line_icon(name: str, size: int = 16, color: str = TEXT) -> QIcon:
         line(3, 8, 13, 8); line(9, 4, 13, 8); line(13, 8, 9, 12)
     elif name == "check":
         line(3.5, 8.5, 6.5, 11.5); line(6.5, 11.5, 12.5, 4.5)
+    elif name == "shield":
+        path = QPainterPath(QPointF(8, 2)); path.lineTo(13, 4); path.lineTo(13, 8)
+        path.cubicTo(13, 11, 10.5, 13, 8, 14); path.cubicTo(5.5, 13, 3, 11, 3, 8)
+        path.lineTo(3, 4); path.closeSubpath(); p.drawPath(path)
+        line(5.8, 8.2, 7.4, 9.8); line(7.4, 9.8, 10.4, 6.4)
+    elif name == "chip":  # processador (privacidade: "processado no seu computador")
+        p.drawRoundedRect(QRectF(4, 4, 8, 8), 1.2, 1.2)
+        for k in (6, 8, 10):
+            line(k, 2, k, 4); line(k, 12, k, 14); line(2, k, 4, k); line(12, k, 14, k)
+    elif name == "clock":
+        p.drawEllipse(QPointF(8, 8), 5.5, 5.5); line(8, 5, 8, 8); line(8, 8, 10.5, 9.5)
+    elif name == "wifi-off":
+        p.drawArc(QRectF(2, 4, 12, 12), 30 * 16, 120 * 16); p.drawArc(QRectF(4.5, 6.5, 7, 7), 30 * 16, 120 * 16)
+        p.drawEllipse(QPointF(8, 12), 0.6, 0.6); line(3, 3, 13, 13)
+    elif name == "refresh":
+        p.drawArc(QRectF(3, 3, 10, 10), 60 * 16, 280 * 16); line(11.5, 2.5, 11.5, 5.2); line(11.5, 5.2, 8.8, 5.2)
     elif name == "photo":
         p.drawRoundedRect(QRectF(2, 3, 12, 10), 1.5, 1.5)
         path = QPainterPath(QPointF(2.5, 11.5)); path.lineTo(6, 8); path.lineTo(8.5, 10.5); path.lineTo(10.5, 8.5)
@@ -370,7 +394,7 @@ def status_pixmap(state: str, size: int = 18) -> QPixmap:
         p.setPen(Qt.NoPen); p.setBrush(halo); p.drawEllipse(c, size / 2 - 1, size / 2 - 1)
         p.setBrush(QColor(ACCENT_HI)); p.drawEllipse(c, size * 0.2, size * 0.2)
     else:
-        p.setPen(_pen(HAIRLINE_STRONG, 1.4)); p.setBrush(QColor(SURFACE))
+        p.setPen(_pen(PENDING_MARK, 1.4)); p.setBrush(QColor(SURFACE))
         p.drawEllipse(c, size * 0.24, size * 0.24)
     p.end()
     return pm
@@ -415,6 +439,24 @@ def empty_state_art(width: int = 168, height: int = 120) -> QPixmap:
 def app_icon(size: int = 256, dpr: float = 1.0) -> QPixmap:
     """Ícone 7xAi (placa grafite com "7xAi"; "7x" abaixo de 32 px). Ver ``brand``."""
     return brand.app_icon_pixmap(size, dpr)
+
+
+def dark_title_bar(widget) -> None:
+    """Barra de título escura no Windows 10 20H1+/11 (DWMWA_USE_IMMERSIVE_DARK_MODE). Nada fora do Windows."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        hwnd = ctypes.c_void_p(int(widget.winId()))
+        on = ctypes.c_int(1)
+        for attr in (20, 19):  # 20 = Windows 11 / 10 20H1+; 19 = builds antigas do Windows 10
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(on), ctypes.sizeof(on)) == 0:
+                break
+    except Exception:  # noqa: BLE001 — cosmético
+        pass
 
 
 def window_icon() -> QIcon:

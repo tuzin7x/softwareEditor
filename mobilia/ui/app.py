@@ -29,6 +29,15 @@ PHOTO_FILTER = "Fotos (*.jpg *.jpeg *.png *.webp *.tif *.tiff *.heic)"
 TAGLINE = "Decoração virtual em vídeo, a partir de uma única foto"
 
 
+def human_size(nbytes: int) -> str:
+    """Tamanho de arquivo legível ("850 KB", "12.4 MB"); vazio quando desconhecido."""
+    if nbytes <= 0:
+        return ""
+    if nbytes < 1_000_000:
+        return f"{max(1, round(nbytes / 1000))} KB"
+    return f"{nbytes / 1e6:.1f} MB"
+
+
 def paint_chip(p: QPainter, x: float, y: float, text: str, dot: str | None = theme.ACCENT,
                align_right: bool = False) -> QRectF:
     """Etiqueta translúcida sobre a imagem (ex.: "FOTO ORIGINAL"). Devolve o retângulo desenhado."""
@@ -142,8 +151,7 @@ class DropZone(QFrame):
         art = QLabel(); art.setPixmap(theme.empty_state_art()); art.setAlignment(Qt.AlignCenter)
         self.hint = QLabel("Comece pela foto do ambiente vazio")
         self.hint.setObjectName("headline"); self.hint.setAlignment(Qt.AlignCenter)
-        body = QLabel("Arraste a imagem para cá ou escolha um arquivo.\n"
-                      "Os móveis surgem dentro da sua foto — que continua intacta.")
+        body = QLabel("Arraste a imagem para cá ou escolha um arquivo.")
         body.setObjectName("body"); body.setAlignment(Qt.AlignCenter)
         btn = QPushButton("  Escolher foto"); btn.setObjectName("outline")
         btn.setIcon(theme.line_icon("import", 16, theme.ACCENT_HI)); btn.setIconSize(QSize(16, 16))
@@ -152,6 +160,10 @@ class DropZone(QFrame):
         formats = QLabel("JPG  ·  PNG  ·  WEBP  ·  TIFF  ·  HEIC")
         formats.setObjectName("caption"); formats.setAlignment(Qt.AlignCenter)
         theme.tracked(formats, 0.6)
+        trust = QWidget(); tl = QHBoxLayout(trust); tl.setContentsMargins(0, 0, 0, 0); tl.setSpacing(8)
+        shield = QLabel(); shield.setPixmap(theme.line_icon("shield", 16, theme.OK).pixmap(16, 16))
+        tt = QLabel("Sua foto fica intacta: só os móveis surgem dentro dela."); tt.setObjectName("trust")
+        tl.addStretch(1); tl.addWidget(shield); tl.addWidget(tt); tl.addStretch(1)
         tip = QLabel("Dica: fotografe o cômodo inteiro, na altura do peito, com a luz natural do dia.")
         tip.setObjectName("caption"); tip.setAlignment(Qt.AlignCenter); tip.setWordWrap(True)
         col.addWidget(art); col.addSpacing(26)
@@ -160,6 +172,7 @@ class DropZone(QFrame):
         col.addWidget(btn, 0, Qt.AlignHCenter); col.addSpacing(14)
         col.addWidget(formats)
         col.addStretch(4)
+        col.addWidget(trust); col.addSpacing(8)
         col.addWidget(tip)
         return w
 
@@ -197,14 +210,47 @@ class DropZone(QFrame):
             self.on_file(path)
 
 
+class PosterView(ImageView):
+    """Último quadro do vídeo com um botão de play: aparece até o player mostrar o primeiro quadro
+    (ou no lugar dele, se o sistema não tiver backend de vídeo). Clicar abre o vídeo no player do sistema."""
+
+    def __init__(self, on_click):
+        super().__init__()
+        self.on_click = on_click
+        self.corner_hint = "Clique para assistir"
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, e):  # noqa: N802
+        self.on_click()
+
+    def paintEvent(self, e):  # noqa: N802
+        super().paintEvent(e)
+        if self._scaled is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QPointF(self.width() / 2, self.height() / 2)
+        p.setPen(QPen(QColor(255, 255, 255, 60), 1)); p.setBrush(QColor(10, 10, 12, 190))
+        p.drawEllipse(c, 34, 34)
+        tri = QPainterPath(QPointF(c.x() - 9, c.y() - 14)); tri.lineTo(c.x() + 15, c.y()); tri.lineTo(c.x() - 9, c.y() + 14)
+        tri.closeSubpath()
+        p.setPen(Qt.NoPen); p.setBrush(QColor(theme.ACCENT_HI)); p.drawPath(tri)
+        p.end()
+
+
 class VideoView(QWidget):
-    """Player em loop do vídeo gerado (QtMultimedia)."""
+    """Player em loop do vídeo gerado (QtMultimedia), com pôster até o primeiro quadro chegar."""
 
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        self.stack = QStackedWidget()
+        lay.addWidget(self.stack)
+        self.poster = PosterView(self.open_external)
+        self.stack.addWidget(self.poster)
         self.player = None
+        self.widget = None
         try:
             from PySide6.QtMultimedia import QMediaPlayer
             from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -213,17 +259,28 @@ class VideoView(QWidget):
             self.player = QMediaPlayer(self)
             self.player.setVideoOutput(self.widget)
             self.player.setLoops(QMediaPlayer.Infinite)
-            lay.addWidget(self.widget)
-        except Exception:  # sem backend de mídia: mostra a última prévia no lugar
-            self.widget = ImageView("Pré-visualização indisponível neste sistema")
-            lay.addWidget(self.widget)
+            self.stack.addWidget(self.widget)
+            self.widget.videoSink().videoFrameChanged.connect(self._first_frame)
+        except Exception:  # sem backend de mídia: o pôster fica no lugar (clique abre o player do sistema)
+            self.player = None
         self.source: str | None = None
 
-    def play(self, path: str) -> None:
+    def _first_frame(self, *_):
+        if self.widget is not None and self.stack.currentWidget() is not self.widget:
+            self.stack.setCurrentWidget(self.widget)
+
+    def play(self, path: str, poster: str | None = None) -> None:
         self.source = path
+        self.stack.setCurrentWidget(self.poster)
+        if poster:
+            self.poster.set_image(poster)
         if self.player is not None:
             self.player.setSource(QUrl.fromLocalFile(path))
             self.player.play()
+
+    def open_external(self) -> None:
+        if self.source:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.source))
 
     def stop(self) -> None:
         if self.player is not None:
@@ -311,21 +368,37 @@ class StatusBar(QStatusBar):
     """Rodapé: a mensagem alinhada à margem da janela (o QStatusBar fixa 6 px à esquerda)."""
 
     INDENT = 32
+    DOT_W = 16
+
+    def __init__(self):
+        super().__init__()
+        self.dot = theme.MUTED          # estado da GPU: sálvia pronta, latão modo CPU, vermelho erro
+        self.dot_tip = ""
+
+    def set_dot(self, color: str, tip: str = "") -> None:
+        self.dot = color; self.dot_tip = tip
+        self.update()
 
     def paintEvent(self, e):  # noqa: N802
         msg = self.currentMessage()
-        if not msg:
-            return super().paintEvent(e)
         p = QPainter(self)
         opt = QStyleOption(); opt.initFrom(self)
         self.style().drawPrimitive(QStyle.PE_PanelStatusBar, opt, p, self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        halo = QColor(self.dot); halo.setAlphaF(0.22)
+        cy = self.height() / 2
+        p.setBrush(halo); p.drawEllipse(QPointF(self.INDENT + 4, cy), 5, 5)
+        p.setBrush(QColor(self.dot)); p.drawEllipse(QPointF(self.INDENT + 4, cy), 3, 3)
+        left = self.INDENT + self.DOT_W
         right = self.width() - 12
         for w in self.findChildren(QWidget):
             if w.parent() is self and w.isVisible() and w.geometry().left() > self.INDENT:
                 right = min(right, w.geometry().left() - 16)
-        p.setPen(self.palette().windowText().color())
-        text = self.fontMetrics().elidedText(msg, Qt.ElideMiddle, max(0, right - self.INDENT))
-        p.drawText(self.INDENT, 0, right - self.INDENT, self.height(), Qt.AlignLeft | Qt.AlignVCenter, text)
+        if msg:
+            p.setPen(self.palette().windowText().color())
+            text = self.fontMetrics().elidedText(msg, Qt.ElideMiddle, max(0, right - left))
+            p.drawText(left, 0, right - left, self.height(), Qt.AlignLeft | Qt.AlignVCenter, text)
         p.end()
 
 
@@ -358,10 +431,14 @@ class MainWindow(QMainWindow):
         self.last_diagnostic: Path | None = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
+        self.last_preview: str | None = None
+        self._gaps: list[tuple[object, int, int]] = []   # (espaçador, normal, compacto)
+        self._compact: bool | None = None
 
         root = QWidget(); root.setObjectName("root")
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
+        self.outer = outer
         outer.setContentsMargins(32, 20, 32, 20)
         outer.setSpacing(18)
         outer.addLayout(self._build_header())
@@ -373,7 +450,10 @@ class MainWindow(QMainWindow):
         self.drop = DropZone(self.load_photo)
         self.live = ImageView(caption="PRÉVIA AO VIVO")
         lcard = QFrame(); lcard.setObjectName("stage")
-        ll = QVBoxLayout(lcard); ll.setContentsMargins(14, 14, 14, 14); ll.addWidget(self.live)
+        ll = QVBoxLayout(lcard); ll.setContentsMargins(14, 14, 14, 12); ll.setSpacing(10); ll.addWidget(self.live)
+        lcap = QLabel("Prévia ao vivo: os móveis surgem dentro da sua foto, que continua intacta.")
+        lcap.setObjectName("stagecap"); lcap.setAlignment(Qt.AlignCenter)
+        ll.addWidget(lcap)
         self.video = VideoView()
         vcard = QFrame(); vcard.setObjectName("stage")
         vl = QVBoxLayout(vcard); vl.setContentsMargins(18, 16, 18, 18); vl.setSpacing(14)
@@ -381,7 +461,9 @@ class MainWindow(QMainWindow):
         vtag = _tracked("VÍDEO FINAL"); vtag.setStyleSheet(f"color: {theme.ACCENT_HI};")
         self.video_name = QLabel(""); self.video_name.setObjectName("caption")
         vhead.addWidget(vtag); vhead.addStretch(1); vhead.addWidget(self.video_name)
-        vl.addLayout(vhead); vl.addWidget(self.video, 1)
+        vcap = QLabel("Foto original, preservada pixel a pixel: só os móveis e as sombras são novos.")
+        vcap.setObjectName("stagecap"); vcap.setAlignment(Qt.AlignCenter)
+        vl.addLayout(vhead); vl.addWidget(self.video, 1); vl.addWidget(vcap)
         self.left.addWidget(self.drop); self.left.addWidget(lcard); self.left.addWidget(vcard)
         body.addWidget(self.left, 1)
         # ---- direita: passos / progresso / resultado
@@ -395,6 +477,7 @@ class MainWindow(QMainWindow):
         sb = StatusBar()
         self.setStatusBar(sb)
         sb.setSizeGripEnabled(False)
+        self.sb = sb
         ver = QLabel(f"{APP_NAME}  {__version__}")
         sb.addPermanentWidget(ver)
         sb.showMessage("Detectando GPU…")
@@ -405,20 +488,31 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ páginas
     def _build_header(self) -> QHBoxLayout:
         head = QHBoxLayout(); head.setSpacing(0); head.setContentsMargins(2, 6, 0, 2)
-        mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(24)); mark.setToolTip(APP_NAME)
+        mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(30)); mark.setToolTip(APP_NAME)
         mark.setAccessibleName(APP_NAME)
-        rule = QFrame(); rule.setObjectName("vrule"); rule.setFixedSize(1, 20)
+        rule = QFrame(); rule.setObjectName("vrule"); rule.setFixedSize(1, 22)
         tag = QLabel(TAGLINE); tag.setObjectName("tagline")
+        lock = QLabel(); lock.setPixmap(theme.line_icon("chip", 14, theme.MUTED).pixmap(14, 14))
+        priv = QLabel("Processado no seu computador"); priv.setObjectName("privacy")
+        priv.setToolTip("A foto e o vídeo não saem do seu PC: tudo é gerado aqui, na sua placa de vídeo.")
         head.addWidget(mark, 0, Qt.AlignVCenter)
-        head.addSpacing(20); head.addWidget(rule, 0, Qt.AlignVCenter); head.addSpacing(20)
+        head.addSpacing(22); head.addWidget(rule, 0, Qt.AlignVCenter); head.addSpacing(22)
         head.addWidget(tag, 0, Qt.AlignVCenter); head.addStretch(1)
+        head.addWidget(lock, 0, Qt.AlignVCenter); head.addSpacing(8); head.addWidget(priv, 0, Qt.AlignVCenter)
         return head
+
+    def _gap(self, lay, normal: int, compact: int | None = None) -> None:
+        """Espaço vertical que encolhe no modo compacto (notebooks de 768 px de altura)."""
+        lay.addSpacing(normal)
+        self._gaps.append((lay.itemAt(lay.count() - 1).spacerItem(), normal,
+                           round(normal * 0.5) if compact is None else compact))
 
     def _build_setup(self) -> QWidget:
         w = QFrame(); w.setObjectName("card")
         lay = QVBoxLayout(w); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(0)
         self.step_photo = StepHeader("01", "FOTO DO AMBIENTE")
         self.btn_import = QPushButton("  Importar foto…")
+        self.btn_import.setToolTip("Escolher a foto do ambiente vazio (JPG, PNG, WEBP, TIFF ou HEIC)")
         self.btn_import.setIcon(theme.line_icon("photo", 16, theme.TEXT_2)); self.btn_import.setIconSize(QSize(16, 16))
         self.btn_import.clicked.connect(lambda: self.drop.mousePressEvent(None))
         self.photo_label = QLabel("Nenhuma foto selecionada"); self.photo_label.setObjectName("hint")
@@ -430,6 +524,7 @@ class MainWindow(QMainWindow):
             b = QToolButton(); b.setObjectName("room"); b.setCheckable(True)
             b.setText(label); b.setIcon(theme.room_icon(key)); b.setIconSize(QSize(40, 40))
             b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); b.setMinimumSize(104, 90)
+            b.setFixedHeight(90)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _=False, k=key: self.select_room(k))
@@ -444,15 +539,17 @@ class MainWindow(QMainWindow):
         self.btn_generate = QPushButton("Gerar vídeo"); self.btn_generate.setObjectName("primary")
         self.btn_generate.setCursor(Qt.PointingHandCursor)
         self.btn_generate.clicked.connect(self.generate)
-        lay.addWidget(self.step_photo); lay.addSpacing(14)
-        lay.addWidget(self.btn_import); lay.addSpacing(10); lay.addWidget(self.photo_label)
-        lay.addSpacing(22); lay.addWidget(_rule()); lay.addSpacing(22)
-        lay.addWidget(self.step_room); lay.addSpacing(14); lay.addLayout(grid)
-        lay.addSpacing(22); lay.addWidget(_rule()); lay.addSpacing(22)
-        lay.addWidget(self.step_quality); lay.addSpacing(14); lay.addWidget(self.quality)
+        g = lambda n: self._gap(lay, n)  # noqa: E731
+        lay.addWidget(self.step_photo); g(14)
+        lay.addWidget(self.btn_import); g(10); lay.addWidget(self.photo_label)
+        g(22); lay.addWidget(_rule()); g(22)
+        lay.addWidget(self.step_room); g(14); lay.addLayout(grid)
+        g(22); lay.addWidget(_rule()); g(22)
+        lay.addWidget(self.step_quality); g(14); lay.addWidget(self.quality)
         lay.addStretch(1)
-        lay.addWidget(self.ready_hint); lay.addSpacing(12)
+        lay.addWidget(self.ready_hint); g(12)
         lay.addWidget(self.btn_generate)
+        self._cards = [lay]
         return w
 
     def _build_progress(self) -> QWidget:
@@ -471,12 +568,14 @@ class MainWindow(QMainWindow):
         self.stages = StageList()
         self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("danger")
         self.btn_cancel.clicked.connect(self.cancel)
-        lay.addLayout(head); lay.addSpacing(18)
-        lay.addWidget(self.pct); lay.addSpacing(10); lay.addWidget(self.bar)
-        lay.addSpacing(14); lay.addWidget(self.msg)
-        lay.addSpacing(16); lay.addWidget(self.notice)
-        lay.addSpacing(20); lay.addWidget(_rule()); lay.addSpacing(20)
+        g = lambda n: self._gap(lay, n)  # noqa: E731
+        lay.addLayout(head); g(18)
+        lay.addWidget(self.pct); g(10); lay.addWidget(self.bar)
+        g(14); lay.addWidget(self.msg)
+        g(16); lay.addWidget(self.notice)
+        g(20); lay.addWidget(_rule()); g(20)
         lay.addWidget(self.stages)
+        self._cards.append(lay)
         lay.addStretch(1)
         lay.addWidget(self.btn_cancel)
         return w
@@ -488,7 +587,9 @@ class MainWindow(QMainWindow):
         badge = QLabel(); badge.setPixmap(theme.status_pixmap("done", 18)); badge.setFixedSize(18, 18)
         s = _tracked("VÍDEO PRONTO"); s.setStyleSheet(f"color: {theme.OK};")
         head.addWidget(badge); head.addWidget(s); head.addStretch(1)
-        self.result_info = QLabel(""); self.result_info.setObjectName("filename"); self.result_info.setWordWrap(True)
+        self.result_title = QLabel("Seu vídeo está pronto"); self.result_title.setObjectName("result")
+        self.result_title.setWordWrap(True)
+        self.result_info = QLabel(""); self.result_info.setObjectName("hint"); self.result_info.setWordWrap(True)
         self.result_meta = QLabel(""); self.result_meta.setObjectName("hint")
         seal = QFrame(); seal.setObjectName("sealbox")
         sl = QHBoxLayout(seal); sl.setContentsMargins(12, 11, 12, 11); sl.setSpacing(10)
@@ -513,27 +614,55 @@ class MainWindow(QMainWindow):
         self.btn_diag.clicked.connect(lambda: self.copy_diagnostic())
         row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self.btn_folder, 1); row.addWidget(self.btn_diag, 1)
         self.chk_diag_photo = QCheckBox("Incluir a foto no diagnóstico")
-        self.btn_new = QPushButton("  Nova foto"); self.btn_new.setObjectName("ghost")
+        self.btn_new = QPushButton("  Começar com outra foto"); self.btn_new.setObjectName("ghost")
         self.btn_new.setIcon(theme.line_icon("plus", 16, theme.TEXT_2))
         self.btn_new.clicked.connect(self.new_photo)
-        lay.addLayout(head); lay.addSpacing(16)
+        g = lambda n: self._gap(lay, n)  # noqa: E731
+        lay.addLayout(head); g(12)
+        lay.addWidget(self.result_title); g(8)
         lay.addWidget(self.result_info); lay.addSpacing(4); lay.addWidget(self.result_meta)
-        lay.addSpacing(16); lay.addWidget(seal)
-        lay.addSpacing(22); lay.addWidget(st); lay.addSpacing(10); lay.addWidget(self.result_times)
+        g(16); lay.addWidget(seal)
+        g(22); lay.addWidget(st); g(10); lay.addWidget(self.result_times)
         lay.addStretch(1)
-        lay.addWidget(self.btn_export); lay.addSpacing(10); lay.addLayout(row)
-        lay.addSpacing(12); lay.addWidget(self.chk_diag_photo)
-        lay.addSpacing(14); lay.addWidget(_rule()); lay.addSpacing(10)
+        lay.addWidget(self.btn_export); g(10); lay.addLayout(row)
+        g(12); lay.addWidget(self.chk_diag_photo)
+        g(14); lay.addWidget(_rule()); g(10)
         lay.addWidget(self.btn_new)
+        self._cards.append(lay)
         return w
 
     def _set_pct(self, frac: float) -> None:
         self.pct.setText(f'<span style="font-size:60px; font-weight:300;">{frac * 100:.0f}</span>'
-                         f'<span style="font-size:24px; font-weight:400; color:{theme.ACCENT};">&#8201;%</span>')
+                         f'<span style="font-size:34px; font-weight:300; color:{theme.ACCENT};">%</span>')
 
     # ------------------------------------------------------------------ ações
+    COMPACT_BELOW = 790   # px lógicos: 1366x768 maximizado (barra de tarefas incluída) fica abaixo
+
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self.set_compact(self.height() < self.COMPACT_BELOW)
+
+    def set_compact(self, compact: bool) -> None:
+        """Layout compacto para telas baixas: menos respiro, ladrilhos menores (tudo continua visível)."""
+        if compact == self._compact or not hasattr(self, "stages"):
+            return
+        self._compact = compact
+        for sp, normal, small in self._gaps:
+            sp.changeSize(0, small if compact else normal)
+        m = 16 if compact else 24
+        for lay in self._cards:
+            lay.setContentsMargins(m, m, m, m)
+            lay.invalidate()
+        self.outer.setContentsMargins(*((24, 10, 24, 10) if compact else (32, 20, 32, 20)))
+        self.outer.setSpacing(12 if compact else 18)
+        for b in self.room_buttons.values():
+            b.setFixedHeight(70 if compact else 90)
+            b.setIconSize(QSize(30, 30) if compact else QSize(40, 40))
+        self.stages.layout().setSpacing(6 if compact else 10)
+
     def showEvent(self, e):  # noqa: N802
         super().showEvent(e)
+        theme.dark_title_bar(self)
         if not getattr(self, "_probed", False):
             self._probed = True
             self.probe.start()
@@ -549,6 +678,7 @@ class MainWindow(QMainWindow):
         name = fm.elidedText(Path(path).name, Qt.ElideMiddle, 330 - fm.horizontalAdvance(dims))
         self.photo_label.setText(name + dims)
         self.photo_label.setToolTip(path)
+        self.btn_import.setText("  Trocar foto…")
         self.left.setCurrentIndex(0)
         self._update_ready()
 
@@ -561,6 +691,7 @@ class MainWindow(QMainWindow):
         self.btn_generate.setEnabled(bool(self.photo_path and self.room) and not self.runner.busy())
         self.step_photo.set_done(bool(self.photo_path))
         self.step_room.set_done(bool(self.room))
+        self.step_quality.set_done(self.quality.currentIndex() >= 0)   # sempre há um padrão válido
         if not self.photo_path:
             hint = "Comece importando a foto do ambiente vazio."
         elif not self.room:
@@ -580,6 +711,7 @@ class MainWindow(QMainWindow):
         self.stages.reset(); self.bar.setValue(0); self._set_pct(0.0); self.msg.setText("Iniciando o motor…")
         self.elapsed.setText("")
         self.live.set_image(self.photo_path)
+        self.last_preview = None
         notice = self.first_run_notice()
         self.notice.setText(notice or ""); self.notice.setVisible(bool(notice))
         self.left.setCurrentIndex(1); self.right.setCurrentIndex(1)
@@ -607,6 +739,7 @@ class MainWindow(QMainWindow):
         if dest:
             shutil.copyfile(self.last_output, dest)
             self.statusBar().showMessage(f"Vídeo exportado: {dest}", 8000)
+            self.statusBar().setToolTip(dest)
 
     def open_folder(self) -> None:
         if self.last_output:
@@ -634,8 +767,9 @@ class MainWindow(QMainWindow):
         mime.setText(str(path))
         QApplication.clipboard().setMimeData(mime)
         self.last_diagnostic = path
-        self.statusBar().showMessage(f"Diagnóstico copiado ({'com' if include_photo else 'sem'} a foto): {path}",
-                                     15000)
+        self.statusBar().showMessage(f"Diagnóstico copiado ({'com' if include_photo else 'sem'} a foto): "
+                                     f"{path.name}. Cole no e-mail ou no WhatsApp.", 15000)
+        self.statusBar().setToolTip(str(path))
         return path
 
     def new_photo(self) -> None:
@@ -643,6 +777,7 @@ class MainWindow(QMainWindow):
         self.photo_path = None
         self.photo_label.setText("Nenhuma foto selecionada")
         self.photo_label.setToolTip("")
+        self.btn_import.setText("  Importar foto…")
         self.drop.show_empty()
         self.left.setCurrentIndex(0); self.right.setCurrentIndex(0)
         self._update_ready()
@@ -659,6 +794,7 @@ class MainWindow(QMainWindow):
     def _on_preview(self, path: str) -> None:
         if path and Path(path).exists():
             self.live.set_image(path)
+            self.last_preview = path
 
     def _on_finished(self, job: QueuedJob) -> None:
         self.timer.stop()
@@ -667,14 +803,18 @@ class MainWindow(QMainWindow):
         self._update_ready()
         if job.status == "pronto" and job.output and Path(job.output).exists():
             self.last_output = job.output
-            mb = Path(job.output).stat().st_size / 1e6
-            took = self.elapsed.text().replace("Tempo decorrido: ", "")
+            size = human_size(Path(job.output).stat().st_size)
+            secs = int(time.monotonic() - self.started_at) if self.started_at else 0
+            took = f"{secs // 60:d} min {secs % 60:02d} s" if secs >= 60 else (f"{secs} s" if secs >= 1 else "")
             self.result_info.setText(Path(job.output).name)
-            self.result_meta.setText(f"MP4  ·  {mb:.1f} MB" + (f"  ·  gerado em {took}" if took else ""))
+            self.result_info.setToolTip(job.output)
+            meta = ["MP4"] + ([size] if size else []) + ([f"gerado em {took}"] if took else [])
+            self.result_meta.setText("  ·  ".join(meta))
             self.video_name.setText(Path(job.output).name)
             self.result_times.setText(self._times_html(self._times_text(job)))
             self.left.setCurrentIndex(2); self.right.setCurrentIndex(2)
-            self.video.play(job.output)
+            poster = self.last_preview if self.last_preview and Path(self.last_preview).exists() else self.photo_path
+            self.video.play(job.output, poster)
             return
         self.left.setCurrentIndex(0); self.right.setCurrentIndex(0)
         if job.status == "cancelado":
@@ -734,6 +874,7 @@ class MainWindow(QMainWindow):
 
     def _on_hardware(self, info) -> None:
         if not info:
+            self.sb.set_dot(theme.DANGER)
             self.statusBar().showMessage("GPU: não detectada (o motor ainda não está instalado ou não respondeu).")
             return
         prof = info.get("profile", {})
@@ -742,6 +883,7 @@ class MainWindow(QMainWindow):
         g = f"{gpu['name']} · {gpu['vram_total_mb'] / 1024:.0f} GB" if gpu else "sem GPU NVIDIA (modo CPU)"
         self.statusBar().showMessage(f"GPU: {g}     ·     Perfil: {prof.get('name', '?')} — "
                                      f"{prof.get('description', '')}")
+        self.sb.set_dot(theme.OK if gpu else theme.ACCENT)
         if gpu is None:
             self.quality.setCurrentIndex(1)
 
