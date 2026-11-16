@@ -12,6 +12,10 @@ def _default_data_dir() -> Path:
 
     Windows: %LOCALAPPDATA%\\MobiliaStudio ; Linux/macOS: ~/.local/share/mobilia-studio.
     Pode ser sobrescrito com a variável de ambiente MOBILIA_HOME.
+
+    O app se chama 7xAi, mas a pasta mantém o nome antigo DE PROPÓSITO: ela guarda o motor já
+    instalado (Python + PyTorch + Blender + modelos, vários GB). Renomear faria todo mundo baixar
+    e instalar tudo de novo. Mesma regra de ``mobilia.runtime.app_home`` e do instalador.
     """
     env = os.environ.get("MOBILIA_HOME")
     if env:

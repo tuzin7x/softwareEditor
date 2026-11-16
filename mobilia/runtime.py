@@ -56,6 +56,9 @@ def app_home(env: Mapping[str, str] | None = None, platform: str | None = None) 
 
     Windows: ``%LOCALAPPDATA%\\MobiliaStudio``; Linux/macOS: ``~/.local/share/mobilia-studio``.
     ``MOBILIA_HOME`` tem prioridade. Mesma regra de ``mobilia.config``.
+
+    Não renomear para "7xAi": a pasta guarda o motor já instalado (vários GB). Com outro nome, quem
+    atualiza o app perderia a instalação e baixaria tudo de novo.
     """
     env = os.environ if env is None else env
     platform = sys.platform if platform is None else platform

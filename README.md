@@ -1,6 +1,6 @@
-# Mobília Studio
+# 7xAi
 
-Software Windows (`.exe`) que transforma **uma foto de um imóvel vazio** em um **vídeo cinematográfico
+**7xAi** é um software Windows (`.exe`) que transforma **uma foto de um imóvel vazio** em um **vídeo cinematográfico
 de decoração virtual**: os móveis surgem e se montam progressivamente **dentro da foto original**, com
 a câmera travada. Tudo roda **localmente na sua GPU NVIDIA**, sem APIs pagas.
 
@@ -25,6 +25,28 @@ a câmera travada. Tudo roda **localmente na sua GPU NVIDIA**, sem APIs pagas.
 Detalhes: [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) · pesquisa de tecnologias:
 [`docs/PESQUISA_TECNOLOGIAS.md`](docs/PESQUISA_TECNOLOGIAS.md) · limitações conhecidas:
 [`docs/LIMITACOES.md`](docs/LIMITACOES.md).
+
+## Gerar e instalar no Windows (ícone 7xAi na Área de Trabalho)
+
+1. Instale o [Python 3.13](https://www.python.org/downloads/) (marque *Add python.exe to PATH*).
+2. Dê dois cliques em **`GERAR_EXE.bat`**, na pasta do projeto. Leva uns 5 a 10 minutos.
+3. No fim aparece *"Pronto! O 7xAi foi instalado e o ícone está na sua Área de Trabalho."*
+
+O script `packaging/build_windows.ps1` gera `dist\7xAi\7xAi.exe` (PyInstaller, `packaging/7xai.spec`),
+roda o autoteste, instala o programa em `%LOCALAPPDATA%\Programs\7xAi` e cria o atalho **7xAi** na
+Área de Trabalho e no Menu Iniciar. Atalhos antigos do `MobiliaStudio.exe` são removidos. Se o 7xAi
+estiver aberto, feche-o antes de rodar de novo.
+
+No primeiro uso, o 7xAi instala o motor de IA e renderização (~7 GB, uma única vez) em
+`%LOCALAPPDATA%\MobiliaStudio`. A pasta mantém o nome antigo de propósito: quem já tinha o motor
+instalado não baixa nada de novo.
+
+Para instalar em **outros PCs**, instale o [Inno Setup 6](https://jrsoftware.org/isdl.php) e rode o
+`GERAR_EXE.bat` de novo. Ele também gera `dist\7xAi-Setup-<versão>.exe`, que instala o programa e cria o
+ícone na Área de Trabalho.
+
+O ícone (`packaging/assets/icon.ico`, de 16 a 256 px) e os SVGs da marca são gerados dos vetores com
+`python scripts/make_icon.py`.
 
 ## Uso (linha de comando / desenvolvimento)
 

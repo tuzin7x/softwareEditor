@@ -1,4 +1,4 @@
-"""Assets 3D do Mobília Studio.
+"""Assets 3D do 7xAi.
 
 - ``procedural.py`` — gera no Blender (``bpy``) os itens que a biblioteca CC0 da
   Poly Haven não tem: tapete, luminária de piso, abajur, cama, cortina, escrivaninha,
