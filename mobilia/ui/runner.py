@@ -9,13 +9,16 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
 from .. import runtime
 from ..jobs import JobRequest
+from ..telemetry import ENV_T_CLIQUE, ENV_T_INICIO
 
 
 @dataclass
@@ -26,6 +29,9 @@ class QueuedJob:
     error: str | None = None
     detail: str = ""
     log: list[str] = field(default_factory=list)
+    report: str | None = None        # report.json (telemetria), quando o motor conclui
+    work_dir: str | None = None
+    submitted_at: float = field(default_factory=time.time)   # clique em "Gerar" (tempo percebido)
 
 
 class JobRunner(QObject):
@@ -81,10 +87,14 @@ class JobRunner(QObject):
         return runtime.worker_command(args)
 
     def _run(self, job: QueuedJob) -> None:
+        job.work_dir = job.work_dir or job.request.work_dir
+        env = runtime.worker_environment()
+        env[ENV_T_CLIQUE] = repr(job.submitted_at)
+        env[ENV_T_INICIO] = repr(time.time())
         try:
             self._proc = subprocess.Popen(
                 self.command_for(job.request), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env=runtime.worker_environment(), cwd=str(runtime.worker_cwd()), text=True,
+                env=env, cwd=str(runtime.worker_cwd()), text=True,
                 encoding="utf-8", errors="replace", **runtime.background_popen_kwargs())
         except OSError as e:
             job.status, job.error = "erro", f"Não foi possível iniciar o motor: {e}"
@@ -122,10 +132,25 @@ class JobRunner(QObject):
             self.log.emit(ev.get("message", ""))
         elif kind == "done":
             job.status, job.output = "pronto", ev.get("output")
+            job.report = ev.get("report") or job.report
+            job.work_dir = ev.get("work_dir") or job.work_dir
         elif kind == "error":
             job.status, job.error, job.detail = "erro", ev.get("message", "Erro"), ev.get("detail", "")
 
+    def _save_log(self, job: QueuedJob) -> None:
+        """Grava a saída do motor na pasta do trabalho (entra no zip de diagnóstico)."""
+        if not job.work_dir or not Path(job.work_dir).is_dir():
+            return
+        lines = [f"status: {job.status}"] + ([f"erro: {job.error}"] if job.error else []) + job.log
+        if job.detail:
+            lines += ["", "detalhe:", job.detail]
+        try:
+            (Path(job.work_dir) / "interface.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
     def _finish(self, job: QueuedJob) -> None:
+        self._save_log(job)
         self._proc = None
         self.current = None
         self.history.append(job)

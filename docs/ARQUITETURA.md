@@ -188,6 +188,31 @@ o vídeo mostra exatamente essas funções.
   catálogo; depois disso nada mais é baixado.
 - Empacotamento Windows: um `.exe` leve (UI) e um *runtime* pesado (Python + PyTorch CUDA + Blender
   bpy + modelos), instalado no primeiro uso em `%LOCALAPPDATA%\MobiliaStudio`. Detalhes em `packaging/`.
+- Telemetria (`mobilia/telemetry.py`): `report.json` traz `tempos_s` com todas as subetapas da seção 4
+  do `PLANO_V2.md` (`inicio_motor`, `carga_foto`, `analise.{geometria_carga, geometria_inferencia,
+  segmentacao_carga, segmentacao_inferencia, sala, sol, oclusores, gravacao}`, `layout`, `ativos`,
+  `download`, `blender_inicio`, `blender_kernels`, `cena_montagem`, `calibracao`, `render_final`,
+  `render_marcos`, `render_dinamico`, `blender_fim`, `composicao`, `codificacao`, `verificacao`,
+  `relatorio`, `total`, `total_percebido`). As etapas de primeiro nível particionam o total (a soma fica
+  dentro de 5%, testado). `total_percebido` conta a partir do clique em "Gerar" (a interface passa o
+  instante em `MOBILIA_T_CLIQUE`/`MOBILIA_T_INICIO`). `primeira_execucao` vem do estado da instalação
+  (`setup_state.json`, contador `execucoes`), e `primeira_execucao_custos` separa download, kernels e
+  carga dos modelos.
+  - O worker do Blender emite `worker_ready` com o dispositivo efetivo do Cycles (OptiX/CUDA/CPU, nomes
+    das GPUs) e do denoiser (a mesma consulta `has_oidn_gpu_devices` que o Cycles usa para cair na CPU),
+    faz um render de aquecimento de ~16 px (kernels de render e do denoiser, medidos à parte) e, por
+    quadro, lê as mensagens do handler `render_stats`: sincronização, carga de kernels, amostragem,
+    denoise (estimado pelo ritmo das amostras, porque o Cycles só informa "Sample N/N" depois do
+    denoiser), gravação ("Saving") e memória. Cada quadro tem uma camada: `dinamico` (peça em
+    movimento), `final` (cena completa parada) ou `marco` (parado com parte dos itens).
+  - `render.desempenho` (amostras/s nos quadros finais, custo fixo por quadro), `render.camadas`,
+    `render.por_quadro`, `render.quadros` (total, renderizados, reutilizados, só foto), cobertura média
+    do recorte, `composicao.por_quadro` (leitura, composição, envio ao FFmpeg), `encode` e `gpu`
+    (pico de VRAM do dispositivo por fase via NVML, e o do PyTorch na análise).
+  - "Copiar diagnóstico" (tela de conclusão e caixa de erro) gera um zip com `report.json`,
+    `frames.json`, `scene.json`, `layout.json`, os registros e um manifesto, e copia o arquivo para a área
+    de transferência. A foto e tudo o que deriva dela (placa, prévias, sobreposições) só entram se o
+    usuário marcar "Incluir a foto". A tela de conclusão mostra o tempo por etapa.
 
 ## 9. Confirmação independente (pesquisa no código-fonte do Cycles)
 
@@ -211,7 +236,8 @@ emissão da foto para os demais raios), para os móveis refletirem o ambiente re
   scene.json              especificação completa para o Blender
   calib_mask.png          pixels usados na calibração de luz
   render/frames/*.exr     camadas 3D (Combined + Shadow Catcher) por quadro renderizado
-  render/frames.json      mapa quadro → render/border/reuso + calibração + tempos
+  render/frames.json      mapa quadro → render/border/reuso + calibração + telemetria do worker
   quadros/*.jpg           prévias de quadros compostos
-  report.json             verificação de preservação, PSNR do encode, tempos, hardware
+  report.json             preservação, PSNR do encode, telemetria completa (tempos, GPU, render)
+  encode.log, interface.log  registros do FFmpeg e da saída do motor (vão no zip de diagnóstico)
 ```

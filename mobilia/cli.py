@@ -13,7 +13,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import traceback
+
+# Instante em que o processo do motor começou a rodar código do Mobília (telemetria: o
+# lançamento real vem de MOBILIA_T_INICIO quando a interface informa).
+T_IMPORT = time.time()
 
 
 def _cmd_recompose(a) -> int:
@@ -32,6 +37,7 @@ def _cmd_recompose(a) -> int:
 def _cmd_run(a) -> int:
     from .jobs import JobRequest, ProgressEmitter
     from .pipeline import run_job
+    from .telemetry import ENV_T_INICIO, env_time
 
     def human(ev):
         if ev["event"] == "progress":
@@ -46,7 +52,7 @@ def _cmd_run(a) -> int:
                      work_dir=a.work_dir, seed=a.seed)
     try:
         req.validate()
-        res = run_job(req, em)
+        res = run_job(req, em, t_ref=env_time(ENV_T_INICIO) or T_IMPORT)
         em.done(res)
         return 0
     except KeyboardInterrupt:

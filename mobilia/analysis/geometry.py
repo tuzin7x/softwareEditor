@@ -78,12 +78,21 @@ class GeometryResult:
 
 def estimate_geometry(rgb8: np.ndarray, model_id: str = "Ruicheng/moge-2-vitl-normal",
                       device: str = "cpu", use_fp16: bool = False, num_tokens: int | None = None,
-                      fov_x_deg: float | None = None) -> GeometryResult:
-    """Roda o MoGe-2 sobre a foto (resolução original) e libera a VRAM ao final."""
+                      fov_x_deg: float | None = None, timings: dict | None = None) -> GeometryResult:
+    """Roda o MoGe-2 sobre a foto (resolução original) e libera a VRAM ao final.
+
+    ``timings`` (opcional) recebe ``carga`` (import + pesos + envio ao dispositivo) em segundos;
+    o resto da chamada é a inferência.
+    """
+    import time
+
+    t0 = time.perf_counter()
     import torch
     from moge.model.v2 import MoGeModel
 
     model = MoGeModel.from_pretrained(model_id).to(device).eval()
+    if timings is not None:
+        timings["carga"] = time.perf_counter() - t0
     try:
         img = torch.from_numpy(np.ascontiguousarray(rgb8)).to(device=device, dtype=torch.float32)
         img = img.permute(2, 0, 1) / 255.0

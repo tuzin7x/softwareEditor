@@ -23,12 +23,15 @@ import sys
 import time
 from pathlib import Path
 
+T_PROCESS = time.perf_counter()   # antes do import do bpy: mede a carga do Blender
+
 import bpy  # noqa: E402  (precisa vir antes de mathutils)
 import mathutils
 import numpy as np
 from bpy_extras.object_utils import world_to_camera_view
 
 from mobilia.render import choreography as ch
+from mobilia.telemetry import RenderStatsCollector
 
 FADE_PROP = "mobilia_fade"
 # fração máxima da luz explicada pela "sala não fotografada" (resto vem das janelas)
@@ -38,6 +41,69 @@ AMBIENT_MAX_SHARE = 0.5
 def emit(**ev) -> None:
     sys.stdout.write(json.dumps(ev, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+# ---------------------------------------------------------------------------- telemetria do Cycles
+# Um único coletor: o handler ``render_stats`` recebe as mensagens de fase do Cycles da chamada
+# de render em andamento; ``timed_render`` abre e fecha a janela de cada chamada.
+STATS = RenderStatsCollector()
+DEVICE_INFO: dict = {"dispositivo": "CPU", "gpus": []}
+
+
+def _on_render_stats(*args) -> None:
+    STATS.feed(args[0] if args else None)
+
+
+def install_stats_handler() -> None:
+    hs = bpy.app.handlers.render_stats
+    if _on_render_stats not in hs:
+        hs.append(_on_render_stats)
+
+
+def timed_render(sc, write_still: bool = True) -> dict:
+    """``bpy.ops.render.render`` com as estatísticas da chamada (ver ``RenderStatsCollector``)."""
+    STATS.start()
+    bpy.ops.render.render(write_still=write_still)
+    return STATS.finish(denoise=bool(sc.cycles.use_denoising))
+
+
+def denoiser_info(sc, dev: str) -> dict:
+    """Denoiser efetivo. O Cycles cai em silêncio para a CPU quando o OIDN não acha uma GPU
+    compatível; aqui a mesma consulta que o Blender faz decide o que é informado."""
+    if not sc.cycles.use_denoising:
+        return {"denoiser": None, "denoiser_dispositivo": None}
+    name = str(getattr(sc.cycles, "denoiser", "OPENIMAGEDENOISE"))
+    want_gpu = bool(getattr(sc.cycles, "denoising_use_gpu", False))
+    gpu_ok = False
+    if dev != "CPU":
+        try:
+            prefs = bpy.context.preferences.addons["cycles"].preferences
+            gpu_ok = bool(prefs.has_optixdenoiser_gpu_devices() if name == "OPTIX" else prefs.has_oidn_gpu_devices())
+        except Exception:
+            gpu_ok = False
+    if name == "OPTIX":
+        want_gpu = True
+    return {"denoiser": name, "denoiser_dispositivo": "GPU" if (want_gpu and gpu_ok) else "CPU",
+            "denoiser_gpu_pedida": want_gpu}
+
+
+def warmup_kernels(sc) -> dict:
+    """Render de ~16 px com denoiser, antes de montar a cena: carrega (ou compila, na primeira vez
+    numa GPU nova) os kernels de render e do denoiser. O tempo é o custo de primeira execução
+    que o instalador deve absorver (PT2); numa segunda execução ele cai para frações de segundo."""
+    old = (sc.render.resolution_percentage, sc.cycles.samples, sc.render.use_motion_blur, sc.render.use_border)
+    try:
+        sc.render.resolution_percentage = max(1, int(round(100 * 16 / max(1, sc.render.resolution_x))))
+        sc.cycles.samples = 1
+        sc.render.use_motion_blur = False
+        sc.render.use_border = False
+        return timed_render(sc, write_still=False)
+    except Exception as e:  # aquecimento é só medição: nunca derruba o render
+        emit(event="log", level="warning", message=f"Aquecimento dos kernels falhou: {e}")
+        return {"parede_s": 0.0, "kernels_s": 0.0, "erro": str(e)}
+    finally:
+        (sc.render.resolution_percentage, sc.cycles.samples, sc.render.use_motion_blur,
+         sc.render.use_border) = old
 
 
 # ============================================================================ configuração
@@ -64,6 +130,7 @@ def configure_device(sc, device: str) -> str:
             for d in prefs.devices:
                 d.use = d.type == kind
             sc.cycles.device = "GPU"
+            DEVICE_INFO.update(dispositivo=kind, gpus=[d.name for d in gpus])
             emit(event="log", level="info", message=f"Render na GPU via {kind}: {', '.join(d.name for d in gpus)}")
             return kind
     emit(event="log", level="warning", message="Nenhuma GPU NVIDIA disponível para o Cycles: usando CPU.")
@@ -445,6 +512,7 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
     sc.render.use_motion_blur = False
     set_catchers(room_objs, False)
     renders = []
+    stats: list[dict] = []
     cases = ["windows", "ambient"] + (["sun"] if lights.get("sun") is not None else [])
     for case in cases:
         set_light_strengths(lights, 1.0 if case == "windows" else 0.0, 1.0 if case == "ambient" else 0.0,
@@ -452,7 +520,7 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
         p = str(out_dir / f"calib_{case}.exr")
         sc.render.filepath = p
         sc.frame_set(1)
-        bpy.ops.render.render(write_still=True)
+        stats.append(timed_render(sc, write_still=True))
         renders.append(_combined(read_exr(p))[..., :3])
     h, w = renders[0].shape[:2]
     photo = np.asarray(Image.open(spec["photo_path"]).convert("RGB").resize((w, h), Image.BILINEAR),
@@ -484,7 +552,8 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
     res = {"window_power_per_m2": float(sol[0]), "ambient_strength": float(sol[1]),
            "sun_strength": float(sol[2]) if len(sol) > 2 else 0.0,
            "color_ratio": ratio.tolist(), "rel_rms": rel_rms, "pixels": int(mask.sum()),
-           "seconds": round(time.time() - t0, 1)}
+           "pixels_total": int(mask.size), "width": int(w), "height": int(h),
+           "seconds": round(time.time() - t0, 1), "renders": stats}
     return res
 
 
@@ -994,21 +1063,53 @@ def compute_border(sc, cam, items_rt: list[dict], margin_m: float) -> tuple[floa
     return (max(0.0, min(xs) - pad), max(0.0, min(ys) - pad), min(1.0, max(xs) + pad), min(1.0, max(ys) + pad))
 
 
+def frame_layer(items_rt: list[dict], f: int, fps: int, dyn: list, final_sig: tuple) -> str:
+    """Camada do quadro para a telemetria: "dinamico" (peça em movimento), "final" (cena completa
+    em repouso, igual ao último quadro) ou "marco" (parado, com parte dos itens)."""
+    if dyn:
+        return "dinamico"
+    return "final" if frame_signature(items_rt, f, fps) == final_sig else "marco"
+
+
+def visible_items(items_rt: list[dict], f: int, fps: int) -> int:
+    return sum(1 for rt in items_rt
+               if any(rt["plans"][p.name].pose((f - 1) / fps).visible for p in rt["parts"]))
+
+
 def main(spec_path: str) -> None:
     t_start = time.time()
+    t_main = time.perf_counter()
+    tempos: dict[str, float] = {"importacao_bpy": round(t_main - T_PROCESS, 3)}
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     out_dir = Path(spec["render"]["out_dir"])
     (out_dir / "frames").mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.read_factory_settings(use_empty=True)
+    install_stats_handler()
     sc = bpy.context.scene
     dev = configure_render(sc, spec)
     cam = setup_camera(sc, spec)
+    dev_info = {"dispositivo": dev, "optix": dev == "OPTIX", "gpus": list(DEVICE_INFO.get("gpus") or []),
+                "threads": int(sc.render.threads), "blender": bpy.app.version_string, **denoiser_info(sc, dev)}
+    tempos["configuracao"] = round(time.perf_counter() - t_main, 3)
+    emit(event="worker_ready", **dev_info)
+
+    # --- aquecimento: kernels de render e do denoiser (custo de primeira execução, medido à parte)
+    t = time.perf_counter()
+    warm = warmup_kernels(sc)
+    tempos["kernels"] = time.perf_counter() - t
+    if warm.get("kernels_s", 0.0) > 2.0:
+        emit(event="log", level="info",
+             message=f"Kernels do Cycles carregados/compilados em {warm['kernels_s']:.0f} s (primeira execução)")
+
+    t = time.perf_counter()
     photo_img = bpy.data.images.load(spec["photo_path"])
     photo_img.colorspace_settings.name = "sRGB"
     room_objs = build_room(sc, spec, photo_img)
     lights = build_lights(sc, spec)
+    tempos["cena_montagem"] = time.perf_counter() - t
     lt = spec["lighting"]
     calib = None
+    t = time.perf_counter()
     if lt.get("calibrate", True):
         emit(event="log", level="info", message="Calibrando a luz pela foto...")
         calib = calibrate(sc, spec, room_objs, lights, out_dir)
@@ -1020,8 +1121,10 @@ def main(spec_path: str) -> None:
         sun_s = float((lt.get("sun") or {}).get("strength", 0.0))
     set_light_strengths(lights, wp, ws, sun_s)
     set_catchers(room_objs, True)
+    tempos["calibracao"] = time.perf_counter() - t
 
     # --- itens
+    t = time.perf_counter()
     fps = int(spec["render"]["fps"])
     n_frames = int(spec["render"]["n_frames"])
     items_rt = []
@@ -1059,6 +1162,7 @@ def main(spec_path: str) -> None:
             part["_rest_bbox_max"] = list(mx)
     bake_animation(sc, items_rt, fps, n_frames)
     removed = _check_rest_support(items_rt, sc, n_frames)
+    tempos["cena_montagem"] += time.perf_counter() - t
     emit(event="log", level="info", message=f"Cena montada: {len(items_rt)} itens, dispositivo {dev}")
 
     # --- render quadro a quadro
@@ -1077,8 +1181,12 @@ def main(spec_path: str) -> None:
     sun_dir = sun_spec["direction"] if sun_spec else None
     only = set(spec["render"].get("only_frames") or [])
     to_render = [f for f in range(1, n_frames + 1) if any_visible(items_rt, f, fps) and (not only or f in only)]
+    final_sig = frame_signature(items_rt, n_frames, fps)
+    por_quadro: list[dict] = []
+    layer_s = {"final": 0.0, "marco": 0.0, "dinamico": 0.0}
     done = 0
     t_render = time.time()
+    t_loop = time.perf_counter()
     for f in range(1, n_frames + 1):
         if only and f not in only:
             continue
@@ -1089,6 +1197,7 @@ def main(spec_path: str) -> None:
         if sig == last_sig:
             meta["frames"].append({"frame": f, "source": last_src, "border": last_border, "reused": True})
             continue
+        t_it = time.perf_counter()
         sc.frame_set(f)
         bpy.context.view_layer.update()
         dyn = dynamic_parts(items_rt, f, fps)
@@ -1110,18 +1219,48 @@ def main(spec_path: str) -> None:
         sc.render.border_min_x, sc.render.border_min_y, sc.render.border_max_x, sc.render.border_max_y = b
         name = f"f_{f:05d}.exr"
         sc.render.filepath = str(out_dir / "frames" / name)
-        t0 = time.time()
-        bpy.ops.render.render(write_still=True)
+        t_prep = time.perf_counter() - t_it
+        st = timed_render(sc, write_still=True)
         # retângulo em pixels (origem no topo-esquerdo), igual ao usado pelo Cycles
         border_px = [int(math.floor(b[0] * W)), int(math.floor((1 - b[3]) * H)),
                      int(math.ceil(b[2] * W)), int(math.ceil((1 - b[1]) * H))]
         meta["frames"].append({"frame": f, "source": name, "border": border_px, "mode": mode})
         last_sig, last_src, last_border = sig, name, border_px
         done += 1
-        emit(event="render_progress", done=done, frame=f, n_frames=n_frames,
-             estimated_total=len(to_render), seconds=round(time.time() - t0, 2))
+        camada = frame_layer(items_rt, f, fps, dyn, final_sig)
+        area = max(0, border_px[2] - border_px[0]) * max(0, border_px[3] - border_px[1])
+        wall = time.perf_counter() - t_it
+        layer_s[camada] += wall
+        por_quadro.append({"quadro": f, "camada": camada, "itens": visible_items(items_rt, f, fps),
+                           "pecas_em_movimento": len(dyn), "area_px": area,
+                           "cobertura": round(area / max(1, W * H), 4), "spp": int(sc.cycles.samples),
+                           "amostras": st.get("amostras"), "amostragem_s": st.get("amostragem_s"),
+                           "denoise_s": st.get("denoise_s"), "gravacao_s": st.get("gravacao_s"),
+                           "sincronizacao_s": st.get("sincronizacao_s"), "kernels_s": st.get("kernels_s"),
+                           "preparo_s": round(t_prep, 4), "render_s": st.get("parede_s"),
+                           "parede_s": round(wall, 4), "mem_mb": st.get("mem_mb")})
+        emit(event="render_progress", done=done, frame=f, n_frames=n_frames, camada=camada,
+             estimated_total=len(to_render), seconds=round(st.get("parede_s") or 0.0, 2))
+    loop_s = time.perf_counter() - t_loop
+    tempos["render_final"] = layer_s["final"]
+    tempos["render_marcos"] = layer_s["marco"]
+    tempos["render_dinamico"] = layer_s["dinamico"]
+    # assinaturas, quadros reaproveitados e só-foto: fora das camadas, mas dentro do laço
+    tempos["laco_outros"] = max(0.0, loop_s - sum(layer_s.values()))
+    frames = meta["frames"]
     meta["timings"] = {"total_s": round(time.time() - t_start, 1), "render_s": round(time.time() - t_render, 1),
                        "rendered_frames": done}
+    meta["telemetria"] = {
+        **dev_info,
+        "tempos_s": {k: round(v, 3) for k, v in tempos.items()},
+        "aquecimento": warm,
+        "calibracao_renders": (calib or {}).get("renders", []),
+        "por_quadro": por_quadro,
+        "quadros": {"total": len(frames), "renderizados": done,
+                    "reutilizados": sum(1 for fr in frames if fr.get("reused")),
+                    "so_foto": sum(1 for fr in frames if fr.get("source") is None)},
+        "samples_config": int(spec["render"]["samples"]),
+    }
     (out_dir / "frames.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     emit(event="render_done", rendered=done, meta=str(out_dir / "frames.json"))
 

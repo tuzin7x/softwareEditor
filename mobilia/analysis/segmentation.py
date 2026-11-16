@@ -73,7 +73,11 @@ def labels_to_groups(labels: np.ndarray, id2label: dict[int, str]) -> np.ndarray
 
 
 def segment(rgb8: np.ndarray, model_id: str = "shi-labs/oneformer_ade20k_swin_large",
-            device: str = "cpu", use_fp16: bool = False) -> SegmentationResult:
+            device: str = "cpu", use_fp16: bool = False, timings: dict | None = None) -> SegmentationResult:
+    """``timings`` (opcional) recebe ``carga`` (import + pesos + envio ao dispositivo) em segundos."""
+    import time
+
+    t0 = time.perf_counter()
     import torch
     from PIL import Image
     from transformers import OneFormerForUniversalSegmentation, OneFormerProcessor
@@ -82,6 +86,8 @@ def segment(rgb8: np.ndarray, model_id: str = "shi-labs/oneformer_ade20k_swin_la
     model = OneFormerForUniversalSegmentation.from_pretrained(model_id).to(device).eval()
     if use_fp16 and device != "cpu":
         model = model.half()
+    if timings is not None:
+        timings["carga"] = time.perf_counter() - t0
     try:
         image = Image.fromarray(rgb8)
         inputs = processor(images=image, task_inputs=["semantic"], return_tensors="pt")

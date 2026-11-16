@@ -95,6 +95,23 @@ def save_state(path: Path, state: dict) -> None:
     os.replace(tmp, path)
 
 
+def is_first_run(state: dict) -> bool:
+    """Primeira geração depois de instalar o motor ou de trocar as dependências (Blender/PyTorch):
+    kernels da GPU, caches de disco e modelos ainda frios. Usado só na telemetria e no aviso
+    "primeira execução — mais lenta"."""
+    return (int(state.get("execucoes", 0) or 0) == 0
+            or state.get("execucoes_dependencias") != state.get("hashes", {}).get("dependencias"))
+
+
+def record_run(path: Path) -> dict:
+    """Registra no estado da instalação que uma geração foi concluída."""
+    state = load_state(path)
+    state["execucoes"] = int(state.get("execucoes", 0) or 0) + 1
+    state["execucoes_dependencias"] = state.get("hashes", {}).get("dependencias")
+    save_state(path, state)
+    return state
+
+
 def pending_steps(state: dict) -> list[str]:
     return [s for s in STEPS if s not in state.get("done", [])]
 

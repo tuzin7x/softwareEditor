@@ -16,17 +16,31 @@ from pathlib import Path
 API = "https://api.polyhaven.com"
 USER_AGENT = "MobiliaStudio/0.1 (local renderer)"
 
+# Tempo gasto na REDE (consultas à API + downloads), para a telemetria separar "download" de
+# "ativos": com o cache completo fica em 0. Zerado pelo pipeline no início de cada trabalho.
+NET_STATS = {"s": 0.0, "bytes": 0, "arquivos": 0, "consultas": 0}
+
+
+def reset_net_stats() -> dict:
+    NET_STATS.update(s=0.0, bytes=0, arquivos=0, consultas=0)
+    return NET_STATS
+
 
 def _get_json(url: str, retries: int = 4):
     last = None
-    for i in range(retries):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return json.load(r)
-        except Exception as e:  # rede instável: tenta de novo com espera crescente
-            last = e
-            time.sleep(1.5 * (i + 1))
+    t0 = time.perf_counter()
+    try:
+        for i in range(retries):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    NET_STATS["consultas"] += 1
+                    return json.load(r)
+            except Exception as e:  # rede instável: tenta de novo com espera crescente
+                last = e
+                time.sleep(1.5 * (i + 1))
+    finally:
+        NET_STATS["s"] += time.perf_counter() - t0
     raise RuntimeError(f"Falha ao acessar {url}: {last}")
 
 
@@ -36,22 +50,28 @@ def _download(url: str, dest: Path, md5: str | None, retries: int = 4) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     last = None
-    for i in range(retries):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
-                while True:
-                    chunk = r.read(1 << 20)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            if md5 and _md5(tmp) != md5:
-                raise IOError(f"MD5 não confere para {url}")
-            os.replace(tmp, dest)
-            return
-        except Exception as e:
-            last = e
-            time.sleep(2.0 * (i + 1))
+    t0 = time.perf_counter()
+    try:
+        for i in range(retries):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        NET_STATS["bytes"] += len(chunk)
+                if md5 and _md5(tmp) != md5:
+                    raise IOError(f"MD5 não confere para {url}")
+                os.replace(tmp, dest)
+                NET_STATS["arquivos"] += 1
+                return
+            except Exception as e:
+                last = e
+                time.sleep(2.0 * (i + 1))
+    finally:
+        NET_STATS["s"] += time.perf_counter() - t0
     raise RuntimeError(f"Falha ao baixar {url}: {last}")
 
 

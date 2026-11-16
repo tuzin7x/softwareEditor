@@ -76,3 +76,45 @@ def test_hardware_probe_updates_status(app, win):
 def test_selftest_entrypoint():
     from mobilia.ui.app import main
     assert main(["--selftest"]) == 0
+
+
+def test_copy_diagnostic_zip_without_photo(app, win, tmp_path):
+    import zipfile
+
+    win.load_photo(str(FX)); win.select_room("sala"); app.processEvents()
+    win.generate()
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+    # tempo por etapa na tela de conclusão (vem do report.json do trabalho)
+    assert "Render dos quadros" in win.result_times.text() and "Total" in win.result_times.text()
+    assert win.btn_diag.isVisible()
+    z = win.copy_diagnostic()
+    assert z is not None and z.exists()
+    names = zipfile.ZipFile(z).namelist()
+    assert {"report.json", "render/frames.json", "interface.log", "encode.log", "manifesto.json"} <= set(names)
+    assert not [n for n in names if n.lower().endswith((".jpg", ".jpeg", ".png", ".mp4"))]   # sem a foto
+    assert QApplication.clipboard().mimeData().urls()[0].toLocalFile() == str(z)
+    win.chk_diag_photo.setChecked(True)
+    names = zipfile.ZipFile(win.copy_diagnostic()).namelist()
+    assert f"foto/{FX.name}" in names and "plate.png" in names
+    _shot(win, "5_pronto_com_tempos")
+
+
+def test_worker_receives_click_time(app, win):
+    from mobilia.telemetry import ENV_T_CLIQUE, ENV_T_INICIO, env_time
+    import mobilia.ui.runner as runner_mod
+
+    seen = {}
+    orig = runner_mod.subprocess.Popen
+
+    def spy(cmd, *a, **kw):
+        seen.update(kw.get("env") or {})
+        return orig(cmd, *a, **kw)
+
+    runner_mod.subprocess.Popen = spy
+    try:
+        win.load_photo(str(FX)); win.select_room("sala")
+        win.generate()
+        assert _wait(app, lambda: win.right.currentIndex() == 2)
+    finally:
+        runner_mod.subprocess.Popen = orig
+    assert env_time(ENV_T_CLIQUE, seen) <= env_time(ENV_T_INICIO, seen)

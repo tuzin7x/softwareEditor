@@ -4,6 +4,7 @@ Fluxo único e simples: 1) importar a foto  2) escolher o ambiente  3) gerar  4)
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -11,13 +12,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QMimeData, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from .. import APP_NAME, __version__, runtime
+from .. import APP_NAME, __version__, diagnostics, runtime
 from ..jobs import ROOM_TYPES, STAGES, JobRequest
 from . import theme
 from .runner import HardwareProbe, JobRunner, QueuedJob
@@ -177,6 +178,8 @@ class MainWindow(QMainWindow):
         self.runner.finished.connect(self._on_finished)
         self.started_at = 0.0
         self.last_output: str | None = None
+        self.last_job: QueuedJob | None = None
+        self.last_diagnostic: Path | None = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
 
@@ -275,12 +278,21 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w); lay.setContentsMargins(22, 22, 22, 22); lay.setSpacing(12)
         s = QLabel("PRONTO"); s.setObjectName("section")
         self.result_info = QLabel(""); self.result_info.setWordWrap(True)
+        st = QLabel("TEMPO POR ETAPA"); st.setObjectName("section")
+        self.result_times = QLabel(""); self.result_times.setObjectName("muted"); self.result_times.setWordWrap(True)
         self.btn_export = QPushButton("Exportar MP4…"); self.btn_export.setObjectName("primary")
         self.btn_export.clicked.connect(self.export)
         self.btn_folder = QPushButton("Abrir pasta"); self.btn_folder.clicked.connect(self.open_folder)
+        self.btn_diag = QPushButton("Copiar diagnóstico")
+        self.btn_diag.setToolTip("Cria um .zip com o relatório de tempos e os registros desta geração "
+                                 "e copia o arquivo para a área de transferência.")
+        self.btn_diag.clicked.connect(lambda: self.copy_diagnostic())
+        self.chk_diag_photo = QCheckBox("Incluir a foto no diagnóstico")
         self.btn_new = QPushButton("Nova foto"); self.btn_new.clicked.connect(self.new_photo)
-        lay.addWidget(s); lay.addWidget(self.result_info); lay.addStretch(1)
-        lay.addWidget(self.btn_export); lay.addWidget(self.btn_folder); lay.addWidget(self.btn_new)
+        lay.addWidget(s); lay.addWidget(self.result_info); lay.addSpacing(6)
+        lay.addWidget(st); lay.addWidget(self.result_times); lay.addStretch(1)
+        lay.addWidget(self.btn_export); lay.addWidget(self.btn_folder)
+        lay.addWidget(self.btn_diag); lay.addWidget(self.chk_diag_photo); lay.addWidget(self.btn_new)
         return w
 
     # ------------------------------------------------------------------ ações
@@ -339,6 +351,32 @@ class MainWindow(QMainWindow):
         if self.last_output:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.last_output).parent)))
 
+    def copy_diagnostic(self, include_photo: bool | None = None, job: QueuedJob | None = None) -> Path | None:
+        """Gera o zip de diagnóstico do último trabalho (sem a foto, salvo se marcado) e copia o
+        arquivo para a área de transferência (colar no e-mail/WhatsApp anexa o zip)."""
+        job = job or self.last_job
+        work = job.work_dir if job else None
+        if not work or not Path(work).is_dir():
+            self.statusBar().showMessage("Nenhum trabalho para diagnosticar.", 6000)
+            return None
+        if include_photo is None:
+            include_photo = self.chk_diag_photo.isChecked()
+        dest = runtime.runtime_paths().home / "diagnosticos" / f"diagnostico_{Path(work).name}.zip"
+        try:
+            path = diagnostics.make_diagnostic_zip(work, dest, include_photo=include_photo,
+                                                   app_version=__version__)
+        except OSError as e:
+            self.statusBar().showMessage(f"Não foi possível criar o diagnóstico: {e}", 10000)
+            return None
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
+        mime.setText(str(path))
+        QApplication.clipboard().setMimeData(mime)
+        self.last_diagnostic = path
+        self.statusBar().showMessage(f"Diagnóstico copiado ({'com' if include_photo else 'sem'} a foto): {path}",
+                                     15000)
+        return path
+
     def new_photo(self) -> None:
         self.video.stop()
         self.photo_path = None
@@ -363,6 +401,7 @@ class MainWindow(QMainWindow):
     def _on_finished(self, job: QueuedJob) -> None:
         self.timer.stop()
         self.btn_cancel.setEnabled(True)
+        self.last_job = job
         self._update_ready()
         if job.status == "pronto" and job.output and Path(job.output).exists():
             self.last_output = job.output
@@ -370,6 +409,7 @@ class MainWindow(QMainWindow):
             self.result_info.setText(f"{Path(job.output).name}\n{mb:.1f} MB · {self.elapsed.text().lower()}\n\n"
                                      "Fora dos móveis e das sombras, a foto original foi preservada "
                                      "pixel a pixel (verificado em cada quadro).")
+            self.result_times.setText(self._times_text(job))
             self.left.setCurrentIndex(2); self.right.setCurrentIndex(2)
             self.video.play(job.output)
             return
@@ -379,6 +419,16 @@ class MainWindow(QMainWindow):
             return
         self.show_error(job.error or "Erro desconhecido.", job.detail)
 
+    @staticmethod
+    def _times_text(job: QueuedJob) -> str:
+        if not job.report:
+            return ""
+        try:
+            rep = json.loads(Path(job.report).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        return diagnostics.summary_text(rep)
+
     def show_error(self, message: str, detail: str = "") -> None:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
@@ -387,7 +437,13 @@ class MainWindow(QMainWindow):
         box.setInformativeText(message)
         if detail:
             box.setDetailedText(detail)
+        diag = None
+        if self.last_job is not None and self.last_job.work_dir and Path(self.last_job.work_dir).is_dir():
+            diag = box.addButton("Copiar diagnóstico", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
         box.exec()
+        if diag is not None and box.clickedButton() is diag:
+            self.copy_diagnostic()
 
     def _on_hardware(self, info) -> None:
         if not info:
