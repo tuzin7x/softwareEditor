@@ -594,3 +594,22 @@ def test_designer_narrative_rules_synthetic():
                         parent=f"nightstand_{i}", order=2 + i) for i in range(2)]
     assert decor_sentence(ns + lamps) == "Abajur sobre cada criado-mudo."
     assert decor_sentence(ns + lamps[:1]) == "Abajur sobre o criado-mudo."
+
+
+def test_designer_narrative_plurals_and_bed_rug():
+    """Plurais (abajures, pilhas de livros, almofadas) e tapete sob a cama só quando passa sob os pés dela."""
+    from mobilia.layout.model import PlacedItem
+    from mobilia.layout.narrative import _count, bed_foot_on_rug, rug_sentence
+
+    assert _count("abajur", 2) == "2 abajures" and _count("pilha de livros", 2) == "2 pilhas de livros"
+    assert _count("almofadas", 2) == "2 almofadas" and _count("vaso", 3) == "3 vasos"
+    assert _count("criado-mudo", 2) == "2 criados-mudos"
+    # cama com a cabeceira em y = 4 e os pés para -y (yaw 0), pé em y ~ 2
+    bed = PlacedItem("bed_0", "bed", "proc:bed", [0.0, 3.0, 0.0], 0.0, size=[1.5, 2.0, 0.5], wall_id=0)
+    under = PlacedItem("rug_0", "rug", "proc:rug", [0.0, 2.3, 0.0], 0.0, size=[2.4, 1.7, 0.012])
+    away = PlacedItem("rug_0", "rug", "proc:rug", [0.0, 0.4, 0.0], 0.0, size=[2.4, 1.7, 0.012])
+    assert bed_foot_on_rug(bed, under) and not bed_foot_on_rug(bed, away)
+    assert "sob a metade de baixo da cama" in rug_sentence(under, [bed, under], bed)
+    assert "cama" not in rug_sentence(away, [bed, away], bed)
+    mid = PlacedItem("rug_0", "rug", "proc:rug", [0.0, 3.0, 0.0], 0.0, size=[2.4, 1.2, 0.012])
+    assert not bed_foot_on_rug(bed, mid) and rug_sentence(mid, [bed, mid], bed).endswith(", sob a cama.")

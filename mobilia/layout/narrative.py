@@ -37,7 +37,8 @@ _PLURAL = {"sofá": "sofás", "mesa de centro": "mesas de centro", "mesa lateral
            "luminária de piso": "luminárias de piso", "planta grande": "plantas grandes",
            "planta média": "plantas médias", "planta pequena": "plantas pequenas", "rack/aparador": "racks/aparadores",
            "criado-mudo": "criados-mudos", "mesa de jantar": "mesas de jantar",
-           "cadeira de trabalho": "cadeiras de trabalho", "utensílio decorativo": "utensílios decorativos"}
+           "cadeira de trabalho": "cadeiras de trabalho", "utensílio decorativo": "utensílios decorativos",
+           "pilha de livros": "pilhas de livros"}
 # gênero gramatical do rótulo (para "encostado/encostada", "um/uma")
 _FEM = {"poltrona", "mesa de centro", "mesa lateral", "luminária de piso", "planta grande", "planta média",
         "planta pequena", "almofadas", "fruteira", "cama", "cama de casal", "cama de solteiro", "cômoda", "manta", "mesa de jantar", "cadeira",
@@ -92,7 +93,11 @@ def _art(lbl: str) -> str:
 def _count(lbl: str, n: int) -> str:
     if n == 1:
         return lbl
-    return f"{n} {_PLURAL.get(lbl, lbl + 's')}"
+    if lbl in _PLURAL:
+        return f"{n} {_PLURAL[lbl]}"
+    if lbl.endswith("s"):                   # "almofadas", "pilha de livros": já no plural ou invariável
+        return f"{n} {lbl}"
+    return f"{n} {lbl + ('es' if lbl.endswith(('r', 'z')) else 's')}"
 
 
 def join_pt(parts: list[str]) -> str:
@@ -132,6 +137,13 @@ def front_feet_on_rug(seat: PlacedItem, rug: PlacedItem) -> bool:
     c = np.asarray(seat.position[:2], float)
     return all(_inside(rug, c + u * lx * seat.size[0] / 2 + f * (seat.size[1] / 2 - 0.08))
                for lx in (-0.85, 0.0, 0.85))
+
+
+def bed_foot_on_rug(bed: PlacedItem, rug: PlacedItem) -> bool:
+    """O tapete passa sob o pé da cama (meio e cantos, 10 cm para dentro da borda dos pés)."""
+    u, f = _axes(bed)
+    c = np.asarray(bed.position[:2], float) + f * (bed.size[1] / 2 - 0.10)
+    return all(_inside(rug, c + u * lx * bed.size[0] / 2) for lx in (-0.8, 0.0, 0.8))
 
 
 def front_gap(anchor: PlacedItem, other: PlacedItem) -> float:
@@ -237,8 +249,10 @@ def rug_sentence(rug: PlacedItem, items: list[PlacedItem], anc: PlacedItem | Non
         s += f" {des}"
     seats = [it for it in items if it.role in ("sofa", "armchair") and it.mount == "floor"]
     on = [it for it in seats if front_feet_on_rug(it, rug)]
-    if anc is not None and anc.role == "bed" and _inside(rug, anc.position[:2], tol=rug.size[0]):
+    if anc is not None and anc.role == "bed" and bed_foot_on_rug(anc, rug):
         s += ", sob a metade de baixo da cama"
+    elif anc is not None and anc.role == "bed" and _inside(anc, rug.position[:2]):
+        s += ", sob a cama"
     elif seats and len(on) == len(seats):
         s += ", com os pés dianteiros de todos os assentos sobre ele" if len(seats) > 1 \
             else f", com os pés dianteiros do {label(seats[0].role)} sobre ele"
