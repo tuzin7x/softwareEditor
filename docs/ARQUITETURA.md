@@ -531,6 +531,14 @@ de render:
     `frames.json`, `scene.json`, `layout.json`, os registros e um manifesto, e copia o arquivo para a área
     de transferência. A foto e tudo o que deriva dela (placa, prévias, sobreposições) só entram se o
     usuário marcar "Incluir a foto". A tela de conclusão mostra o tempo por etapa.
+- Narrativa de designer (PT12, `layout/narrative.py`): o solver grava em `layout.notes` frases que
+  explicam o projeto só com o que foi medido e decidido — tom da sala, piso, paredes, pé-direito e
+  m² de piso livre visível; estilo e paleta; a peça principal (medida, parede, vista); tapete
+  (medidas, tecido, pés dianteiros dos assentos sobre ele, verificados na geometria); mesa de
+  centro (% da largura do sofá e vão); quadros (medidas, móvel abaixo, altura do centro);
+  decoração por apoio; o que não coube e avisos de validação. Determinística, sem custo de render.
+  Vai para `report.json` (`narrativa`) e o registro do motor ("Designer: ..."), e a tela de
+  conclusão mostra o bloco "Escolhas do designer" (rolável; lê `narrativa` ou o `layout.json`).
 
 ## 9. Confirmação independente (pesquisa no código-fonte do Cycles)
 
@@ -550,7 +558,8 @@ A melhoria sugerida por essa pesquisa — material de catcher com `Light Path �
 <trabalho>/
   plate.png               placa imutável (referência bit a bit)
   analise/                geometry.npz, segmentation.npz, room.json, grid.npy, analise_overlay.jpg
-  layout.json             itens, posições, ordem e entrada de montagem (motion, motion_dir, motion_dist)
+  layout.json             itens, posições, ordem e entrada de montagem (motion, motion_dir, motion_dist);
+                          notes = narrativa de designer (PT12)
   scene.json              especificação completa para o Blender
   calib_mask.png          máscara da calibração de luz (255 = ajuste, 128 = limite inferior, 0 = fora)
   calib_sun_mask.png      manchas de sol da foto (ajuste do sol e aberturas de sol das janelas)

@@ -325,6 +325,9 @@ def _write_job_files(work: Path, photo: str) -> Path:
                         "render_marcos": 0.0, "render_dinamico": 20.0, "blender_fim": 0.2, "composicao": 3.0,
                         "codificacao": 1.0, "verificacao": 0.5, "relatorio": 0.0, "total": 42.0,
                         "total_percebido": 42.5}}
+    rep["narrativa"] = ["Sala clara, carpete claro, pé-direito 2,45 m, 11 m² de piso livre visível.",
+                        "Escolhi um sofá de tecido claro de 1,57 m, encostado na parede P0, de frente para a câmera."]
+    (work / "layout.json").write_text(json.dumps({"notes": rep["narrativa"]}, ensure_ascii=False), encoding="utf-8")
     rp = work / "report.json"
     rp.write_text(json.dumps(rep, ensure_ascii=False), encoding="utf-8")
     return rp

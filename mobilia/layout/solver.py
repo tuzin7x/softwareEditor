@@ -24,6 +24,7 @@ from . import catalog, geom
 from .catalog import AssetSpec
 from .context import LayoutContext
 from .entrances import plan_entrances
+from .narrative import ROLE_LABELS, designer_notes
 from .model import Layout
 from .planners import (PLANNERS, BancadaPlanner, CozinhaMesaPlanner, GroupCand, GroupPlanner)
 from .rules import (ART_ABOVE_GAP, ART_CENTER_Z, ON_TOP_ROLES, SIDE_GAP, WALL_GAP, WALL_ROLES,
@@ -89,16 +90,6 @@ for _r in ("floor_lamp", "table_lamp", "plant_large", "plant_medium", "plant_sma
 for _r in ("wall_art", "wall_mirror", "curtain"):
     CHOREO_CLASS[_r] = 4
 
-ROLE_LABELS = {
-    "sofa": "sofá", "armchair": "poltrona", "coffee_table": "mesa de centro", "rug": "tapete",
-    "side_table": "mesa lateral", "floor_lamp": "luminária de piso", "plant_large": "planta grande",
-    "plant_medium": "planta média", "plant_small": "planta pequena", "wall_art": "quadro",
-    "tv_console": "rack/aparador", "pillows": "almofadas", "vase": "vaso", "bowl": "fruteira",
-    "books": "livros", "bed": "cama", "nightstand": "criado-mudo", "table_lamp": "abajur",
-    "dresser": "cômoda", "throw": "manta", "dining_table": "mesa de jantar", "dining_chair": "cadeira",
-    "shelf": "estante", "desk": "escrivaninha", "desk_chair": "cadeira de trabalho", "bar_stool": "banqueta",
-    "kitchen_decor": "utensílio decorativo", "basket": "cesto", "wall_mirror": "espelho",
-}
 
 
 @dataclass
@@ -632,26 +623,13 @@ class Solver:
         sc = self.score(items)
         layout = Layout(room_type=self.room_type, style=self.profile.style, palette=self.profile.palette,
                         items=placed, score=round(sc.total, 3), notes=[])
-        layout.notes.append(self.profile.describe())
         missing = []
         for role, req, n in self.program:
             got = sum(1 for p in items if p.role == role)
             if got == 0:
                 missing.append(ROLE_LABELS.get(role, role) + (" (essencial)" if req else ""))
-        anc = next((p for p in items if p.role in ("sofa", "bed", "dining_table", "desk")), None)
-        if anc is not None:
-            frac, wid = ctx.wall_contact(self.cache.geo(anc).poly, -anc.front)
-            a = "o" if anc.role == "sofa" else "a"
-            onde = f"encostad{a} na parede P{wid}" if wid is not None and frac > 0.5 else f"solt{a} no ambiente"
-            f = float(anc.front @ ctx.dir_to_camera(anc.xy))
-            vista = "de frente para a câmera" if f > 0.5 else ("de perfil para a câmera" if f > -0.3 else "de costas")
-            layout.notes.append(f"{ROLE_LABELS[anc.role].capitalize()} {onde}, {vista}.")
-        if missing:
-            layout.notes.append("Sem espaço livre visível na foto para: " + ", ".join(missing) + ".")
-        viol = validate_layout(layout, ctx, self.cache)
-        if viol:
-            layout.notes.append("Atenção: " + "; ".join(viol))
-        layout.notes.append(f"Pontuação: {sc.total:.1f} ({len(placed)} peças).")
+        # narrativa de designer (PT12): as escolhas explicadas, exibida na interface
+        layout.notes = designer_notes(layout, ctx, self.profile, missing, validate_layout(layout, ctx, self.cache))
         return layout
 
 

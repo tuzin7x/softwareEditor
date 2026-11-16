@@ -16,7 +16,7 @@ from PySide6.QtCore import QMimeData, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-                               QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__, bootstrap, diagnostics, runtime
 from ..jobs import ROOM_TYPES, STAGES, JobRequest
@@ -285,8 +285,14 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w); lay.setContentsMargins(22, 22, 22, 22); lay.setSpacing(12)
         s = QLabel("PRONTO"); s.setObjectName("section")
         self.result_info = QLabel(""); self.result_info.setWordWrap(True)
+        # narrativa de designer (PT12): por que cada peça foi escolhida e onde ficou
+        self.notes_title = QLabel("ESCOLHAS DO DESIGNER"); self.notes_title.setObjectName("section")
+        self.result_notes = QLabel(""); self.result_notes.setWordWrap(True)
+        self.result_notes.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.result_notes.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         st = QLabel("TEMPO POR ETAPA"); st.setObjectName("section")
         self.result_times = QLabel(""); self.result_times.setObjectName("muted"); self.result_times.setWordWrap(True)
+        self.result_times.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)   # nunca cortado pela narrativa
         self.btn_export = QPushButton("Exportar MP4…"); self.btn_export.setObjectName("primary")
         self.btn_export.clicked.connect(self.export)
         self.btn_folder = QPushButton("Abrir pasta"); self.btn_folder.clicked.connect(self.open_folder)
@@ -297,7 +303,13 @@ class MainWindow(QMainWindow):
         self.chk_diag_photo = QCheckBox("Incluir a foto no diagnóstico")
         self.btn_new = QPushButton("Nova foto"); self.btn_new.clicked.connect(self.new_photo)
         lay.addWidget(s); lay.addWidget(self.result_info); lay.addSpacing(6)
-        lay.addWidget(st); lay.addWidget(self.result_times); lay.addStretch(1)
+        self.notes_scroll = QScrollArea(); self.notes_scroll.setWidgetResizable(True)
+        self.notes_scroll.setFrameShape(QFrame.NoFrame); self.notes_scroll.setWidget(self.result_notes)
+        self.notes_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.notes_scroll.setMinimumHeight(110)
+        self.notes_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        lay.addWidget(self.notes_title); lay.addWidget(self.notes_scroll, 1); lay.addSpacing(6)
+        lay.addWidget(st); lay.addWidget(self.result_times)
         lay.addWidget(self.btn_export); lay.addWidget(self.btn_folder)
         lay.addWidget(self.btn_diag); lay.addWidget(self.chk_diag_photo); lay.addWidget(self.btn_new)
         return w
@@ -432,6 +444,12 @@ class MainWindow(QMainWindow):
                                      "Fora dos móveis e das sombras, a foto original foi preservada "
                                      "pixel a pixel (verificado em cada quadro).")
             self.result_times.setText(self._times_text(job))
+            # altura mínima do texto (linhas + 1 de quebra): a narrativa rola, os tempos não são cortados
+            n = self.result_times.text().count("\n") + 2
+            self.result_times.setMinimumHeight(self.result_times.fontMetrics().lineSpacing() * n)
+            notes = self._designer_notes(job)
+            self.result_notes.setText("\n".join(f"•  {n}" for n in notes))
+            self.notes_title.setVisible(bool(notes)); self.notes_scroll.setVisible(bool(notes))
             self.left.setCurrentIndex(2); self.right.setCurrentIndex(2)
             self.video.play(job.output)
             return
@@ -450,6 +468,23 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError):
             return ""
         return diagnostics.summary_text(rep)
+
+    @staticmethod
+    def _designer_notes(job: QueuedJob) -> list[str]:
+        """Narrativa de designer do trabalho: report.json (``narrativa``) ou, sem ela, layout.json."""
+        srcs = []
+        if job.report:
+            srcs.append((Path(job.report), lambda d: d.get("narrativa") or (d.get("layout") or {}).get("notes")))
+        if job.work_dir:
+            srcs.append((Path(job.work_dir) / "layout.json", lambda d: d.get("notes")))
+        for path, pick in srcs:
+            try:
+                notes = pick(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, AttributeError):
+                continue
+            if notes:
+                return [str(n) for n in notes]
+        return []
 
     def show_error(self, message: str, detail: str = "") -> None:
         box = QMessageBox(self)

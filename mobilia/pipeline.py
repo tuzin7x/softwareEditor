@@ -239,6 +239,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             except Exception as e:  # visualização é opcional
                 em.log(f"Sem prévia do layout: {e}", "warning")
             em.log(f"Layout: {len(layout.items)} itens, estilo {layout.style}")
+            for n in layout.notes:                      # narrativa de designer (PT12)
+                em.log(f"Designer: {n}")
 
         # ---------------------------------------------------------------- assets + cena
         dl_models = float(sw.get("download", 0.0))        # pesos dos modelos que faltavam (análise)
@@ -409,6 +411,7 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
         "sala": {"camera_altura_m": room.camera_height, "pe_direito_m": room.ceiling_height,
                  "paredes": len(room.walls), "aberturas": [o.kind for o in room.openings],
                  "qualidade": room.quality},
+        "narrativa": list(layout.notes),               # exibida na tela de conclusão (PT12)
         "layout": json.loads(layout.to_json()),
         "calibracao_luz": calib_view,
         "lente": {"k1": None, "melhora_retidao": None, "aplicada": False},

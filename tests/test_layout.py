@@ -505,3 +505,92 @@ def test_glide_paths_recorded_and_free(name, room_type):
                 assert fp.intersection(q).area <= ov + 0.02 * 0.5, (it.id, s)
     if (name, room_type) in (("ampla_frontal", "sala_jantar"), ("cozinha_ilha", "cozinha")):
         assert n_glide >= 2
+
+
+# ----------------------------------------------------------------------------- narrativa de designer (PT12)
+
+def _num(s: str) -> float:
+    return float(s.replace(",", "."))
+
+
+@pytest.mark.parametrize("name,room_type", CASES)
+def test_designer_narrative_present(name, room_type):
+    """Toda sala ganha a narrativa: ambiente medido, estilo e o que ficou de fora do programa."""
+    room, grid, photo = get_room(name)
+    lay = get_layout(name, room_type)
+    notes = lay.notes
+    assert len(notes) >= 2 and all(n.strip() and n.rstrip().endswith(".") for n in notes)
+    assert "pé-direito" in notes[0] and "m² de piso livre visível" in notes[0]
+    assert notes[1].startswith("Estilo ")
+    assert not any(n.startswith("Pontuação") for n in notes)       # a nota técnica fica em ``score``
+    roles = {it.role for it in lay.items}
+    from mobilia.layout.narrative import ANCHOR_ROLES, label
+    anchors = [r for r in ANCHOR_ROLES if r in roles]
+    if anchors:
+        assert any(n.startswith("Escolhi ") for n in notes)
+    # cada papel do programa que não entrou aparece em "Não coube"
+    for role, _req, _n in catalog.ROOM_PROGRAMS[room_type]:
+        if role not in roles:
+            miss = next(n for n in notes if n.startswith("Não coube"))
+            assert label(role) in miss
+
+
+def test_designer_narrative_matches_stafford_layout():
+    """As medidas citadas são as do layout (sofá, tapete, mesa de centro, quadros) e da sala medida."""
+    import re
+
+    room, grid, photo = get_room("stafford")
+    lay = get_layout("stafford", "sala")
+    notes = lay.notes
+    text = "\n".join(notes)
+    ctx = LayoutContext(room, grid)
+    m = re.search(r"pé-direito (?:estimado em )?([\d,]+) m, ([\d,]+) m²", notes[0])
+    assert m and abs(_num(m.group(1)) - ctx.ceiling) < 0.006 and abs(_num(m.group(2)) - ctx.free_area) < 0.51
+    assert notes[0].startswith("Sala clara, carpete claro")       # sala clara (PT9) com carpete claro
+    sofa = next(it for it in lay.items if it.role == "sofa")
+    m = re.search(r"Escolhi um sofá .* de ([\d,]+) m, encostado na parede P(\d+)", text)
+    assert m and abs(_num(m.group(1)) - sofa.size[0]) < 0.006 and int(m.group(2)) == sofa.wall_id
+    rug = next(it for it in lay.items if it.role == "rug")
+    m = re.search(r"Tapete de ([\d,]+) × ([\d,]+) m", text)
+    assert m and abs(_num(m.group(1)) - max(rug.size[:2])) < 0.006 and abs(_num(m.group(2)) - min(rug.size[:2])) < 0.006
+    assert "pés dianteiros do sofá sobre ele" in text               # verificado no teste acima (polido)
+    ct = next(it for it in lay.items if it.role == "coffee_table")
+    m = re.search(r"Mesa de centro de ([\d,]+) m \((\d+)% da largura do sofá\) a (\d+) cm", text)
+    assert m and abs(_num(m.group(1)) - max(ct.size[:2])) < 0.006
+    assert abs(int(m.group(2)) - 100 * max(ct.size[:2]) / sofa.size[0]) <= 0.5
+    assert 35 <= int(m.group(3)) <= 55
+    arts = [it for it in lay.items if it.role == "wall_art"]
+    m = re.search(r"(?:Par de quadros|Quadro) de (\d+) × (\d+) cm.*centro a ([\d,]+) m do piso", text)
+    assert m and int(m.group(1)) == round(arts[0].size[0] * 100) and int(m.group(2)) == round(arts[0].size[2] * 100)
+    assert abs(_num(m.group(3)) - (arts[0].position[2] + arts[0].size[2] / 2)) < 0.006
+    assert "sobre a mesa de centro" in text and "Almofadas no sofá" in text
+
+
+def test_designer_narrative_rules_synthetic():
+    """Regras da narrativa em itens montados à mão (independentes do solver)."""
+    from mobilia.layout.model import PlacedItem
+    from mobilia.layout.narrative import (decor_sentence, fmt_dims, fmt_num, front_feet_on_rug, item_below_art,
+                                          rug_sentence)
+
+    assert fmt_num(1.5) == "1,5" and fmt_num(2.0) == "2" and fmt_num(2.449) == "2,45" and fmt_num(11.2, 0) == "11"
+    assert fmt_dims(0.45, 0.6) == "45 × 60 cm" and fmt_dims(1.4, 0.93) == "1,4 × 0,93 m"
+    sofa = PlacedItem("sofa_0", "sofa", "ph:Sofa_01", [0.0, 3.0, 0.0], 0.0, size=[2.0, 0.9, 0.8], wall_id=0)
+    # yaw 0: frente para -y (para a câmera em y < 3); pés dianteiros em y ~ 3 - 0.45 + 0.08
+    rug_ok = PlacedItem("rug_0", "rug", "proc:rug", [0.0, 2.2, 0.0], 0.0, size=[2.4, 1.7, 0.012])
+    rug_short = PlacedItem("rug_0", "rug", "proc:rug", [0.0, 1.6, 0.0], 0.0, size=[2.4, 1.7, 0.012])
+    assert front_feet_on_rug(sofa, rug_ok) and not front_feet_on_rug(sofa, rug_short)
+    assert "pés dianteiros do sofá" in rug_sentence(rug_ok, [sofa, rug_ok], sofa)
+    assert "pés dianteiros" not in rug_sentence(rug_short, [sofa, rug_short], sofa)
+    art = PlacedItem("wall_art_0", "wall_art", "proc:canvas_art", [0.1, 3.47, 1.2], 180.0,
+                     size=[1.2, 0.035, 0.8], mount="wall", wall_id=0)
+    plant = PlacedItem("plant_large_0", "plant_large", "ph:potted_plant_01", [1.6, 3.2, 0.0], size=[0.6, 0.6, 1.1])
+    assert item_below_art(art, [sofa, plant, rug_ok]) is sofa
+    art2 = PlacedItem("wall_art_0", "wall_art", "proc:canvas_art", [1.6, 3.47, 1.4], 180.0,
+                      size=[0.6, 0.035, 0.8], mount="wall", wall_id=0)
+    assert item_below_art(art2, [sofa, plant]) is None              # planta não conta como "móvel abaixo"
+    ns = [PlacedItem(f"nightstand_{i}", "nightstand", "ph:painted_wooden_nightstand", [i * 2.0, 3.0, 0.0],
+                     size=[0.5, 0.5, 0.6], order=i) for i in range(2)]
+    lamps = [PlacedItem(f"table_lamp_{i}", "table_lamp", "proc:table_lamp", [i * 2.0, 3.0, 0.6], mount="on_top",
+                        parent=f"nightstand_{i}", order=2 + i) for i in range(2)]
+    assert decor_sentence(ns + lamps) == "Abajur sobre cada criado-mudo."
+    assert decor_sentence(ns + lamps[:1]) == "Abajur sobre o criado-mudo."

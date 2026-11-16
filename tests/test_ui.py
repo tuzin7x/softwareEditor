@@ -98,6 +98,9 @@ def test_copy_diagnostic_zip_without_photo(app, win, tmp_path):
     assert _wait(app, lambda: win.right.currentIndex() == 2)
     # tempo por etapa na tela de conclusão (vem do report.json do trabalho)
     assert "Render dos quadros" in win.result_times.text() and "Total" in win.result_times.text()
+    # narrativa de designer (PT12) do report.json na tela de conclusão
+    assert "Escolhi um sofá de tecido claro de 1,57 m" in win.result_notes.text()
+    assert win.notes_scroll.isVisible() and win.result_notes.text().startswith("•  Sala clara")
     assert win.btn_diag.isVisible()
     z = win.copy_diagnostic()
     assert z is not None and z.exists()

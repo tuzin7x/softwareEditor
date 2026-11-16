@@ -104,6 +104,10 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     res = pipeline.run_job(req, ProgressEmitter(callback=events.append))
     assert out.exists()
     rep = json.loads(Path(res.report_path).read_text(encoding="utf-8"))
+    # narrativa de designer (PT12): no relatório (para a interface) e no registro do motor
+    assert rep["narrativa"] and rep["narrativa"] == rep["layout"]["notes"]
+    assert "pé-direito" in rep["narrativa"][0]
+    assert any(e.get("event") == "log" and str(e.get("message", "")).startswith("Designer: ") for e in events)
     t = rep["tempos_s"]
     # todas as etapas da seção 4 do PLANO_V2, com as subetapas da análise
     for k in ETAPAS + ("total", "total_percebido"):
