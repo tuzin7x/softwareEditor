@@ -216,8 +216,12 @@ def _mesh_object(name: str, verts, faces, mat) -> bpy.types.Object:
 
 
 def wall_with_holes(p0, d, n, length, height, holes, ext=0.35):
-    """Malha de parede (quads) com recortes retangulares nas janelas."""
-    s_cuts = sorted({-ext, length + ext} | {max(-ext, min(length + ext, v)) for h in holes for v in (h[0], h[1])})
+    """Malha de parede (quads) com recortes retangulares nas janelas.
+
+    ``ext`` = extensão além das pontas (número ou [início, fim]); ver ``scene_spec.wall_extensions``.
+    """
+    e0, e1 = (float(ext), float(ext)) if np.isscalar(ext) else (float(ext[0]), float(ext[1]))
+    s_cuts = sorted({-e0, length + e1} | {max(-e0, min(length + e1, v)) for h in holes for v in (h[0], h[1])})
     z_cuts = sorted({0.0, height} | {max(0.0, min(height, v)) for h in holes for v in (h[2], h[3])})
     verts, faces, idx = [], [], {}
 
@@ -269,7 +273,7 @@ def build_room(sc, spec: dict, photo_img) -> list:
         n = np.asarray(w["normal"])
         holes = [(o["s0"], o["s1"], o["z0"], o["z1"]) for o in room["openings"]
                  if o["wall"] == w["id"] and o["kind"] == "window"]
-        verts, faces = wall_with_holes(p0, d, n, L, ch_h, holes)
+        verts, faces = wall_with_holes(p0, d, n, L, ch_h, holes, ext=w.get("ext", 0.35))
         ob = _mesh_object(f"proxy_wall_{w['id']}", verts, faces, m_wall)
         # garante normal apontando para dentro da sala
         me = ob.data
@@ -801,6 +805,9 @@ def compute_border(sc, cam, items_rt: list[dict], margin_m: float) -> tuple[floa
             for x in (mn.x - margin_m, mx.x + margin_m):
                 for y in (mn.y - margin_m, mx.y + margin_m):
                     pts.append(mathutils.Vector((x, y, 0.0)))
+                    # e na vertical: peças de parede (quadros) e altas (luminária) sombreiam a
+                    # parede acima delas; sem isso o border corta a sombra logo acima da peça
+                    pts.append(mathutils.Vector((x, y, mx.z + margin_m)))
     if not pts:
         return None
     xs, ys = [], []

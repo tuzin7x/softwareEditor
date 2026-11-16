@@ -16,6 +16,19 @@ import sys
 import traceback
 
 
+def _cmd_recompose(a) -> int:
+    from .jobs import ProgressEmitter
+    from .pipeline import recompose
+
+    em = ProgressEmitter(callback=lambda ev: ev["event"] in ("log", "error") and print(ev["message"], flush=True))
+    rep = recompose(a.work_dir, a.out, em)
+    pres, enc = rep["preservacao"], rep["encode"]
+    print(f"Vídeo: {enc['arquivo']} | quadros {pres['quadros']} | bit-exato fora dos móveis: "
+          f"{pres['todos_bit_exatos_fora_dos_objetos']} | PSNR: "
+          + ", ".join(f"{c['psnr_total_db']} dB" for c in enc["verificacao"]))
+    return 0 if pres["todos_bit_exatos_fora_dos_objetos"] else 1
+
+
 def _cmd_run(a) -> int:
     from .jobs import JobRequest, ProgressEmitter
     from .pipeline import run_job
@@ -153,9 +166,12 @@ def main(argv=None) -> int:
     b.add_argument("--seed", type=int, default=7)
     pf = sub.add_parser("prefetch", help="baixa modelos de IA e assets 3D (uso offline)")
     pf.add_argument("--json", action="store_true")
+    rc = sub.add_parser("recompor", help="refaz composição e MP4 de um trabalho já renderizado")
+    rc.add_argument("--work-dir", required=True)
+    rc.add_argument("--out", default=None, help="MP4 de saída (padrão: o do pedido original)")
     a = p.parse_args(argv)
     return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch,
-            "prefetch": _cmd_prefetch}[a.cmd](a)
+            "prefetch": _cmd_prefetch, "recompor": _cmd_recompose}[a.cmd](a)
 
 
 if __name__ == "__main__":

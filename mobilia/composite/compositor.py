@@ -163,9 +163,12 @@ class LayerAccumulator:
     (as duas renders mostram a mesma cena estática fora das peças em movimento).
     """
 
-    def __init__(self, height: int, width: int, feather_px: int = 12):
+    def __init__(self, height: int, width: int, feather_px: int = 12, shadow_feather_px: int = 0):
         self.H, self.W = height, width
         self.feather = max(1, int(feather_px))
+        # rampa da SOMBRA nas bordas internas do retângulo renderizado: fora dele a sombra
+        # é neutra (1); sem rampa, o fim do border vira um degrau visível na parede/piso
+        self.shadow_feather = max(0, int(shadow_feather_px))
         self.reset()
 
     def reset(self) -> None:
@@ -173,12 +176,12 @@ class LayerAccumulator:
         self.shadow = np.ones((self.H, self.W, 3), np.float32)
         self.empty = True
 
-    def _weights(self, border: list[int]) -> tuple[tuple[slice, slice], np.ndarray]:
+    def _weights(self, border: list[int], feather: float | None = None) -> tuple[tuple[slice, slice], np.ndarray]:
         x0, y0, x1, y1 = [int(v) for v in border]
         x0, y0 = max(0, x0), max(0, y0)
         x1, y1 = min(self.W, x1), min(self.H, y1)
         h, w = max(0, y1 - y0), max(0, x1 - x0)
-        f = float(self.feather)
+        f = float(self.feather if feather is None else feather)
         # rampa só nas bordas internas da região (na borda da imagem não há o que misturar)
         yy = np.arange(h, dtype=np.float32) + 0.5
         xx = np.arange(w, dtype=np.float32) + 0.5
@@ -205,7 +208,12 @@ class LayerAccumulator:
         if mode != "incremental" or self.empty:
             self.reset()
             self.rgba[sl] = rgba[sl]
-            self.shadow[sl] = shadow[sl]
+            if self.shadow_feather > 0:
+                _, ws = self._weights(border, self.shadow_feather)
+                ws = (ws * ws * (3 - 2 * ws))[..., None]          # smoothstep
+                self.shadow[sl] = 1.0 + (shadow[sl] - 1.0) * ws
+            else:
+                self.shadow[sl] = shadow[sl]
             self.empty = False
             return
         w4 = wgt[..., None]
@@ -229,4 +237,21 @@ def load_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:
     if sk:
         b = sk[0][:-2]
         shadow = np.stack([chs[b + ".R"], chs[b + ".G"], chs[b + ".B"]], -1)
-    return rgba, shadow
+    return rgba, mask_unrendered(rgba, shadow)
+
+
+def mask_unrendered(rgba: np.ndarray, shadow: np.ndarray | None) -> np.ndarray | None:
+    """Pixels fora da região de render (border) chegam com TODOS os canais = 0.
+
+    Um shadow catcher renderizado nunca dá razão exatamente 0 com CG vazio (há sempre luz
+    ambiente), então esses pixels são "não renderizados": sombra neutra (1), nunca preta.
+    Sem isso, um arredondamento de 1 px entre o retângulo anotado e o que o Cycles
+    renderizou vira uma linha escura sobre a foto.
+    """
+    if shadow is None:
+        return None
+    blank = (shadow == 0).all(-1) & (rgba == 0).all(-1)
+    if blank.any():
+        shadow = shadow.copy()
+        shadow[blank] = 1.0
+    return shadow

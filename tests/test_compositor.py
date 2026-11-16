@@ -98,3 +98,38 @@ def test_layer_accumulator_incremental_paste_is_seamless():
     # um quadro "full" substitui tudo
     acc.update(full, sh, [0, 0, W, H], "full")
     assert np.allclose(acc.rgba, full)
+
+
+def test_unrendered_border_rows_are_neutral_not_black():
+    """Linhas fora do border do Cycles chegam zeradas; não podem virar sombra preta."""
+    from mobilia.composite.compositor import Compositor, mask_unrendered
+
+    H, W = 60, 80
+    photo = np.full((H, W, 3), 180, np.uint8)
+    rgba = np.zeros((H, W, 4), np.float32)
+    shadow = np.zeros((H, W, 3), np.float32)
+    shadow[20:] = 1.0                       # região renderizada: sem sombra
+    rgba[22:40, 30:50] = [0.2, 0.2, 0.2, 1.0]  # um móvel colado à borda do render
+    shadow2 = mask_unrendered(rgba, shadow)
+    assert (shadow2[:20] == 1.0).all() and (shadow[:20] == 0).all()   # não altera a entrada
+    out, st = Compositor(photo).composite(1, rgba, shadow2, None)
+    assert st.preserved_exact
+    assert (out[:20] == photo[:20]).all()   # nada escurece acima da região renderizada
+    # controle: sem a máscara, a mesma entrada escurece a foto (era o defeito da linha na parede)
+    out_bad, _ = Compositor(photo).composite(1, rgba, shadow, None)
+    assert (out_bad[:20] != photo[:20]).any()
+
+
+def test_accumulator_shadow_fades_at_internal_border_edge():
+    from mobilia.composite.compositor import LayerAccumulator
+
+    H, W = 100, 100
+    acc = LayerAccumulator(H, W, feather_px=4, shadow_feather_px=20)
+    rgba = np.zeros((H, W, 4), np.float32)
+    shadow = np.full((H, W, 3), 0.8, np.float32)
+    acc.update(rgba, shadow, [0, 40, W, H], "full")
+    col = acc.shadow[:, 50, 0]
+    assert (col[:40] == 1.0).all()                      # fora do border: neutro
+    assert abs(col[40] - 1.0) < 0.01                    # sem degrau na borda interna
+    assert np.all(np.diff(col[40:61]) <= 1e-6)          # rampa monótona
+    assert abs(col[70] - 0.8) < 1e-6 and abs(col[99] - 0.8) < 1e-6   # borda da imagem: sem rampa

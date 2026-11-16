@@ -82,9 +82,7 @@ def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | Non
 
 def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     from .analysis.segmentation import SegmentationResult
-    from .composite.compositor import Compositor, LayerAccumulator, load_render_passes
     from .render.scene_spec import build_scene_spec
-    from .video.encoder import EncodeSettings, VideoWriter, decode_frames, psnr
 
     cfg = AppConfig()
     t0 = time.time()
@@ -175,13 +173,56 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
 
     # ---------------------------------------------------------------- composição + vídeo
     t = time.time()
-    em.stage("composicao", 0.0, "Compondo sobre a foto original")
-    comp = Compositor(plate8, seed=req.seed)
-    fps = q["fps"]
+    comp = compose_video(work, plate8, render_meta, Path(req.output_path), q["fps"], req.seed, em)
+    timings["composicao_video"] = comp["seconds"]
+    timings["verificacao"] = comp["verify_seconds"]
     out_path = Path(req.output_path)
-    codec = "libx264"
-    enc = VideoWriter(out_path, plate.width, plate.height, fps, EncodeSettings(codec=codec),
-                      log_path=work / "encode.log")
+
+    report = {
+        "versao": __version__,
+        "data": stamp,
+        "foto": {"arquivo": str(req.photo_path), "original": [original.width, original.height],
+                 "placa_video": [plate.width, plate.height],
+                 "reduzida": [original.width, original.height] != [plate.width, plate.height]},
+        "ambiente": req.room_type,
+        "qualidade": q,
+        "hardware": json.loads(hw.to_json()),
+        "perfil": prof.__dict__,
+        "sala": {"camera_altura_m": room.camera_height, "pe_direito_m": room.ceiling_height,
+                 "paredes": len(room.walls), "aberturas": [o.kind for o in room.openings],
+                 "qualidade": room.quality},
+        "layout": json.loads(layout.to_json()),
+        "calibracao_luz": render_meta.get("calibration"),
+        "sol": sun.to_dict() if sun is not None else None,
+        "render": {"dispositivo": render_meta.get("device"), "tempos": render_meta.get("timings")},
+        "preservacao": comp["preservacao"],
+        "encode": comp["encode"],
+        "tempos_s": {k: round(v, 1) for k, v in timings.items()},
+        "licencas_assets": sorted({i.asset_id for i in layout.items}),
+        "previas": comp["previas"],
+        "plataforma": platform.platform(),
+    }
+    rp = work / "report.json"
+    rp.write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    return JobResult(str(out_path), str(rp), str(work), timings)
+
+
+def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: Path, fps: int,
+                  seed: int, em: ProgressEmitter, codec: str = "libx264") -> dict:
+    """Compõe os passes renderizados sobre a foto, grava o MP4 e verifica o resultado.
+
+    Usa só o que está em ``work/render`` (EXRs + frames.json): pode ser repetido sem
+    renderizar de novo (comando ``recompor``).
+    """
+    from .composite.compositor import Compositor, LayerAccumulator, load_render_passes
+    from .video.encoder import EncodeSettings, VideoWriter, decode_frames, psnr
+
+    t = time.time()
+    em.stage("composicao", 0.0, "Compondo sobre a foto original")
+    H, W = plate8.shape[:2]
+    comp = Compositor(plate8, seed=seed)
+    out_path = Path(out_path)
+    enc = VideoWriter(out_path, W, H, fps, EncodeSettings(codec=codec), log_path=work / "encode.log")
     frames = render_meta["frames"]
     stats = []
     previews = []
@@ -190,7 +231,8 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
     n = len(frames)
     sample = sorted({1, max(1, n // 2), n})
     masters: dict[int, np.ndarray] = {}
-    acc = LayerAccumulator(plate.height, plate.width, feather_px=max(6, plate.width // 120))
+    acc = LayerAccumulator(H, W, feather_px=max(6, W // 120),
+                           shadow_feather_px=max(16, int(0.04 * float(np.hypot(W, H)))))
     loaded_src = None
     for i, fr in enumerate(frames):
         src = fr.get("source")
@@ -219,55 +261,53 @@ def run_job(req: JobRequest, em: ProgressEmitter) -> JobResult:
             em.stage("composicao", i / n, f"Quadro {i + 1}/{n}")
     em.stage("video", 0.5, "Finalizando o MP4")
     enc.close()
-    timings["composicao_video"] = time.time() - t
+    seconds = time.time() - t
 
-    # ---------------------------------------------------------------- verificação do encode
+    # ---- verificação do encode (decodifica e compara com os quadros mestres)
     t = time.time()
     check = []
-    for idx, dec in decode_frames(out_path, plate.width, plate.height, sample):
+    for idx, dec in decode_frames(out_path, W, H, sample):
         ref = masters.get(idx)
         if ref is None:
             continue
         untouched = (ref == plate8).all(-1)
         check.append({"frame": idx, "psnr_total_db": round(psnr(dec, ref), 2),
                       "psnr_fundo_db": round(psnr(dec, plate8, untouched), 2)})
-    timings["verificacao"] = time.time() - t
     em.stage("video", 1.0, "Vídeo pronto")
-
-    report = {
-        "versao": __version__,
-        "data": stamp,
-        "foto": {"arquivo": str(req.photo_path), "original": [original.width, original.height],
-                 "placa_video": [plate.width, plate.height],
-                 "reduzida": [original.width, original.height] != [plate.width, plate.height]},
-        "ambiente": req.room_type,
-        "qualidade": q,
-        "hardware": json.loads(hw.to_json()),
-        "perfil": prof.__dict__,
-        "sala": {"camera_altura_m": room.camera_height, "pe_direito_m": room.ceiling_height,
-                 "paredes": len(room.walls), "aberturas": [o.kind for o in room.openings],
-                 "qualidade": room.quality},
-        "layout": json.loads(layout.to_json()),
-        "calibracao_luz": render_meta.get("calibration"),
-        "sol": sun.to_dict() if sun is not None else None,
-        "render": {"dispositivo": render_meta.get("device"), "tempos": render_meta.get("timings")},
+    changed = max((s.changed_pixels for s in stats), default=0)
+    return {
+        "seconds": seconds,
+        "verify_seconds": time.time() - t,
+        "previas": previews,
         "preservacao": {
             "quadros": len(stats),
             "todos_bit_exatos_fora_dos_objetos": all(s.preserved_exact for s in stats),
-            "max_pixels_alterados_em_um_quadro": max((s.changed_pixels for s in stats), default=0),
-            "fracao_max_alterada": round(max((s.changed_pixels for s in stats), default=0) / plate8[..., 0].size, 4),
+            "max_pixels_alterados_em_um_quadro": changed,
+            "fracao_max_alterada": round(changed / plate8[..., 0].size, 4),
             "quadros_identicos_a_foto": sum(1 for s in stats if s.changed_pixels == 0),
         },
         "encode": {"codec": codec, "verificacao": check, "arquivo": str(out_path),
                    "bytes": out_path.stat().st_size},
-        "tempos_s": {k: round(v, 1) for k, v in timings.items()},
-        "licencas_assets": sorted({i.asset_id for i in layout.items}),
-        "previas": previews,
-        "plataforma": platform.platform(),
     }
+
+
+def recompose(work_dir: str | Path, out_path: str | Path | None, em: ProgressEmitter) -> dict:
+    """Refaz composição + MP4 de um trabalho já renderizado (sem Blender, sem IA)."""
+    work = Path(work_dir)
+    plate8 = np.asarray(Image.open(work / "plate.png").convert("RGB"))
+    render_meta = json.loads((work / "render" / "frames.json").read_text(encoding="utf-8"))
+    req = json.loads((work / "request.json").read_text(encoding="utf-8"))
     rp = work / "report.json"
+    report = json.loads(rp.read_text(encoding="utf-8")) if rp.exists() else {}
+    fps = int(report.get("qualidade", {}).get("fps") or
+              json.loads((work / "scene.json").read_text(encoding="utf-8"))["render"]["fps"])
+    out = Path(out_path) if out_path else Path(req["output_path"])
+    comp = compose_video(work, plate8, render_meta, out, fps, int(req.get("seed", 7)), em)
+    report.update({"preservacao": comp["preservacao"], "encode": comp["encode"], "previas": comp["previas"]})
+    report.setdefault("tempos_s", {})["recomposicao"] = round(comp["seconds"] + comp["verify_seconds"], 1)
     rp.write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    return JobResult(str(out_path), str(rp), str(work), timings)
+    return report
+
 
 
 def _run_render_worker(spec_path: Path, em: ProgressEmitter) -> dict:

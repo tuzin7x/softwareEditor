@@ -28,3 +28,19 @@ def test_bed_and_desk_params():
     assert b["fabric_color"] and b["duvet_color"] == "#f4f2ee" and len(b["pillow_colors"]) == 2
     d = normalize_procedural_params("desk", {"top_color": (0.25, 0.15, 0.1), "leg_color": (0.1, 0.1, 0.1)})
     assert d == {"wood": "walnut", "legs": "black"}
+
+
+def test_wall_extension_never_passes_in_front_of_another_wall():
+    """Caso real da sala de teste: a parede 2 chega oblíqua na ponta da parede 1."""
+    from mobilia.render.scene_spec import wall_extensions
+
+    walls = [
+        {"id": 0, "p0": [-3.36, 5.02], "p1": [-3.36, 1.28], "normal": [1.0, 0.0]},
+        {"id": 1, "p0": [-1.70, 5.10], "p1": [-3.24, 5.10], "normal": [0.0, -1.0]},
+        {"id": 2, "p0": [-0.67, 5.87], "p1": [-1.73, 5.16], "normal": [0.56, -0.83]},
+    ]
+    ext = wall_extensions(walls)
+    # parede 2 -> ponta p1: só até cruzar o plano da parede 1 (~0,1 m), não os 0,35 m de antes
+    assert ext[2][1] < 0.15
+    # quinas de 90° (parede 0 x parede 1) continuam fechadas com a extensão cheia
+    assert ext[0][0] == 0.35 and ext[1][1] == 0.35
