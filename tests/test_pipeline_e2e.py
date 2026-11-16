@@ -186,6 +186,70 @@ def test_fast_pipeline_keeps_exr_on_request(tmp_path, monkeypatch):
     assert all(np.array_equal(a[i], b[i]) for i in idx)
 
 
+def test_compose_deletes_exr_after_last_use_and_survives_locked_file(tmp_path, monkeypatch):
+    """Cada EXR sai do disco só depois do último quadro que o usa (o reaproveitado também); um
+    arquivo preso (antivírus no Windows) vira aviso, o vídeo sai igual e a telemetria só conta
+    o que foi apagado de fato."""
+    import OpenEXR
+
+    from mobilia import pipeline
+    from mobilia.jobs import ProgressEmitter
+    from mobilia.video.encoder import VideoWriter
+
+    H, W = 48, 64
+    plate8 = np.random.default_rng(1).integers(0, 256, size=(H, W, 3), dtype=np.uint8)
+    frames_dir = tmp_path / "render" / "frames"
+    frames_dir.mkdir(parents=True)
+
+    def write(name, border):
+        x0, y0, x1, y1 = border
+        h, w = y1 - y0, x1 - x0
+        rgba = np.zeros((h, w, 4), np.float16)
+        rgba[h // 4:3 * h // 4, w // 4:3 * w // 4] = [0.3, 0.2, 0.1, 1.0]
+        sh = np.ones((h, w, 3), np.float16)
+        ch = {f"Combined.{c}": np.ascontiguousarray(rgba[..., i]) for i, c in enumerate("RGBA")}
+        ch.update({f"Shadow Catcher.{c}": np.ascontiguousarray(sh[..., i]) for i, c in enumerate("RGB")})
+        with OpenEXR.File({"compression": OpenEXR.RLE_COMPRESSION, "type": OpenEXR.scanlineimage}, ch) as f:
+            f.write(str(frames_dir / name))
+
+    write("f_00001.exr", [8, 10, 40, 38])
+    write("f_00003.exr", [4, 6, 50, 44])
+    size1 = (frames_dir / "f_00001.exr").stat().st_size
+    meta = {"exr": {"recorte": True, "codec": "RLE"}, "frames": [
+        {"frame": 1, "source": "f_00001.exr", "border": [8, 10, 40, 38], "mode": "full", "crop": True},
+        {"frame": 2, "source": "f_00001.exr", "border": [8, 10, 40, 38], "reused": True},
+        {"frame": 3, "source": "f_00003.exr", "border": [4, 6, 50, 44], "mode": "full", "crop": True},
+        {"frame": 4, "source": None, "border": None}]}
+
+    written = {"n": 0}
+    orig_write, orig_unlink = VideoWriter.write, Path.unlink
+    deleted: list[tuple[str, int]] = []
+
+    def counting_write(self, frame):
+        written["n"] += 1
+        return orig_write(self, frame)
+
+    def flaky_unlink(self, *a, **kw):
+        if self.suffix == ".exr" and self.parent == frames_dir:
+            deleted.append((self.name, written["n"]))
+            if self.name == "f_00003.exr":
+                raise PermissionError(13, "arquivo em uso por outro processo", str(self))
+        return orig_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(VideoWriter, "write", counting_write)
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    events: list[dict] = []
+    comp = pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7,
+                                  ProgressEmitter(callback=events.append), delete_exr=True)
+    # f_00001 só depois do quadro 2 (reaproveitado: 1 quadro já enviado ao codificador), não no 1
+    assert deleted == [("f_00001.exr", 1), ("f_00003.exr", 2)]
+    assert not (frames_dir / "f_00001.exr").exists() and (frames_dir / "f_00003.exr").exists()
+    c = comp["composicao"]
+    assert c["exr_apagados"] == 1 and c["exr_bytes_apagados"] == size1
+    assert any(e["event"] == "log" and e["level"] == "warning" and "f_00003.exr" in e["message"] for e in events)
+    assert comp["preservacao"]["preservado_exato_todos"] is True and written["n"] == 4
+
+
 @pytest.mark.slow
 @pytest.mark.models
 def test_full_pipeline_preserves_photo(tmp_path, monkeypatch):

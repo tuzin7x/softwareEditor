@@ -498,8 +498,9 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
         if delete_exr and src is not None and last_use.get(src) == i:
             p_exr = frames_dir / src
             try:
-                exr_info["bytes"] += p_exr.stat().st_size
+                size = p_exr.stat().st_size
                 p_exr.unlink()
+                exr_info["bytes"] += size           # só conta o que saiu mesmo do disco
                 exr_info["apagados"] += 1
             except OSError as e:          # arquivo preso (antivírus): só deixa de liberar o disco
                 em.log(f"Não foi possível apagar {p_exr.name}: {e}", "warning")
