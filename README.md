@@ -41,7 +41,21 @@ Qualidade: `--quality previa|final|auto` (auto = final na GPU, prévia na CPU).
 
 Para conferir o hardware no Windows sem instalar nada, use `scripts/diagnostico_hardware.ps1`.
 
-## Prova de conceito (resultado real)
+## Prova de conceito V2 (resultado real, CPU)
+
+Mesma foto, pipeline do `docs/PLANO_V2.md`: render em camadas, controle de orçamento, luz da foto,
+sombra de contato, entradas novas e narrativa do designer. Resultado em
+[`docs/poc/v2/RESULTADO.md`](docs/poc/v2/RESULTADO.md), vídeo
+[`docs/poc/v2/sala_stafford_v2.mp4`](docs/poc/v2/sala_stafford_v2.mp4) e folha de contato
+[`docs/poc/v2/v2_folha_contato.jpg`](docs/poc/v2/v2_folha_contato.jpg).
+
+- **Preservação:** 251/251 quadros bit a bit idênticos à foto fora dos móveis e das sombras; PSNR do
+  MP4 43,2 dB no fundo.
+- **Tempo (CPU, 4 threads, 960×720):** 1 175 s do início ao MP4 verificado, contra 6 768 s só de
+  render na V1. 169 renders, 76 quadros reaproveitados, 20 só de foto. Estimativa na RTX 5070 Laptop
+  em 1920×1440: ≈ 105 s (premissa no `RESULTADO.md`).
+
+## Prova de conceito V1 (resultado real)
 
 Foto de teste de uma sala vazia (960×720), ambiente `sala`, tudo em **CPU** (sem GPU no ambiente de
 desenvolvimento): [`docs/poc/sala_stafford_poc.mp4`](docs/poc/sala_stafford_poc.mp4) (10,5 s, 251

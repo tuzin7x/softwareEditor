@@ -10,9 +10,10 @@ Atualizado conforme os testes reais avançam.
   - o software detecta GPU, VRAM, driver e capacidade de computação **na sua máquina**, a cada
     execução (`python -m mobilia.cli hardware`), e escolhe o perfil (ver `ARQUITETURA.md`, seção 3);
   - `scripts/diagnostico_hardware.ps1` gera um relatório no Windows sem instalar nada.
-- **Todos os renders desta prova de conceito foram feitos em CPU**, com resolução e amostras reduzidas
-  (960×720, 16–48 amostras; 24 na PoC final). Numa RTX com OptiX, a mesma cena roda em 1920 px com 128 amostras. Os
-  tempos citados para GPU são **estimativas**, não medições.
+- **Todos os renders das provas de conceito foram feitos em CPU**, com resolução e amostras reduzidas
+  (960×720; na PoC V2, 24 amostras no quadro final e nos marcos e 12 na camada dinâmica). Numa RTX com
+  OptiX, a mesma cena roda em 1920 px com 128/64/12–32 amostras por camada. Os tempos citados para GPU
+  são **estimativas**, não medições (premissa em `docs/poc/v2/RESULTADO.md`).
 - **O `.exe` não foi executado num Windows real com GPU NVIDIA** por mim.
   - O build do PyInstaller e o autoteste da interface foram validados em Linux.
   - O workflow de build Windows está pronto, mas os jobs do GitHub Actions deste repositório
@@ -42,7 +43,8 @@ Atualizado conforme os testes reais avançam.
 
 - O modelo de luz é **simplificado**: luzes de área nas janelas, luz ambiente da parte da sala que não
   aparece e **sol direto** quando há manchas de sol no piso. As intensidades são calibradas pela foto.
-  Na foto de teste, o erro relativo do ajuste fica em 20–29% (21% na PoC final). A exposição e o balanço de branco dos
+  A sala 3D emite a própria foto para os raios indiretos (PT8). Na foto de teste, o erro relativo do
+  ajuste é de 18%, e 12% depois do mapa de ganho do CG (PoC V2). A exposição e o balanço de branco dos
   móveis ficam coerentes, mas não é uma reconstrução física exata da luz.
 - **Luminárias acesas na foto**, luz colorida forte e fotos noturnas não são modeladas. As luminárias
   adicionadas ficam **apagadas** de propósito: acendê-las alteraria a iluminação da foto, o que a regra
@@ -53,6 +55,13 @@ Atualizado conforme os testes reais avançam.
   replicadas.
 
 ## 4. Móveis (assets 3D)
+
+- O tampo de vidro de mesas sai como um cinza opaco: vidro transparente sobre a foto
+  (`film_transparent_glass`) continua desligado.
+- Nos 2–3 primeiros quadros de uma queda, a peça em fade-in escurece um pouco o que fica atrás dela
+  (sombra parcial no passe de *shadow catcher*). O efeito é breve e faz parte da dissolução.
+- Quadros de parede são pinturas abstratas geradas localmente. Num par, as duas usam o mesmo estilo
+  e as composições ficam parecidas.
 
 - O catálogo CC0 da Poly Haven tem cerca de 50 itens úteis para interiores, com viés para estilo
   clássico/vintage e poucos sofás modernos. Tapete, luminárias, cama, mesa de escritório, cortina e
@@ -69,17 +78,19 @@ Atualizado conforme os testes reais avançam.
 
 ## 6. Desempenho
 
-- **Medido na PoC final** (CPU de 4 threads, sem GPU, 960×720, 24 amostras, 251 quadros a 24 fps):
-  - análise 19 s com os modelos já baixados (cerca de 170 s na primeira execução, que inclui carregar
-    os modelos);
-  - layout 4 s;
-  - render 6 768 s (≈ 1 h 53 min): 176 de 251 quadros renderizados, cerca de 38 s por quadro;
-  - composição, encode e verificação 48 s.
-- Na GPU, cerca de 70–85% do tempo é render. As otimizações descritas em `ARQUITETURA.md` (border por
-  quadro, reaproveitamento de quadros estáticos, *hold* sem render) reduziram os quadros renderizados
-  para 70% do total na PoC. Os tempos em GPU continuam sendo **estimativas**.
+- **Medido na PoC V2** (CPU de 4 threads, sem GPU, 960×720, 251 quadros a 24 fps, render em camadas):
+  - análise 21 s com os modelos em cache de disco, layout 3 s;
+  - render 1 141 s (≈ 19 min): quadro final 31 s, 4 marcos 102 s, 164 renders dinâmicos 1 008 s;
+  - composição em paralelo ao render, com cauda de ~1 s depois dele; total 1 175 s.
+  - Na PoC V1, a mesma foto levou 6 768 s só de render.
+- Na GPU (RTX 5070 Laptop, 1920×1440), a estimativa é de ≈ 105 s do clique ao MP4. O controle de
+  orçamento corta amostras e escala do CG em movimento se a GPU medida for mais lenta. Esses tempos
+  continuam **estimativas** até chegar o `report.json` da máquina do usuário.
+- A primeira execução depois de instalar paga compilação de kernels e carga dos modelos. O instalador
+  já faz esse aquecimento (PT2), e o relatório mostra esse custo à parte.
 - Ajustes só de composição não exigem novo render: `python -m mobilia.cli recompor --work-dir <pasta>`
-  refaz o MP4 a partir dos EXRs salvos (≈ 46 s na PoC).
+  refaz o MP4 a partir dos EXRs. Por padrão os EXRs são apagados; para isso, gere o trabalho com
+  `MOBILIA_MANTER_EXR=1`.
 
 ## 7. Defeitos encontrados na PoC e corrigidos
 
@@ -97,3 +108,8 @@ regressão e não aparecem na rodada final:
 
 Lição registrada: a verificação bit a bit garante a regra absoluta, mas **não** detecta defeitos
 dentro da área tocada pelos móveis. A inspeção visual dos quadros continua necessária.
+
+Na PoC V2, a inspeção encontrou mais um defeito: com o fade-in, o sofá passava do limite de 8
+superfícies transparentes do Cycles, e no primeiro quadro da queda aparecia uma mancha opaca. O limite
+agora sobe só nos quadros com fade (teste `tests/test_fade_bounces.py`). Detalhes em
+`docs/poc/v2/RESULTADO.md`.
