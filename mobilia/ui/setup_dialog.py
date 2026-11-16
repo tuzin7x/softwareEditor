@@ -19,7 +19,9 @@ def intro_text(state: dict) -> tuple[str, str]:
                 "vez; depois o Mobília Studio funciona sem internet. No fim, a GPU é preparada (kernels de "
                 "render e modelos de IA) para que o primeiro vídeo já saia rápido. Se a conexão cair, é só "
                 "abrir de novo: a instalação continua de onde parou.")
-    pend = [bootstrap.STEP_LABELS[s].split(" (")[0].lower() for s in bootstrap.pending_steps(state)]
+    # só a inicial em minúscula: siglas e nomes próprios (GPU, IA, PyTorch, Mobília Studio) ficam
+    labels = [bootstrap.STEP_LABELS[s].split(" (")[0] for s in bootstrap.pending_steps(state)]
+    pend = [lb[:1].lower() + lb[1:] for lb in labels]
     return ("Atualização: preparando o motor para esta versão",
             "Só falta: " + "; ".join(pend) + ". O que já está instalado não é baixado de novo.")
 

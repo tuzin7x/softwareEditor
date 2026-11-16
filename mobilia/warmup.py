@@ -40,7 +40,9 @@ def warm_blender(emit: Emit, out_dir: Path | None = None, span: tuple[float, flo
     t0 = time.perf_counter()
     tmp = None
     if out_dir is None:
-        tmp = tempfile.TemporaryDirectory(prefix="mobilia_aquecimento_")
+        # no Windows o antivírus pode segurar os EXRs recém-gravados: limpar a pasta temporária
+        # nunca transforma um aquecimento bem-sucedido em falha
+        tmp = tempfile.TemporaryDirectory(prefix="mobilia_aquecimento_", ignore_cleanup_errors=True)
         out_dir = Path(tmp.name)
     cmd = blender_worker_prefix() + ["--aquecimento", str(out_dir)]
     result, tail = None, []

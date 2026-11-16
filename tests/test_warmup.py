@@ -94,6 +94,28 @@ def test_warm_blender_parses_worker_events(monkeypatch):
     assert bad["ok"] is False and "3" in bad["erro"]
 
 
+def test_warm_blender_survives_locked_temp_files(monkeypatch):
+    """No Windows o antivírus pode segurar um EXR recém-gravado: a limpeza da pasta temporária falha,
+    mas o aquecimento que deu certo continua dando certo (não vira falha no setup_state.json)."""
+    import os
+    import shutil
+    import tempfile
+
+    from mobilia import pipeline, warmup
+
+    real = shutil.rmtree
+
+    def locked_rmtree(name, onexc=None, **kw):
+        real(name, ignore_errors=True)
+        onexc(os.unlink, os.path.join(name, "optix_0.exr"),
+              OSError(32, "arquivo em uso por outro processo"))
+
+    monkeypatch.setattr(tempfile._shutil, "rmtree", locked_rmtree)
+    monkeypatch.setenv(pipeline.ENV_BLENDER_WORKER, json.dumps([sys.executable, str(FAKE), "blender"]))
+    res = warmup.warm_blender(lambda ev: None)
+    assert res["ok"] and res["dispositivos"][0]["ok"]
+
+
 def test_warm_models_records_failures(monkeypatch):
     from mobilia import warmup
     from mobilia.analysis import geometry, segmentation
