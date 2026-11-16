@@ -60,7 +60,6 @@ def test_flow_success(app, win):
 
 
 def test_flow_error_returns_to_setup(app, win, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
     shown = {}
     monkeypatch.setattr("mobilia.ui.app.MainWindow.show_error", lambda self, m, d="": shown.update(m=m, d=d))
     win.load_photo(str(FX)); win.select_room("banheiro")

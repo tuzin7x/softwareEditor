@@ -15,7 +15,7 @@ from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-                               QSizePolicy, QStackedWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget)
+                               QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__, runtime
 from ..jobs import ROOM_TYPES, STAGES, JobRequest
