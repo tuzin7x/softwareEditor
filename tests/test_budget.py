@@ -243,3 +243,45 @@ def test_dynamic_jobs_follows_worker_reuse_rule():
     jobs = lay.dynamic_jobs(plan)
     assert [(j[0], j[2]) for j in jobs] == [(2, sig_a), (4, sig_b), (6, sig_b), (7, sig_t)]
     assert [j[0] for j in lay.dynamic_jobs(plan, {4, 7})] == [4, 7]
+
+
+_PLAN_SCRIPT = r'''
+import json
+from types import SimpleNamespace
+import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+from mobilia.render import blender_worker as bw
+from mobilia.render import layers as lay
+
+sc = bpy.context.scene
+sc.frame_end = 200
+seen = []
+bw.compute_border = lambda sc_, cam, items_rt, margin, keys=None: seen.append(sc_.frame_current) or None
+sc.frame_set(169)                                   # quadro final recém-renderizado
+rest = [SimpleNamespace(frame=78, parts=frozenset()), SimpleNamespace(frame=151, parts=frozenset())]
+marcos, dyn = bw.budget_plan(sc, None, [], lay.LayerPlan([], []), rest, set(), 24, 64, 48, 0.6, 0.3, None)
+print("RESULT:" + json.dumps({"frame": sc.frame_current, "seen": seen, "marcos": marcos, "dyn": dyn}))
+'''
+
+
+def test_budget_plan_restores_scene_frame():
+    """``budget_plan`` passa pelos quadros dos marcos restantes, mas o laço do worker ainda lê
+    ``matrix_world`` no quadro final logo depois (``contact_poses``): a cena tem de voltar a ele.
+    Sem isso, as poses de contato do quadro final saíam do último marco (peças fora do lugar)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("bpy")
+    repo = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run([sys.executable, "-c", _PLAN_SCRIPT], cwd=repo, env=env, capture_output=True,
+                          text=True, timeout=300)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT:")]
+    assert lines, proc.stderr[-3000:]
+    out = json.loads(lines[-1][len("RESULT:"):])
+    assert out["seen"] == [78, 151] and out["marcos"] == [] and out["dyn"] == []
+    assert out["frame"] == 169

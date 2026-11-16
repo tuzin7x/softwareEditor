@@ -1522,15 +1522,24 @@ def budget_plan(sc, cam, items_rt: list[dict], plan, rest: list, only: set, fps:
                 margin: float, dmargin: float, sun_dir) -> tuple[list[int], list[int]]:
     """Áreas (px, escala 1) do que falta renderizar depois do quadro final, para a previsão do
     PT7: cada marco de ``rest`` (border de todas as suas peças) e cada render da camada dinâmica
-    (``layers.dynamic_jobs``: mesma região que o laço vai usar; renders vazios não contam)."""
+    (``layers.dynamic_jobs``: mesma região que o laço vai usar; renders vazios não contam).
+
+    Volta a cena ao quadro em que estava: quem chama ainda lê ``matrix_world`` do quadro do
+    marco recém-renderizado (``contact_poses`` do quadro final)."""
     marcos = []
-    for m in rest:
-        sc.frame_set(m.frame)
-        bpy.context.view_layer.update()
-        pb = bd.pixel_border(compute_border(sc, cam, items_rt, margin, keys=m.parts) or (0, 0, 0, 0), W, H)
-        if pb is not None:
-            x0, y0, x1, y1 = pb[0]
-            marcos.append((x1 - x0) * (y1 - y0))
+    f0 = sc.frame_current
+    try:
+        for m in rest:
+            sc.frame_set(m.frame)
+            bpy.context.view_layer.update()
+            pb = bd.pixel_border(compute_border(sc, cam, items_rt, margin, keys=m.parts) or (0, 0, 0, 0), W, H)
+            if pb is not None:
+                x0, y0, x1, y1 = pb[0]
+                marcos.append((x1 - x0) * (y1 - y0))
+    finally:
+        if rest:
+            sc.frame_set(f0)
+            bpy.context.view_layer.update()
     dyn = []
     for f, keys, _sig, _base in lay.dynamic_jobs(plan, only):
         b = layer_border(sc, cam, items_rt, keys, f, fps, dmargin, sun_dir)
@@ -1623,7 +1632,8 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
             return None, {}
         border_px, b = pb
         esc = None
-        pct = scale["pct"] if camada == "dinamico" else 100
+        # EXR de quadro inteiro (crop_to_border desligado) não tem o recorte que o compositor reamostra
+        pct = scale["pct"] if camada == "dinamico" and crop else 100
         if pct < 100:
             sb = bd.scaled_border(border, W, H, pct)
             if sb is None:
