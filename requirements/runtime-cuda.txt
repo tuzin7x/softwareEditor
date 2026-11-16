@@ -1,0 +1,17 @@
+# Motor de IA/render instalado no primeiro uso (Python embutido 3.13, Windows x64).
+# PyTorch CUDA 13.2: RTX 20/30/40/50 (Blackwell incluso); driver NVIDIA >= 580.
+--extra-index-url https://download.pytorch.org/whl/cu132
+torch==2.15.0+cu132
+torchvision==0.29.2+cu132
+bpy==5.3.0
+transformers==5.23.0
+huggingface_hub
+numpy
+scipy
+pillow
+opencv-python-headless
+shapely
+OpenEXR
+imageio-ffmpeg
+nvidia-ml-py
+moge @ git+https://github.com/microsoft/MoGe.git

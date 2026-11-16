@@ -1,0 +1,3 @@
+# Interface (executável leve, sem PyTorch)
+PySide6==6.12.0
+pyinstaller>=6.10

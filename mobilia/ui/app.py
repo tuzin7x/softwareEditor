@@ -1,0 +1,438 @@
+"""Janela principal do Mobília Studio (PySide6).
+
+Fluxo único e simples: 1) importar a foto  2) escolher o ambiente  3) gerar  4) assistir e exportar.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+                               QSizePolicy, QStackedWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget)
+
+from .. import APP_NAME, __version__, runtime
+from ..jobs import ROOM_TYPES, STAGES, JobRequest
+from . import theme
+from .runner import HardwareProbe, JobRunner, QueuedJob
+
+PHOTO_FILTER = "Fotos (*.jpg *.jpeg *.png *.webp *.tif *.tiff *.heic)"
+
+
+class ImageView(QLabel):
+    """Mostra uma imagem inteira, preservando a proporção, em qualquer tamanho."""
+
+    def __init__(self, text: str = ""):
+        super().__init__(text)
+        self._pm: QPixmap | None = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(320, 240)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_image(self, path: str) -> bool:
+        pm = QPixmap(path)
+        if pm.isNull():
+            return False
+        self._pm = pm
+        self._rescale()
+        return True
+
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self._rescale()
+
+    def _rescale(self):
+        if self._pm is not None:
+            self.setPixmap(self._pm.scaled(self.size() - QSize(8, 8), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+
+class DropZone(QFrame):
+    """Área de importação: clique ou arraste uma foto."""
+
+    def __init__(self, on_file):
+        super().__init__()
+        self.setObjectName("drop")
+        self.on_file = on_file
+        self.setAcceptDrops(True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 18, 18, 18)
+        self.view = ImageView()
+        self.hint = QLabel("Arraste a foto do ambiente vazio aqui\nou clique em “Importar foto”")
+        self.hint.setObjectName("subtitle")
+        self.hint.setAlignment(Qt.AlignCenter)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.hint)
+        self.stack.addWidget(self.view)
+        lay.addWidget(self.stack)
+
+    def show_photo(self, path: str) -> bool:
+        ok = self.view.set_image(path)
+        self.stack.setCurrentIndex(1 if ok else 0)
+        return ok
+
+    def dragEnterEvent(self, e):  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self.setProperty("hover", True); self.style().polish(self)
+
+    def dragLeaveEvent(self, e):  # noqa: N802
+        self.setProperty("hover", False); self.style().polish(self)
+
+    def dropEvent(self, e):  # noqa: N802
+        self.setProperty("hover", False); self.style().polish(self)
+        for u in e.mimeData().urls():
+            if u.isLocalFile():
+                self.on_file(u.toLocalFile())
+                break
+
+    def mousePressEvent(self, e):  # noqa: N802
+        path, _ = QFileDialog.getOpenFileName(self, "Importar foto", "", PHOTO_FILTER)
+        if path:
+            self.on_file(path)
+
+
+class VideoView(QWidget):
+    """Player em loop do vídeo gerado (QtMultimedia)."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.player = None
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+            from PySide6.QtMultimediaWidgets import QVideoWidget
+
+            self.widget = QVideoWidget()
+            self.player = QMediaPlayer(self)
+            self.player.setVideoOutput(self.widget)
+            self.player.setLoops(QMediaPlayer.Infinite)
+            lay.addWidget(self.widget)
+        except Exception:  # sem backend de mídia: mostra a última prévia no lugar
+            self.widget = ImageView("Pré-visualização indisponível neste sistema")
+            lay.addWidget(self.widget)
+        self.source: str | None = None
+
+    def play(self, path: str) -> None:
+        self.source = path
+        if self.player is not None:
+            self.player.setSource(QUrl.fromLocalFile(path))
+            self.player.play()
+
+    def stop(self) -> None:
+        if self.player is not None:
+            self.player.stop()
+
+
+class StageList(QWidget):
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.rows = {}
+        for key, label, _ in STAGES:
+            lb = QLabel(f"○  {label}")
+            lb.setObjectName("muted")
+            lay.addWidget(lb)
+            self.rows[key] = (lb, label)
+        self.order = [k for k, _, _ in STAGES]
+
+    def set_current(self, stage: str) -> None:
+        if stage not in self.rows:
+            return
+        idx = self.order.index(stage)
+        for i, k in enumerate(self.order):
+            lb, label = self.rows[k]
+            if i < idx:
+                lb.setText(f"✓  {label}"); lb.setStyleSheet(f"color: {theme.OK};")
+            elif i == idx:
+                lb.setText(f"●  {label}"); lb.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 600;")
+            else:
+                lb.setText(f"○  {label}"); lb.setStyleSheet(f"color: {theme.MUTED};")
+
+    def reset(self) -> None:
+        for k in self.order:
+            lb, label = self.rows[k]
+            lb.setText(f"○  {label}"); lb.setStyleSheet(f"color: {theme.MUTED};")
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME}")
+        self.setWindowIcon(QIcon(theme.app_icon()))
+        self.resize(1360, 820)
+        self.photo_path: str | None = None
+        self.room: str | None = None
+        self.runner = JobRunner(self)
+        self.runner.progress.connect(self._on_progress)
+        self.runner.preview.connect(self._on_preview)
+        self.runner.finished.connect(self._on_finished)
+        self.started_at = 0.0
+        self.last_output: str | None = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+
+        root = QWidget(); root.setObjectName("root")
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(28, 22, 28, 18)
+        outer.setSpacing(16)
+        head = QHBoxLayout()
+        logo = QLabel(); logo.setPixmap(theme.app_icon(44))
+        titles = QVBoxLayout(); titles.setSpacing(0)
+        t = QLabel(APP_NAME); t.setObjectName("title")
+        st = QLabel("Decoração virtual em vídeo — a sua foto, intacta, com os móveis surgindo dentro dela")
+        st.setObjectName("subtitle")
+        titles.addWidget(t); titles.addWidget(st)
+        head.addWidget(logo); head.addLayout(titles); head.addStretch(1)
+        outer.addLayout(head)
+
+        body = QHBoxLayout(); body.setSpacing(18)
+        outer.addLayout(body, 1)
+        # ---- esquerda: foto / vídeo
+        self.left = QStackedWidget()
+        self.drop = DropZone(self.load_photo)
+        self.video = VideoView()
+        vcard = QFrame(); vcard.setObjectName("card")
+        vl = QVBoxLayout(vcard); vl.setContentsMargins(10, 10, 10, 10); vl.addWidget(self.video)
+        self.live = ImageView()
+        lcard = QFrame(); lcard.setObjectName("card")
+        ll = QVBoxLayout(lcard); ll.setContentsMargins(10, 10, 10, 10); ll.addWidget(self.live)
+        self.left.addWidget(self.drop); self.left.addWidget(lcard); self.left.addWidget(vcard)
+        body.addWidget(self.left, 3)
+        # ---- direita: passos / progresso / resultado
+        self.right = QStackedWidget()
+        self.right.setFixedWidth(400)
+        self.right.addWidget(self._build_setup())
+        self.right.addWidget(self._build_progress())
+        self.right.addWidget(self._build_result())
+        body.addWidget(self.right)
+
+        self.statusBar().showMessage("Detectando GPU…")
+        self.probe = HardwareProbe(self)
+        self.probe.done.connect(self._on_hardware)
+        self._update_ready()
+
+    # ------------------------------------------------------------------ páginas
+    def _build_setup(self) -> QWidget:
+        w = QFrame(); w.setObjectName("card")
+        lay = QVBoxLayout(w); lay.setContentsMargins(22, 22, 22, 22); lay.setSpacing(12)
+        s1 = QLabel("1  ·  FOTO"); s1.setObjectName("section")
+        self.btn_import = QPushButton("Importar foto…")
+        self.btn_import.clicked.connect(lambda: self.drop.mousePressEvent(None))
+        self.photo_label = QLabel("Nenhuma foto selecionada"); self.photo_label.setObjectName("muted")
+        self.photo_label.setWordWrap(True)
+        s2 = QLabel("2  ·  AMBIENTE"); s2.setObjectName("section")
+        grid = QGridLayout(); grid.setSpacing(10)
+        self.room_group = QButtonGroup(self); self.room_group.setExclusive(True)
+        self.room_buttons = {}
+        for i, (key, label) in enumerate(ROOM_TYPES.items()):
+            b = QToolButton(); b.setObjectName("room"); b.setCheckable(True)
+            b.setText(label); b.setIcon(theme.room_icon(key)); b.setIconSize(QSize(40, 40))
+            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); b.setMinimumSize(108, 92)
+            b.clicked.connect(lambda _=False, k=key: self.select_room(k))
+            self.room_group.addButton(b); self.room_buttons[key] = b
+            grid.addWidget(b, i // 3, i % 3)
+        s3 = QLabel("3  ·  QUALIDADE"); s3.setObjectName("section")
+        self.quality = QComboBox()
+        self.quality.addItem("Final (recomendado com GPU)", "final")
+        self.quality.addItem("Prévia rápida", "previa")
+        self.quality.addItem("Automática", "auto")
+        self.btn_generate = QPushButton("Gerar vídeo"); self.btn_generate.setObjectName("primary")
+        self.btn_generate.clicked.connect(self.generate)
+        lay.addWidget(s1); lay.addWidget(self.btn_import); lay.addWidget(self.photo_label)
+        lay.addSpacing(6); lay.addWidget(s2); lay.addLayout(grid)
+        lay.addSpacing(6); lay.addWidget(s3); lay.addWidget(self.quality)
+        lay.addStretch(1); lay.addWidget(self.btn_generate)
+        return w
+
+    def _build_progress(self) -> QWidget:
+        w = QFrame(); w.setObjectName("card")
+        lay = QVBoxLayout(w); lay.setContentsMargins(22, 22, 22, 22); lay.setSpacing(12)
+        s = QLabel("GERANDO O VÍDEO"); s.setObjectName("section")
+        self.bar = QProgressBar(); self.bar.setRange(0, 1000); self.bar.setTextVisible(False)
+        self.pct = QLabel("0%"); self.pct.setStyleSheet("font-size: 28px; font-weight: 600;")
+        self.msg = QLabel("Preparando…"); self.msg.setWordWrap(True)
+        self.elapsed = QLabel(""); self.elapsed.setObjectName("muted")
+        self.stages = StageList()
+        self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("danger")
+        self.btn_cancel.clicked.connect(self.cancel)
+        lay.addWidget(s); lay.addWidget(self.pct); lay.addWidget(self.bar); lay.addWidget(self.msg)
+        lay.addWidget(self.elapsed); lay.addSpacing(8); lay.addWidget(self.stages); lay.addStretch(1)
+        lay.addWidget(self.btn_cancel)
+        return w
+
+    def _build_result(self) -> QWidget:
+        w = QFrame(); w.setObjectName("card")
+        lay = QVBoxLayout(w); lay.setContentsMargins(22, 22, 22, 22); lay.setSpacing(12)
+        s = QLabel("PRONTO"); s.setObjectName("section")
+        self.result_info = QLabel(""); self.result_info.setWordWrap(True)
+        self.btn_export = QPushButton("Exportar MP4…"); self.btn_export.setObjectName("primary")
+        self.btn_export.clicked.connect(self.export)
+        self.btn_folder = QPushButton("Abrir pasta"); self.btn_folder.clicked.connect(self.open_folder)
+        self.btn_new = QPushButton("Nova foto"); self.btn_new.clicked.connect(self.new_photo)
+        lay.addWidget(s); lay.addWidget(self.result_info); lay.addStretch(1)
+        lay.addWidget(self.btn_export); lay.addWidget(self.btn_folder); lay.addWidget(self.btn_new)
+        return w
+
+    # ------------------------------------------------------------------ ações
+    def showEvent(self, e):  # noqa: N802
+        super().showEvent(e)
+        if not getattr(self, "_probed", False):
+            self._probed = True
+            self.probe.start()
+
+    def load_photo(self, path: str) -> None:
+        if not Path(path).is_file() or not self.drop.show_photo(path):
+            QMessageBox.warning(self, APP_NAME, "Não foi possível abrir essa imagem.")
+            return
+        self.photo_path = path
+        self.photo_label.setText(Path(path).name)
+        self.left.setCurrentIndex(0)
+        self._update_ready()
+
+    def select_room(self, key: str) -> None:
+        self.room = key
+        self.room_buttons[key].setChecked(True)
+        self._update_ready()
+
+    def _update_ready(self) -> None:
+        self.btn_generate.setEnabled(bool(self.photo_path and self.room) and not self.runner.busy())
+
+    def generate(self) -> None:
+        if not (self.photo_path and self.room):
+            return
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        work = runtime.runtime_paths().jobs_dir / f"{stamp}_{Path(self.photo_path).stem}"
+        out = work / f"{Path(self.photo_path).stem}_{self.room}.mp4"
+        req = JobRequest(self.photo_path, self.room, str(out), quality=self.quality.currentData(),
+                         work_dir=str(work))
+        self.stages.reset(); self.bar.setValue(0); self.pct.setText("0%"); self.msg.setText("Iniciando o motor…")
+        self.live.set_image(self.photo_path)
+        self.left.setCurrentIndex(1); self.right.setCurrentIndex(1)
+        self.started_at = time.monotonic(); self.timer.start(1000)
+        self.runner.submit(req)
+        self._update_ready()
+
+    def cancel(self) -> None:
+        self.btn_cancel.setEnabled(False)
+        self.msg.setText("Cancelando…")
+        self.runner.cancel()
+
+    def export(self) -> None:
+        if not self.last_output:
+            return
+        dest, _ = QFileDialog.getSaveFileName(self, "Exportar vídeo", Path(self.last_output).name, "Vídeo MP4 (*.mp4)")
+        if dest:
+            shutil.copyfile(self.last_output, dest)
+            self.statusBar().showMessage(f"Vídeo exportado: {dest}", 8000)
+
+    def open_folder(self) -> None:
+        if self.last_output:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.last_output).parent)))
+
+    def new_photo(self) -> None:
+        self.video.stop()
+        self.photo_path = None
+        self.photo_label.setText("Nenhuma foto selecionada")
+        self.drop.stack.setCurrentIndex(0)
+        self.left.setCurrentIndex(0); self.right.setCurrentIndex(0)
+        self._update_ready()
+
+    # ------------------------------------------------------------------ eventos do worker
+    def _tick(self) -> None:
+        s = int(time.monotonic() - self.started_at)
+        self.elapsed.setText(f"Tempo decorrido: {s // 60:d} min {s % 60:02d} s")
+
+    def _on_progress(self, stage: str, frac: float, message: str) -> None:
+        self.bar.setValue(int(frac * 1000)); self.pct.setText(f"{frac * 100:.0f}%")
+        self.msg.setText(message); self.stages.set_current(stage)
+
+    def _on_preview(self, path: str) -> None:
+        if path and Path(path).exists():
+            self.live.set_image(path)
+
+    def _on_finished(self, job: QueuedJob) -> None:
+        self.timer.stop()
+        self.btn_cancel.setEnabled(True)
+        self._update_ready()
+        if job.status == "pronto" and job.output and Path(job.output).exists():
+            self.last_output = job.output
+            mb = Path(job.output).stat().st_size / 1e6
+            self.result_info.setText(f"{Path(job.output).name}\n{mb:.1f} MB · {self.elapsed.text().lower()}\n\n"
+                                     "Fora dos móveis e das sombras, a foto original foi preservada "
+                                     "pixel a pixel (verificado em cada quadro).")
+            self.left.setCurrentIndex(2); self.right.setCurrentIndex(2)
+            self.video.play(job.output)
+            return
+        self.left.setCurrentIndex(0); self.right.setCurrentIndex(0)
+        if job.status == "cancelado":
+            self.statusBar().showMessage("Geração cancelada.", 6000)
+            return
+        self.show_error(job.error or "Erro desconhecido.", job.detail)
+
+    def show_error(self, message: str, detail: str = "") -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(APP_NAME)
+        box.setText("Não foi possível gerar o vídeo.")
+        box.setInformativeText(message)
+        if detail:
+            box.setDetailedText(detail)
+        box.exec()
+
+    def _on_hardware(self, info) -> None:
+        if not info:
+            self.statusBar().showMessage("GPU: não detectada (o motor ainda não está instalado ou não respondeu).")
+            return
+        prof = info.get("profile", {})
+        gpus = info.get("gpus") or []
+        gpu = max(gpus, key=lambda g: g.get("vram_total_mb", 0)) if gpus else None
+        g = f"{gpu['name']} · {gpu['vram_total_mb'] / 1024:.0f} GB" if gpu else "sem GPU NVIDIA (modo CPU)"
+        self.statusBar().showMessage(f"GPU: {g}   ·   Perfil: {prof.get('name', '?')} — {prof.get('description', '')}")
+        if gpu is None:
+            self.quality.setCurrentIndex(1)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("--worker", "worker"):
+        from ..cli import main as cli_main
+
+        return cli_main(argv[1:])
+    selftest = "--selftest" in argv
+    if selftest:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if "--version" in argv:
+        print(f"{APP_NAME} {__version__}")
+        return 0
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    app.setApplicationName(APP_NAME)
+    app.setStyle("Fusion")
+    app.setStyleSheet(theme.QSS)
+    if not selftest and runtime.uses_embedded_runtime():
+        from .setup_dialog import ensure_runtime
+
+        if not ensure_runtime(None):
+            return 1
+    win = MainWindow()
+    if selftest:
+        win.show()
+        app.processEvents()
+        ok = win.windowTitle() == APP_NAME and not theme.app_icon().isNull()
+        print("selftest ok" if ok else "selftest FALHOU")
+        return 0 if ok else 2
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
