@@ -388,23 +388,52 @@ def _svg_doc(size: int, defs: str, tile: str, body: str, title: str, px: int | N
 ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 
 
+def _ico_dib(img) -> bytes:
+    """Imagem do .ico no formato clássico (BMP 32 bits BGRA + máscara AND), o mais compatível
+    com o Explorer, o Inno Setup e editores de recurso; só o 256 px vai em PNG."""
+    import struct
+
+    from PySide6.QtGui import QImage
+
+    img = img.convertToFormat(QImage.Format_ARGB32)          # BGRA na memória (little-endian)
+    w, h = img.width(), img.height()
+    stride = w * 4
+    raw = bytes(img.constBits())[: stride * h]
+    xor = b"".join(raw[y * stride:(y + 1) * stride] for y in range(h - 1, -1, -1))   # de baixo para cima
+    mask_stride = ((w + 31) // 32) * 4
+    mask = bytearray()
+    for y in range(h - 1, -1, -1):
+        row = bytearray(mask_stride)
+        for x in range(w):
+            if raw[y * stride + x * 4 + 3] == 0:                     # transparente -> bit 1 na máscara AND
+                row[x // 8] |= 0x80 >> (x % 8)
+        mask += row
+    header = struct.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, len(xor) + len(mask), 0, 0, 0, 0)
+    return header + xor + bytes(mask)
+
+
 def write_ico(path: str | Path, sizes=ICO_SIZES) -> Path:
-    """Grava um .ico com uma imagem PNG por tamanho (cada uma no seu tamanho óptico)."""
+    """Grava um .ico com uma imagem por tamanho (cada uma no seu tamanho óptico):
+    BMP 32 bits até 128 px e PNG em 256 px, como nos ícones do próprio Windows."""
     import struct
 
     from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 
     blobs = []
     for s in sizes:
-        ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
-        app_icon_pixmap(s).toImage().save(buf, "PNG")
-        blobs.append((s, bytes(ba.data())))
+        img = app_icon_pixmap(s).toImage()
+        if s >= 256:
+            ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
+            img.save(buf, "PNG")
+            blobs.append((s, bytes(ba.data())))
+        else:
+            blobs.append((s, _ico_dib(img)))
     head = struct.pack("<HHH", 0, 1, len(blobs))
     offset = 6 + 16 * len(blobs)
     dirs, data = b"", b""
-    for s, png in blobs:
-        dirs += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(png), offset + len(data))
-        data += png
+    for s, blob in blobs:
+        dirs += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(blob), offset + len(data))
+        data += blob
     path = Path(path)
     path.write_bytes(head + dirs + data)
     return path

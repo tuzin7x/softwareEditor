@@ -51,7 +51,8 @@ if ($open.Count -gt 0) {
     throw "O 7xAi está aberto. Feche o 7xAi e rode o GERAR_EXE.bat de novo."
 }
 if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-& robocopy $distDir $installDir /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+# /XF unins*: se o instalador (Inno Setup) já instalou nesta pasta, o desinstalador dele fica (o /MIR não apaga)
+& robocopy $distDir $installDir /MIR /XF unins*.* /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
 $rc = $LASTEXITCODE
 # robocopy: códigos de 0 a 7 são sucesso; 8 ou mais é falha (em geral, arquivo em uso).
 if ($rc -ge 8) {

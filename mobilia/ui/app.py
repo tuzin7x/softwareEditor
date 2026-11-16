@@ -484,6 +484,20 @@ class MainWindow(QMainWindow):
         self.probe = HardwareProbe(self)
         self.probe.done.connect(self._on_hardware)
         self._update_ready()
+        self._fit_to_screen()
+
+    def _fit_to_screen(self) -> None:
+        """Tamanho inicial que cabe na tela (até 1360x820): em notebooks 1366x768 ou com escala de 125%
+        a janela já abre no modo compacto, sem passar da área útil (barra de tarefas descontada)."""
+        w, h = 1360, 820
+        scr = self.screen()
+        g = scr.availableGeometry() if scr is not None else None
+        if g is not None and g.width() > 0 and g.height() > 0:
+            w, h = min(w, g.width() - 32), min(h, g.height() - 48)    # moldura e barra de título
+        # o modo é escolhido ANTES do primeiro resize: o mínimo do layout normal (~725 px de altura)
+        # não deixaria a janela abrir menor que isso numa tela baixa
+        self.set_compact(h < self.COMPACT_BELOW)
+        self.resize(max(w, 640), max(h, 480))
 
     # ------------------------------------------------------------------ páginas
     def _build_header(self) -> QHBoxLayout:

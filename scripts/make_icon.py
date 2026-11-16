@@ -30,6 +30,22 @@ from mobilia.ui import brand  # noqa: E402
 ASSETS = ROOT / "packaging" / "assets"
 
 
+def decode_ico_image(blob: bytes) -> QImage | None:
+    """Uma imagem do .ico: PNG, ou BMP 32 bits (BITMAPINFOHEADER, altura dobrada, de baixo para cima)."""
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return QImage.fromData(blob)
+    hsize, w, h2, planes, bits, comp = struct.unpack_from("<IiiHHI", blob, 0)
+    h = h2 // 2
+    if hsize != 40 or planes != 1 or bits != 32 or comp != 0 or w <= 0 or h2 != 2 * w:
+        return None
+    stride = w * 4
+    xor = blob[hsize:hsize + stride * h]
+    if len(xor) != stride * h or len(blob) < hsize + stride * h + ((w + 31) // 32) * 4 * h:
+        return None
+    top_down = b"".join(xor[y * stride:(y + 1) * stride] for y in range(h - 1, -1, -1))
+    return QImage(top_down, w, h, stride, QImage.Format_ARGB32).copy()
+
+
 def read_ico(path: Path) -> list[tuple[int, int, int]]:
     """Lê o diretório do .ico: [(largura, altura, bits)] — e confere que cada imagem decodifica."""
     data = path.read_bytes()
@@ -40,8 +56,8 @@ def read_ico(path: Path) -> list[tuple[int, int, int]]:
     for i in range(count):
         w, h, _, _, _, bits, size, off = struct.unpack_from("<BBBBHHII", data, 6 + 16 * i)
         w, h = w or 256, h or 256
-        img = QImage.fromData(data[off:off + size])
-        if img.isNull() or (img.width(), img.height()) != (w, h):
+        img = decode_ico_image(data[off:off + size])
+        if img is None or img.isNull() or (img.width(), img.height()) != (w, h):
             raise ValueError(f"{path}: imagem {w}x{h} corrompida")
         out.append((w, h, bits))
     return out
