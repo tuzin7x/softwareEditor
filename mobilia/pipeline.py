@@ -129,9 +129,10 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
     t_click = env_time(ENV_T_CLIQUE)
     t_click = t_ref if t_click is None or t_click > t_ref else t_click
     sw = Stopwatch()
-    sw.set("inicio_motor", wall0 - t_ref)
     vram = VramMonitor().start()
     first, state_path = first_run_state()
+    # lançamento + imports + NVML + estado da instalação (o resto do início é medido abaixo)
+    sw.set("inicio_motor", time.time() - t_ref)
     cfg = AppConfig()
     try:
         with sw.measure("inicio_motor"):
@@ -158,7 +159,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         # ---------------------------------------------------------------- análise
         an_dir = work / "analise"
         em_an = ProgressEmitter(callback=lambda ev: em._emit(ev))
-        torch_reset_peak(prof.torch_device)
+        with sw.measure("analise.geometria_carga"):   # na GPU cria o contexto CUDA (seria na carga)
+            torch_reset_peak(prof.torch_device)
         with vram.track("analise"):
             rgb, geo, seg, room, grid = analyze_photo(req.photo_path, an_dir, device=prof.torch_device,
                                                       emitter=em_an, prof=prof, sw=sw)
@@ -255,6 +257,9 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             "download_s": tempos.get("download", 0.0),
             "blender_kernels_s": tempos.get("blender_kernels", 0.0),
             "kernels_cycles_s": (render_meta.get("telemetria") or {}).get("aquecimento", {}).get("kernels_s"),
+            # a carga/compilação pode se repetir fora do aquecimento (OptiX recria o pipeline quando
+            # a cena pede recursos novos, p. ex. desfoque de movimento): soma de todas as chamadas
+            "kernels_cycles_total_s": _kernels_total(render_meta.get("telemetria") or {}),
             "modelos_carga_s": round(value_total(tempos["analise"].get("geometria_carga", 0.0))
                                      + value_total(tempos["analise"].get("segmentacao_carga", 0.0)), 2),
         }
@@ -266,6 +271,14 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         return JobResult(str(out_path), str(rp), str(work), flat)
     finally:
         vram.stop()
+
+
+def _kernels_total(tele: dict) -> float:
+    """Tempo de carga/compilação de kernels do Cycles em todas as chamadas de render do worker
+    (aquecimento, calibração e quadros)."""
+    calls = [tele.get("aquecimento") or {}] + list(tele.get("calibracao_renders") or []) \
+        + list(tele.get("por_quadro") or [])
+    return round(sum(float(c.get("kernels_s") or 0.0) for c in calls), 3)
 
 
 def _blender_stages(sw: Stopwatch, tele: dict, proc: dict) -> None:
@@ -528,6 +541,7 @@ def recompose(work_dir: str | Path, out_path: str | Path | None, em: ProgressEmi
     report.setdefault("tempos_s", {})["recomposicao"] = round(comp["seconds"] + comp["verify_seconds"], 1)
     rp.write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     return report
+
 
 def _blender_worker_command(spec_path: Path) -> list[str]:
     override = os.environ.get(ENV_BLENDER_WORKER)

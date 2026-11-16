@@ -138,13 +138,17 @@ class JobRunner(QObject):
             job.status, job.error, job.detail = "erro", ev.get("message", "Erro"), ev.get("detail", "")
 
     def _save_log(self, job: QueuedJob) -> None:
-        """Grava a saída do motor na pasta do trabalho (entra no zip de diagnóstico)."""
-        if not job.work_dir or not Path(job.work_dir).is_dir():
+        """Grava a saída do motor na pasta do trabalho (entra no zip de diagnóstico).
+
+        Cria a pasta se o motor falhou antes de criá-la (erro na partida): o diagnóstico da tela
+        de erro continua disponível, com este registro."""
+        if not job.work_dir:
             return
         lines = [f"status: {job.status}"] + ([f"erro: {job.error}"] if job.error else []) + job.log
         if job.detail:
             lines += ["", "detalhe:", job.detail]
         try:
+            Path(job.work_dir).mkdir(parents=True, exist_ok=True)
             (Path(job.work_dir) / "interface.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
         except OSError:
             pass

@@ -145,9 +145,7 @@ def main(argv):
         else:
             a[argv[i]] = ""
             i += 1
-    if "--fail" in argv or a.get("--room") == "banheiro":
-        if a.get("--work-dir"):
-            Path(a["--work-dir"]).mkdir(parents=True, exist_ok=True)
+    if "--fail" in argv or a.get("--room") == "banheiro":   # falha antes de criar a pasta do trabalho
         print(json.dumps({"event": "error", "message": "Falha simulada de teste", "detail": "Traceback..."}), flush=True)
         return 1
     for stage, f in (("preparo", 0.02), ("analise", 0.2), ("layout", 0.25), ("render", 0.6), ("video", 1.0)):

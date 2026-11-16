@@ -66,6 +66,15 @@ def test_flow_error_returns_to_setup(app, win, monkeypatch):
     win.generate()
     assert _wait(app, lambda: "m" in shown)
     assert shown["m"] == "Falha simulada de teste" and win.right.currentIndex() == 0
+    # o motor falhou antes de criar a pasta do trabalho: o diagnóstico (botão da tela de erro)
+    # ainda sai, com a saída do motor
+    import zipfile
+
+    z = win.copy_diagnostic()
+    assert z is not None and z.exists()
+    zf = zipfile.ZipFile(z)
+    assert "interface.log" in zf.namelist()
+    assert "Falha simulada de teste" in zf.read("interface.log").decode("utf-8")
 
 
 def test_hardware_probe_updates_status(app, win):

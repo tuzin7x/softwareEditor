@@ -197,7 +197,9 @@ o vídeo mostra exatamente essas funções.
   dentro de 5%, testado). `total_percebido` conta a partir do clique em "Gerar" (a interface passa o
   instante em `MOBILIA_T_CLIQUE`/`MOBILIA_T_INICIO`). `primeira_execucao` vem do estado da instalação
   (`setup_state.json`, contador `execucoes`), e `primeira_execucao_custos` separa download, kernels e
-  carga dos modelos.
+  carga dos modelos (`kernels_cycles_total_s` soma a carga/compilação de kernels de todas as chamadas
+  de render, porque o OptiX pode recriar o pipeline depois do aquecimento quando a cena pede recursos
+  novos, como desfoque de movimento).
   - O worker do Blender emite `worker_ready` com o dispositivo efetivo do Cycles (OptiX/CUDA/CPU, nomes
     das GPUs) e do denoiser (a mesma consulta `has_oidn_gpu_devices` que o Cycles usa para cair na CPU),
     faz um render de aquecimento de ~16 px (kernels de render e do denoiser, medidos à parte) e, por

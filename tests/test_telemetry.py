@@ -183,3 +183,14 @@ def test_stage_summary_text():
     txt = diagnostics.summary_text(rep)
     assert "Total: 1 min 36 s" in txt and "Primeira execução" in txt
     assert diagnostics.format_seconds(4.25) == "4.2 s" and diagnostics.format_seconds(42) == "42 s"
+
+
+def test_kernels_total_counts_every_render_call():
+    """No OptiX a carga/compilação de kernels pode reaparecer depois do aquecimento (cena com
+    desfoque de movimento): o custo de 1ª execução soma todas as chamadas de render."""
+    from mobilia.pipeline import _kernels_total
+
+    tele = {"aquecimento": {"kernels_s": 0.5}, "calibracao_renders": [{"kernels_s": 1.0}, {"kernels_s": None}],
+            "por_quadro": [{"kernels_s": 40.0}, {"kernels_s": 0.0}, {}]}
+    assert _kernels_total(tele) == pytest.approx(41.5)
+    assert _kernels_total({}) == 0.0

@@ -109,7 +109,8 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     assert rep["primeira_execucao"] is True
     st = bootstrap.load_state(runtime.runtime_paths().state_file)
     assert st["execucoes"] == 1 and not bootstrap.is_first_run(st)
-    assert set(rep["primeira_execucao_custos"]) >= {"download_s", "blender_kernels_s", "modelos_carga_s"}
+    assert set(rep["primeira_execucao_custos"]) >= {"download_s", "blender_kernels_s", "modelos_carga_s",
+                                                   "kernels_cycles_total_s"}
     # render: dispositivo efetivo, denoiser, camadas, por quadro, quadros
     r = rep["render"]
     assert r["dispositivo"] == "CPU" and r["denoiser_dispositivo"] == "CPU" and r["optix"] is False
