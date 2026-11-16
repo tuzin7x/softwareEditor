@@ -22,6 +22,7 @@ from PIL import Image
 from . import __version__
 from .config import AppConfig
 from .hardware import choose_profile, detect_hardware
+from .render.budget import budget_spec
 from .render.layers import frame_counts, samples_by_layer
 from .jobs import JobRequest, JobResult, ProgressEmitter
 from .photo import load_photo
@@ -256,7 +257,7 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
                                 motion_blur=q["motion_blur"], seed=req.seed,
                                 sun=sun.to_dict() if sun is not None else None, occluders=occ,
                                 sun_mask=sun_diag.get("patch_mask") if sun is not None else None,
-                                layered=layered_render())
+                                layered=layered_render(), budget=budget_spec(t_click))
         em.stage("assets", 1.0, f"{len(spec['items'])} modelos prontos")
         dl = min(float(net["s"]), time.perf_counter() - t)
         sw.add("download", dl)
@@ -311,6 +312,9 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         tempos["total_percebido"] = round(now - t_click, 2)
         tempos["soma_etapas"] = round(stages_sum(tempos), 2)
         report["tempos_s"] = tempos
+        orc = report["render"].get("orcamento") or {}
+        if orc.get("ativo"):
+            orc["real_total_s"] = tempos["total_percebido"]
         report["primeira_execucao_custos"] = {
             "download_s": tempos.get("download", 0.0),
             "blender_kernels_s": tempos.get("blender_kernels", 0.0),
@@ -421,8 +425,9 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
             "amostras_config": tele.get("samples_config", q.get("samples")),
             "amostras_camadas": tele.get("samples_camadas", q.get("samples_layers")),
             "desempenho": summ["desempenho"],
-            "orcamento": {"previsto_s": None, "spp_dinamico": None, "spp_marcos": None, "escala_cg": None,
-                          "motivo": "controle de orçamento ainda não ativo"},
+            # PT7: decisão do controle de orçamento (amostras/escala) e a previsão feita no worker
+            "orcamento": render_meta.get("orcamento") or tele.get("orcamento")
+            or {"ativo": False, "motivo": "o worker não registrou o orçamento"},
             "camadas": summ["camadas"],
             # PT6: render em camadas (marcos + camada dinâmica) ou quadro único (``render.camadas``)
             "modo_camadas": (render_meta.get("camadas") or tele.get("camadas") or {"modo": "unica"}).get("modo"),
@@ -668,6 +673,10 @@ def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame, on_cal
             em.log(calibration_log(ev))
             if on_calibration is not None:
                 on_calibration({k: v for k, v in ev.items() if k != "event"})
+        elif kind == "budget":
+            # previsão do PT7 (depois do quadro final): vai para a tela como "≈ 1 min 40 s"
+            if ev.get("ativo") and ev.get("previsto_total_s") is not None:
+                em.forecast(float(ev["previsto_total_s"]), bool(ev.get("cabe", True)))
         elif kind == "contact":
             if on_contact is not None:
                 on_contact({k: v for k, v in ev.items() if k != "event"})

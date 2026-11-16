@@ -533,13 +533,20 @@ def paste_crop(rgba: np.ndarray, shadow: np.ndarray | None, border: list[int] | 
 
 
 def load_render_passes(exr_path: str, border: list[int] | None = None,
-                       shape: tuple[int, int] | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+                       shape: tuple[int, int] | None = None,
+                       escala: dict | None = None) -> tuple[np.ndarray, np.ndarray | None]:
     """Passes do quadro no tamanho do quadro inteiro ``shape`` (altura, largura).
 
     EXR de quadro inteiro: lido como está. EXR recortado: colado em ``border`` (ver
     ``paste_crop``). Nos dois casos o resultado é o mesmo, byte a byte. Sem ``shape``, devolve o
-    tamanho gravado (compatível com o uso antigo)."""
+    tamanho gravado (compatível com o uso antigo). ``escala``: recorte em resolução reduzida
+    (PT7), reamostrado para o ``border`` antes de colar (ver ``resample_crop``)."""
     rgba, shadow = read_render_passes(exr_path)
+    if escala:
+        shadow = mask_unrendered(rgba, shadow)
+        if shadow is None:
+            shadow = np.ones(rgba.shape[:2] + (3,), np.float32)
+        rgba, shadow = resample_crop(rgba, escala, border), resample_crop(shadow, escala, border)
     # máscara antes de colar: fora do recorte a sombra já entra neutra, igual ao quadro inteiro
     return paste_crop(rgba, mask_unrendered(rgba, shadow), border, shape)
 
@@ -574,11 +581,51 @@ def layers_from_passes(rgba: np.ndarray, shadow: np.ndarray | None, border: list
     return rgba, feather_shadow(shadow, border, H, W, int(shadow_feather)), origin
 
 
-def load_layers(exr_path: str, border: list[int] | None, shape: tuple[int, int], shadow_feather: int = 0
-                ) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+def _axis_weights(n_out: int, start: int, k: float, o: float, s0: int, n_in: int):
+    """Índices e pesos da interpolação linear num eixo: o pixel ``start + i`` do quadro inteiro
+    (centro em +0,5) cai em ``(x + 0,5 − o)/k − 0,5`` na resolução reduzida; ``s0`` é o início do
+    recorte reduzido. Fora do recorte, a borda é repetida (a margem do border deixa a borda vazia
+    de CG: alfa 0, sombra neutra)."""
+    x = (np.arange(start, start + n_out, dtype=np.float64) + 0.5 - o) / k - 0.5 - s0
+    x = np.clip(x, 0.0, n_in - 1)
+    i0 = np.floor(x).astype(np.intp)
+    i1 = np.minimum(i0 + 1, n_in - 1)
+    return i0, i1, (x - i0).astype(np.float32)
+
+
+def resample_crop(arr: np.ndarray, escala: dict, border: list[int]) -> np.ndarray:
+    """Reamostra (bilinear) um recorte renderizado em resolução reduzida (PT7: escala do CG em
+    movimento) para o retângulo ``border`` do quadro inteiro. Só passes de CG (RGBA
+    pré-multiplicado e sombra) passam por aqui; a placa nunca é reamostrada."""
+    x0, y0, x1, y1 = [int(v) for v in border]
+    bx0, by0, bx1, by1 = [int(v) for v in escala["border"]]
+    h, w = arr.shape[:2]
+    if (h, w) != (by1 - by0, bx1 - bx0):
+        raise ValueError(f"EXR reduzido {w}×{h} não bate com o border {escala['border']} da escala")
+    k = float(escala["k"])
+    ox, oy = [float(v) for v in escala.get("o", (0.0, 0.0))]
+    xi0, xi1, wx = _axis_weights(x1 - x0, x0, k, ox, bx0, w)
+    yi0, yi1, wy = _axis_weights(y1 - y0, y0, k, oy, by0, h)
+    wx = wx[None, :, None]
+    top = arr[yi0][:, xi0] * (1 - wx) + arr[yi0][:, xi1] * wx
+    bot = arr[yi1][:, xi0] * (1 - wx) + arr[yi1][:, xi1] * wx
+    wy = wy[:, None, None]
+    return np.ascontiguousarray((top * (1 - wy) + bot * wy).astype(np.float32))
+
+
+def load_layers(exr_path: str, border: list[int] | None, shape: tuple[int, int], shadow_feather: int = 0,
+                escala: dict | None = None) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
     """Lê um EXR (recortado ou de quadro inteiro) e devolve as camadas no retângulo do border
-    (ver ``layers_from_passes``), prontas para ``Compositor.composite(..., origin=...)``."""
+    (ver ``layers_from_passes``), prontas para ``Compositor.composite(..., origin=...)``.
+
+    Com ``escala`` (camada renderizada em resolução reduzida, PT7), o recorte é reamostrado para
+    o ``border`` do quadro inteiro antes (a máscara dos pixels não renderizados vem primeiro)."""
     rgba, shadow = read_render_passes(exr_path)
+    if escala:
+        shadow = mask_unrendered(rgba, shadow)
+        if shadow is None:
+            shadow = np.ones(rgba.shape[:2] + (3,), np.float32)
+        rgba, shadow = resample_crop(rgba, escala, border), resample_crop(shadow, escala, border)
     return layers_from_passes(rgba, shadow, border, shape, shadow_feather)
 
 

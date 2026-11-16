@@ -288,6 +288,33 @@ def plan_layers(parts: list[LayerPart], fps: int, n_frames: int, groups: list[li
     return LayerPlan(mlist, frames, settle)
 
 
+def dynamic_jobs(plan: LayerPlan, only: set | None = None) -> list[tuple]:
+    """Renders da camada dinâmica que o worker vai fazer, na ordem: (quadro, peças, assinatura,
+    marco base). Mesma regra de reaproveitamento do ``render_layered``: uma assinatura igual a um
+    render do quadro anterior (ou já feito neste quadro) não renderiza de novo; um quadro só-foto
+    zera o histórico. Inclui as camadas antigas das transições. Usado na previsão do PT7."""
+    out: list[tuple] = []
+    prev: set = set()
+    for fr in plan.frames:
+        if only and fr.frame not in only:
+            continue
+        if fr.kind == "foto":
+            prev = set()
+            continue
+        cur: set = set()
+        reqs = []
+        if fr.kind == "dinamico":
+            reqs.append((fr.layer, fr.sig, fr.base))
+        if fr.trans is not None:
+            reqs.append((fr.trans[1], fr.trans[2], fr.trans[0]))
+        for keys, sig, base in reqs:
+            if sig not in prev and sig not in cur:
+                out.append((fr.frame, keys, sig, base))
+            cur.add(sig)
+        prev = cur
+    return out
+
+
 def ms_by_id(ms: dict, mid: str | None) -> Milestone | None:
     for m in ms.values():
         if m.id == mid:

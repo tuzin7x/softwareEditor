@@ -123,6 +123,48 @@ worker só o executa (`blender_worker.render_layered`).
   volta ao quadro único: a cena inteira em todo quadro com movimento. Depuração com `only_frames`
   funciona nos dois modos (no de camadas renderiza só os marcos que esses quadros usam).
 
+**Orçamento de tempo (PT7, versão simples; `render/budget.py`, Python puro):** o quadro final
+renderizado primeiro é também a sonda de desempenho. Dele saem a vazão de amostragem (pixel ·
+amostras / s de amostragem), o custo fixo por render e o custo por pixel que não depende das
+amostras (denoiser + gravação). Com o plano do restante — área de cada marco ainda por renderizar e
+de cada render da camada dinâmica (`layers.dynamic_jobs`, mesma regra de reaproveitamento do laço;
+o border da camada vem das poses do plano, sem `frame_set`) — `choose_settings(vazão, custo fixo,
+plano, orçamento)` decide **uma vez**, antes do primeiro quadro animado, nesta ordem de corte:
+1. amostras da camada dinâmica (do perfil até 12);
+2. escala de render só do CG em movimento (1,0 → 0,8; `resolution_percentage` inteiro só nesses
+   renders, ver abaixo);
+3. amostras dos marcos (do perfil até 40).
+
+O orçamento do restante é `total (120 s) − decorrido desde o clique − pós-render (8 s: cauda da
+composição, codificação, verificação, relatório) − reserva (5 s)`. A previsão é um teto (todas as
+amostras pedidas; a amostragem adaptativa só pode parar antes) e os quadros dinâmicos pagam 1,2× por
+amostra pelo desfoque de movimento, que a sonda (parada) não tem. O quadro final nunca perde
+amostras e nada sobe acima do perfil; se nem o mínimo cabe, o render segue no mínimo (`cabe =
+false`). O `scene.json` leva `render.orcamento` (`total_s`, `t_clique`, mínimos);
+`MOBILIA_ORCAMENTO_S` troca o total (`0` desliga). A decisão, a sonda e a previsão vão para
+`frames.json["orcamento"]`, para o evento `budget` (o motor o repassa à interface como `forecast`:
+"Previsão: ≈ 1 min 40 s no total") e para `report.json` `render.orcamento` (com `real_render_s` e
+`real_total_s` para comparar). Só vale no render em camadas; no quadro único fica desligado.
+- **Escala do CG em movimento:** o render reduzido usa o mesmo border normalizado na resolução
+  `W·pct/100 × H·pct/100` (divisão inteira, como o Blender), arredondado para pixels inteiros nessa
+  resolução (`border.scaled_border`). Com `sensor_fit = HORIZONTAL` o campo de visão horizontal é o
+  mesmo e o *shift* da lente é medido em larguras da imagem renderizada (conferido no Blender 5.3),
+  então o mapa é afim e independe do *shift*: `x = k·x_r`, `y = (H − k·H_r)/2 + k·y_r`, `k = W/W_r`.
+  A entrada do `frames.json` (e a `transicao`) leva `escala` (pct, retângulo reduzido, k, origem) e
+  `border` = o retângulo do quadro inteiro coberto. O compositor reamostra (bilinear) **só** o
+  RGBA pré-multiplicado e a sombra do recorte para esse retângulo (`compositor.resample_crop`) antes
+  de compor; a placa nunca é reamostrada e a verificação byte a byte segue igual (a máscara vem do
+  alfa já reamostrado).
+- Validação em CPU (sala de teste, layout PT9, 320 px, perfil 64/64/32, desfoque de movimento): a
+  sonda mediu 534 mil pixel·amostras/s e 0,22 s de custo fixo; sem cortes o restante levaria ~468 s
+  e o orçamento era 90,5 s, então o controle foi ao mínimo (dinâmico 12, escala 80%, marcos 40) e
+  previu 150 s de render restante; o real foi 142 s (a decisão em si custou 0,18 s para 4 marcos e
+  161 renders dinâmicos). Os 251 quadros saíram byte a byte iguais à foto fora da máscara. A camada
+  reduzida e reamostrada ficou alinhada com a de escala 1 do mesmo quadro (centroide do alfa a
+  ≤ 0,17 px, diferença média de alfa ≤ 0,004).
+- Ainda não feito (P1): usar a sobra de fotos pequenas em supersampling do CG, e reajustar a
+  decisão durante o render com os tempos reais dos quadros dinâmicos.
+
 **Render incremental (experimental, desligado):** re-renderizar só a região das peças em movimento
 colando sobre o quadro anterior reduziu a área renderizada em ~14% na cena de teste. Mas sombras
 suaves junto à parede ultrapassam a região e deixaram emendas sutis, então o modo fica desligado
@@ -435,6 +477,9 @@ de render:
   marca a próxima geração como primeira execução (`primeira_execucao_pendente`); a interface mostra o
   aviso "primeira execução" na tela de progresso, e o `report.json` traz
   `primeira_execucao_custos.aquecimento_instalador` (feito/ok, dispositivos, kernels pagos na instalação).
+- Previsão do tempo (PT7): depois do quadro final, o evento `forecast` do motor (`ProgressEmitter.forecast`,
+  vindo do evento `budget` do worker) aparece na tela de progresso abaixo do tempo decorrido
+  ("Previsão: ≈ 1 min 40 s no total"); o resumo de tempos da tela de resultado repete a previsão.
 - Telemetria (`mobilia/telemetry.py`): `report.json` traz `tempos_s` com todas as subetapas da seção 4
   do `PLANO_V2.md` (`inicio_motor`, `carga_foto`, `analise.{geometria_carga, geometria_inferencia,
   segmentacao_carga, segmentacao_inferencia, sala, sol, oclusores, gravacao}`, `layout`, `ativos`,

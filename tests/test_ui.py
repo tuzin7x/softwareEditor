@@ -56,6 +56,9 @@ def test_flow_success(app, win):
     _shot(win, "3_gerando")
     assert _wait(app, lambda: win.right.currentIndex() == 2)
     assert win.last_output and Path(win.last_output).exists()
+    # previsão do controle de orçamento (PT7) mostrada durante a geração
+    assert win.forecast.text() == "Previsão: ≈ 1 min 40 s no total"
+    assert win.last_job.forecast_s == 100.0
     _shot(win, "4_pronto")
 
 

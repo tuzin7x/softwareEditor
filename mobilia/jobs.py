@@ -98,6 +98,14 @@ class ProgressEmitter:
     def preview(self, path: str | Path) -> None:
         self._emit({"event": "preview", "path": str(path)})
 
+    def forecast(self, total_s: float, fits: bool = True) -> None:
+        """Previsão do tempo total (s, desde o clique em "Gerar"), feita pelo controle de orçamento
+        do render (PT7) depois do quadro final."""
+        from .render.budget import format_duration
+
+        self._emit({"event": "forecast", "total_s": round(float(total_s), 1), "cabe": bool(fits),
+                    "message": f"Previsão: {format_duration(total_s)} no total"})
+
     def log(self, message: str, level: str = "info") -> None:
         self._emit({"event": "log", "level": level, "message": message})
 

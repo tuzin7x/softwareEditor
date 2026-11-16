@@ -279,7 +279,8 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                      hold_start: float = 0.8, hold_end: float = 2.5, motion_blur: bool = True,
                      seed: int = 7, calibrate: bool = True, threads: int = 0, sun: dict | None = None,
                      occluders: tuple | None = None, sun_mask: np.ndarray | None = None,
-                     photo_emission: bool = True, layered: bool = True) -> dict:
+                     photo_emission: bool = True, layered: bool = True,
+                     budget: dict | None = None) -> dict:
     H, W = plate8.shape[:2]
     intr = room.intr().scaled(W, H)
     stats = surface_stats(plate8, seg)
@@ -357,7 +358,9 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                    "crop_to_border": True, "exr_codec": EXR_CODEC,
                    # render em camadas (PT6): marcos estáticos + camada dinâmica; false = quadro único
                    "camadas": bool(layered), "crossfade_frames": CROSSFADE_FRAMES,
-                   "dynamic_margin_m": DYNAMIC_MARGIN_M},
+                   "dynamic_margin_m": DYNAMIC_MARGIN_M,
+                   # controle do orçamento de tempo (PT7, render/budget.py); sem ele, as amostras do perfil
+                   "orcamento": dict(budget) if budget else {"ativo": False}},
     }
     (work_dir / "scene.json").write_text(json.dumps(spec, ensure_ascii=False, indent=1), encoding="utf-8")
     return spec

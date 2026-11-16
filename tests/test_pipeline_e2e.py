@@ -144,6 +144,13 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     assert r["desempenho"]["amostras_por_s"] > 0 and r["desempenho"]["custo_fixo_quadro_s"] >= 0
     assert r["camadas"]["final"]["quadros"] >= 1 and r["camadas"]["dinamico"]["quadros"] >= 1
     assert 0 < r["cobertura_recorte_media"] < 1
+    # PT7: orçamento decidido depois do quadro final; aqui cabe sem cortes, e a previsão vai à tela
+    o = r["orcamento"]
+    assert o["ativo"] is True and o["cabe"] is True and o["cortes"] == [] and o["render_pct"] == 100
+    assert 0 < o["previsto_total_s"] < 120 and o["real_total_s"] == t["total_percebido"]
+    fc = [e for e in events if e["event"] == "forecast"]
+    assert len(fc) == 1 and fc[0]["total_s"] == pytest.approx(o["previsto_total_s"], abs=0.1)
+    assert fc[0]["message"].startswith("Previsão: ≈ ")
     # composição / encode / preservação / GPU
     c = rep["composicao"]
     assert len(c["por_quadro"]) == q["total"] and c["recorte_medio_px"] > 0
@@ -246,6 +253,46 @@ def test_fast_pipeline_worker_without_frame_events(tmp_path, monkeypatch):
     assert c["sombra_contato"]["aplicada"] is True          # do frames.json (sem eventos de quadro)
     assert rep["preservacao"]["preservado_exato_todos"] is True
     assert rep["preservacao"]["quadros_verificados"] == q["total"]
+
+
+def test_fast_pipeline_budget_scales_dynamic_layer(tmp_path, monkeypatch):
+    """PT7: com um orçamento impossível o controle chega à escala mínima do CG em movimento; as
+    camadas dinâmicas vêm reduzidas (``escala`` na entrada), são reamostradas na composição e a
+    placa continua byte a byte fora da máscara; marcos e quadro final ficam em escala 1."""
+    from mobilia import pipeline
+    from mobilia.jobs import JobRequest, ProgressEmitter
+    from mobilia.render import budget as bg
+
+    monkeypatch.setenv("MOBILIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(pipeline.ENV_BLENDER_WORKER, json.dumps([sys.executable, str(FAKE), "blender"]))
+    monkeypatch.setenv(pipeline.ENV_MANTER_EXR, "1")
+    monkeypatch.setenv(bg.ENV_ORCAMENTO, "1")
+    _tiny_quality(monkeypatch, pipeline, long_edge=160, samples=8, fps=12)
+    _fake_analysis(monkeypatch, tmp_path)
+    events = []
+    req = JobRequest(str(FX / "photos/sala_vazia_stafford.jpg"), "sala", str(tmp_path / "v.mp4"),
+                     quality="previa", work_dir=str(tmp_path / "job"))
+    rep = json.loads(Path(pipeline.run_job(req, ProgressEmitter(callback=events.append)).report_path)
+                     .read_text(encoding="utf-8"))
+    spec = json.loads((tmp_path / "job" / "scene.json").read_text(encoding="utf-8"))
+    assert spec["render"]["orcamento"]["total_s"] == 1.0
+    o = rep["render"]["orcamento"]
+    assert o["ativo"] and not o["cabe"] and "escala_cg" in o["cortes"] and o["render_pct"] == 80
+    assert o["spp_dinamico"] == 8                     # perfil já abaixo do mínimo: não sobe
+    meta = json.loads((tmp_path / "job" / "render" / "frames.json").read_text(encoding="utf-8"))
+    dyn = [f for f in meta["frames"] if f.get("camada") == "dinamico"]
+    assert dyn and all(f["escala"]["pct"] == 80 for f in dyn)
+    assert all("escala" not in f for f in meta["frames"] if f.get("camada") in ("marco", "final")
+               and not f.get("transicao"))
+    assert any(f.get("transicao", {}).get("escala") for f in meta["frames"])
+    rows = rep["render"]["por_quadro"]
+    assert {p.get("escala") for p in rows if p["camada"] == "dinamico"} == {0.8}
+    assert all("escala" not in p for p in rows if p["camada"] != "dinamico")
+    assert rep["preservacao"]["preservado_exato_todos"] is True
+    assert any(e["event"] == "forecast" and e["cabe"] is False for e in events)
+    # recompor lê as mesmas entradas com escala e reproduz a verificação
+    rep2 = pipeline.recompose(tmp_path / "job", tmp_path / "de_novo.mp4", ProgressEmitter())
+    assert rep2["preservacao"]["preservado_exato_todos"] is True
 
 
 def test_fast_pipeline_single_layer_fallback(tmp_path, monkeypatch):

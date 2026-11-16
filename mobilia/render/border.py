@@ -72,3 +72,44 @@ def exr_codec(name: str | None) -> str:
     """Nome do codec do EXR (``image_settings.exr_codec``); desconhecido → ``EXR_CODEC``."""
     n = str(name or EXR_CODEC).upper()
     return n if n in EXR_CODECS else EXR_CODEC
+
+
+# ============================================================================ escala do CG em movimento (PT7)
+def scaled_resolution(width: int, height: int, pct: int) -> tuple[int, int]:
+    """Resolução que o Blender renderiza com ``resolution_percentage = pct`` (divisão inteira,
+    como ``BKE_render_resolution``)."""
+    return int(width) * int(pct) // 100, int(height) * int(pct) // 100
+
+
+def scaled_border(b, width: int, height: int, pct: int):
+    """Border de um render com ``resolution_percentage = pct`` (camada dinâmica reduzida, PT7).
+
+    Devolve ``(border_px, escala, border_blender)`` ou None: ``border_px`` = retângulo do quadro
+    INTEIRO coberto pelo recorte reduzido (é ele que vai ao ``frames.json`` e à verificação);
+    ``escala`` = o que o compositor precisa para reamostrar o recorte (``pct``, o retângulo em
+    pixels da resolução reduzida e o mapa afim ``x_inteiro = o + k · x_reduzido`` em coordenadas
+    contínuas, origem no topo-esquerdo); ``border_blender`` vai para ``sc.render.border_*``.
+
+    A câmera usa ``sensor_fit = HORIZONTAL``: o campo de visão horizontal é o mesmo nas duas
+    resoluções (k = W / Ws nos dois eixos, pixels quadrados) e o deslocamento da lente
+    (``shift``) é medido em larguras da imagem renderizada, então o centro óptico cai no mesmo
+    ponto e o ``shift`` some do mapa. Como ``Hs`` é truncado, a altura reduzida cobre ``k·Hs``
+    pixels do quadro inteiro, centrada: ``o = (0, (H − k·Hs)/2)``."""
+    W, H = int(width), int(height)
+    Ws, Hs = scaled_resolution(W, H, pct)
+    if Ws <= 0 or Hs <= 0:
+        return None
+    r = pixel_border(b, Ws, Hs)
+    if r is None:
+        return None
+    bs, bb = r
+    k = W / Ws
+    ox, oy = 0.0, (H - k * Hs) / 2.0
+    x0 = max(0, min(W, int(math.floor(ox + k * bs[0] + SNAP))))
+    x1 = max(0, min(W, int(math.ceil(ox + k * bs[2] - SNAP))))
+    y0 = max(0, min(H, int(math.floor(oy + k * bs[1] + SNAP))))
+    y1 = max(0, min(H, int(math.ceil(oy + k * bs[3] - SNAP))))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    escala = {"pct": int(pct), "tamanho": [Ws, Hs], "border": list(bs), "k": k, "o": [ox, oy]}
+    return [x0, y0, x1, y1], escala, bb

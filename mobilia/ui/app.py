@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         self.room: str | None = None
         self.runner = JobRunner(self)
         self.runner.progress.connect(self._on_progress)
+        self.runner.forecast.connect(self._on_forecast)
         self.runner.preview.connect(self._on_preview)
         self.runner.finished.connect(self._on_finished)
         self.started_at = 0.0
@@ -265,6 +266,8 @@ class MainWindow(QMainWindow):
         self.pct = QLabel("0%"); self.pct.setStyleSheet("font-size: 28px; font-weight: 600;")
         self.msg = QLabel("Preparando…"); self.msg.setWordWrap(True)
         self.elapsed = QLabel(""); self.elapsed.setObjectName("muted")
+        # previsão do tempo total (controle de orçamento do render, PT7): aparece após o quadro final
+        self.forecast = QLabel(""); self.forecast.setObjectName("muted"); self.forecast.hide()
         # aviso "primeira execução — mais lenta" (estado da instalação, ver bootstrap.first_run_notice)
         self.notice = QLabel(""); self.notice.setObjectName("notice"); self.notice.setWordWrap(True)
         self.notice.hide()
@@ -272,7 +275,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("danger")
         self.btn_cancel.clicked.connect(self.cancel)
         lay.addWidget(s); lay.addWidget(self.pct); lay.addWidget(self.bar); lay.addWidget(self.msg)
-        lay.addWidget(self.elapsed); lay.addWidget(self.notice); lay.addSpacing(8); lay.addWidget(self.stages)
+        lay.addWidget(self.elapsed); lay.addWidget(self.forecast); lay.addWidget(self.notice); lay.addSpacing(8); lay.addWidget(self.stages)
         lay.addStretch(1)
         lay.addWidget(self.btn_cancel)
         return w
@@ -332,6 +335,7 @@ class MainWindow(QMainWindow):
         req = JobRequest(self.photo_path, self.room, str(out), quality=self.quality.currentData(),
                          work_dir=str(work))
         self.stages.reset(); self.bar.setValue(0); self.pct.setText("0%"); self.msg.setText("Iniciando o motor…")
+        self.forecast.setText(""); self.forecast.hide()
         self.live.set_image(self.photo_path)
         notice = self.first_run_notice()
         self.notice.setText(notice or ""); self.notice.setVisible(bool(notice))
@@ -407,6 +411,10 @@ class MainWindow(QMainWindow):
     def _on_progress(self, stage: str, frac: float, message: str) -> None:
         self.bar.setValue(int(frac * 1000)); self.pct.setText(f"{frac * 100:.0f}%")
         self.msg.setText(message); self.stages.set_current(stage)
+
+    def _on_forecast(self, total_s: float, message: str) -> None:
+        self.forecast.setText(message or f"Previsão: ≈ {int(round(total_s))} s no total")
+        self.forecast.show()
 
     def _on_preview(self, path: str) -> None:
         if path and Path(path).exists():

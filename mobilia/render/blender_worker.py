@@ -39,6 +39,7 @@ import numpy as np
 from bpy_extras.object_utils import world_to_camera_view
 
 from mobilia.render import border as bd
+from mobilia.render import budget as bg
 from mobilia.render import calibration as cal
 from mobilia.render import choreography as ch
 from mobilia.render import layers as lay
@@ -1517,8 +1518,66 @@ def _layer_render_count(plan, only: set) -> int:
     return n + len({u for u in used if u})
 
 
+def budget_plan(sc, cam, items_rt: list[dict], plan, rest: list, only: set, fps: int, W: int, H: int,
+                margin: float, dmargin: float, sun_dir) -> tuple[list[int], list[int]]:
+    """Áreas (px, escala 1) do que falta renderizar depois do quadro final, para a previsão do
+    PT7: cada marco de ``rest`` (border de todas as suas peças) e cada render da camada dinâmica
+    (``layers.dynamic_jobs``: mesma região que o laço vai usar; renders vazios não contam)."""
+    marcos = []
+    for m in rest:
+        sc.frame_set(m.frame)
+        bpy.context.view_layer.update()
+        pb = bd.pixel_border(compute_border(sc, cam, items_rt, margin, keys=m.parts) or (0, 0, 0, 0), W, H)
+        if pb is not None:
+            x0, y0, x1, y1 = pb[0]
+            marcos.append((x1 - x0) * (y1 - y0))
+    dyn = []
+    for f, keys, _sig, _base in lay.dynamic_jobs(plan, only):
+        b = layer_border(sc, cam, items_rt, keys, f, fps, dmargin, sun_dir)
+        pb = bd.pixel_border(b, W, H) if b is not None else None
+        if pb is not None:
+            x0, y0, x1, y1 = pb[0]
+            dyn.append((x1 - x0) * (y1 - y0))
+    return marcos, dyn
+
+
+def decide_budget(cfg: dict, row: dict | None, marcos: list[int], dyn: list[int], spl: dict, motion_blur: bool,
+                  t_ref: float) -> dict:
+    """Decisão do PT7 (uma vez, depois do quadro final): mede a sonda, escolhe amostras/escala e
+    devolve o registro do relatório (o mesmo vai no evento ``budget``)."""
+    probe = bg.measure(row or {})
+    t0 = cfg.get("t_clique")
+    elapsed = time.time() - (float(t0) if t0 else t_ref)
+    total = float(cfg.get("total_s", bg.BUDGET_S))
+    pos = float(cfg.get("pos_render_s", bg.POS_RENDER_S))
+    res = float(cfg.get("reserva_s", bg.RESERVA_S))
+    avail = total - res - pos - elapsed
+    info = {"ativo": True, "total_s": total, "decorrido_s": round(elapsed, 2), "pos_render_s": pos,
+            "reserva_s": res, "disponivel_render_s": round(avail, 2), "marcos_restantes": len(marcos),
+            "renders_dinamicos": len(dyn), "area_dinamica_media_px": round(sum(dyn) / len(dyn)) if dyn else 0,
+            "spp_perfil": {"marco": int(spl["marco"]), "dinamico": int(spl["dinamico"])}}
+    if probe is None:
+        info.update(ativo=False, motivo="sem medida do quadro final")
+        return info
+    plan = bg.RenderPlan(tuple(marcos), tuple(dyn), int(spl["marco"]), int(spl["dinamico"]), motion_blur)
+    st = bg.choose_settings(probe.throughput, probe.overhead, plan, avail)
+    info.update({
+        "sonda": {"amostras_por_s": round(probe.throughput), "custo_fixo_s": round(probe.overhead.fixed_s, 4),
+                  "custo_por_mpx_s": round(probe.overhead.per_px_s * 1e6, 4), "area_px": probe.area_px,
+                  "spp": probe.spp, "estimada": probe.estimado},
+        "spp_dinamico": st.spp_dinamico, "escala_cg": st.escala_cg, "render_pct": st.render_pct,
+        "spp_marcos": st.spp_marcos, "cortes": st.cortes, "cabe": st.cabe,
+        "previsto_render_s": st.previsto_s, "sem_corte_render_s": st.sem_corte_s,
+        "previsto_total_s": round(elapsed + st.previsto_s + pos, 1),
+        "motivo": ("cabe sem cortes" if not st.cortes else
+                   ("cortes: " + ", ".join(st.cortes)) + ("" if st.cabe else " (no mínimo, ainda acima do orçamento)")),
+    })
+    return info
+
+
 def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contact_refs: list, fade_mats: dict,
-                   pass_out: dict, out_dir: Path, spl: dict, amin: dict, sun_dir, only: set) -> dict:
+                   pass_out: dict, out_dir: Path, spl: dict, amin: dict, sun_dir, only: set,
+                   t_ref: float | None = None) -> dict:
     """Render em camadas (PT6). Marcos primeiro (o quadro final antes de todos: é também a medida
     de desempenho do PT7), depois os quadros do vídeo em ordem, cada um anunciado já pronto.
 
@@ -1526,8 +1585,17 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
     quadro com movimento tem o EXR da camada dinâmica e ``base`` (o marco: EXR, border, poses de
     contato); na troca de marco, ``transicao`` traz a composição antiga (camada + marco anteriores)
     e o ``peso`` dela. Um render cuja assinatura (marco + poses das peças da camada) é a do quadro
-    anterior é reaproveitado."""
+    anterior é reaproveitado.
+
+    Orçamento de tempo (PT7, ``render.orcamento``): logo depois do quadro final, a medida dele e o
+    plano do restante escolhem as amostras da camada dinâmica, a escala do CG em movimento
+    (``resolution_percentage`` só nesses renders; a entrada leva ``escala`` e o compositor reamostra
+    o recorte) e as amostras dos marcos (``budget.choose_settings``)."""
     rs = spec["render"]
+    spl = dict(spl)
+    t_ref = time.time() if t_ref is None else t_ref
+    bcfg = dict(rs.get("orcamento") or {})
+    scale = {"pct": 100}
     fps, n_frames = int(rs["fps"]), int(rs["n_frames"])
     W, H = spec["width"], spec["height"]
     crop = bool(rs.get("crop_to_border", True))
@@ -1554,6 +1622,14 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
         if pb is None:
             return None, {}
         border_px, b = pb
+        esc = None
+        pct = scale["pct"] if camada == "dinamico" else 100
+        if pct < 100:
+            sb = bd.scaled_border(border, W, H, pct)
+            if sb is None:
+                return None, {}
+            border_px, esc, b = sb
+        sc.render.resolution_percentage = pct
         sc.render.use_border = True
         sc.render.use_crop_to_border = crop
         sc.render.border_min_x, sc.render.border_min_y, sc.render.border_max_x, sc.render.border_max_y = b
@@ -1563,8 +1639,12 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
         fades = update_fade_shaders(fade_mats, f, fps)
         t_prep = time.perf_counter() - t_it
         st = render_frame(sc, out_dir / "frames" / name, pass_out)
+        sc.render.resolution_percentage = 100
         done += 1
-        area = max(0, border_px[2] - border_px[0]) * max(0, border_px[3] - border_px[1])
+        rb = esc["border"] if esc else border_px          # pixels realmente renderizados
+        area = max(0, rb[2] - rb[0]) * max(0, rb[3] - rb[1])
+        if esc:
+            extra = {**extra, "escala": pct / 100}
         wall = time.perf_counter() - t_it
         layer_s[camada] += wall
         por_quadro.append({"quadro": f, "camada": camada, **extra, "area_px": area,
@@ -1577,11 +1657,35 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
                            "parede_s": round(wall, 4), "mem_mb": st.get("mem_mb")})
         emit(event="render_progress", done=done, frame=f, n_frames=n_frames, camada=camada,
              estimated_total=max(total, done), seconds=round(st.get("parede_s") or 0.0, 2))
+        if esc:
+            st = {**st, "escala": esc}
         return border_px, st
 
     # ---- marcos (bases estáticas)
+    def _budget_step(rest: list) -> float:
+        """PT7: depois do quadro final, decide amostras/escala do restante (uma vez)."""
+        t0 = time.perf_counter()
+        n0 = len(por_quadro)
+        marcos, dyn = budget_plan(sc, cam, items_rt, plan, rest, only, fps, W, H, margin, dmargin, sun_dir)
+        info = decide_budget(bcfg, por_quadro[-1] if n0 else None, marcos, dyn, spl,
+                             bool(rs.get("motion_blur", True)), t_ref)
+        if info.get("ativo"):
+            spl.update(bg.Settings(info["spp_dinamico"], info["escala_cg"], info["spp_marcos"], 0, 0, True)
+                       .layers(spl))
+            scale["pct"] = int(info["render_pct"])
+            emit(event="log", level="info" if info["cabe"] else "warning",
+                 message=f"Orçamento de tempo: previsão {bg.format_duration(info['previsto_total_s'])} no total "
+                         f"(dinâmico {spl['dinamico']} amostras, escala {scale['pct']}%, marcos "
+                         f"{spl['marco']} amostras; {info['motivo']})")
+        info["estimativa_s"] = round(time.perf_counter() - t0, 3)
+        meta["orcamento"] = info
+        emit(event="budget", **info)
+        return time.perf_counter()
+
     descs: dict[str, dict | None] = {}
-    for m in order:
+    t_decided = None
+    meta["orcamento"] = {"ativo": False, "motivo": "orçamento desligado (render.orcamento)"}
+    for i, m in enumerate(order):
         sc.frame_set(m.frame)
         bpy.context.view_layer.update()
         set_layer_roles(items_rt, m.parts)
@@ -1589,6 +1693,11 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
         border_px, _ = _render(m.source, b, m.layer, m.frame,
                                {"marco": m.id, "itens": len(m.itens), "pecas": len(m.parts),
                                 "pecas_em_movimento": 0})
+        if i == 0 and bcfg.get("ativo"):
+            if m.final:
+                t_decided = _budget_step(order[1:])
+            else:
+                meta["orcamento"] = {"ativo": False, "motivo": "sem quadro final no plano (quadros selecionados)"}
         if border_px is None:
             descs[m.id] = None                 # nada do marco aparece na imagem: base = a foto
             continue
@@ -1635,12 +1744,14 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
             b = layer_border(sc, cam, items_rt, keys, f, fps, dmargin, sun_dir)
             name = f"{prefix}_{f:05d}.exr"
             moving = sum(1 for k in keys if f < plan.settle.get(k, 0))
-            border_px, _ = _render(name, b, "dinamico", f, {"base": mid, "pecas": len(keys),
-                                                            "pecas_em_movimento": moving,
-                                                            "transicao": prefix == "t"})
+            border_px, st = _render(name, b, "dinamico", f, {"base": mid, "pecas": len(keys),
+                                                             "pecas_em_movimento": moving,
+                                                             "transicao": prefix == "t"})
             rec = None if border_px is None else {
                 "source": name, "border": border_px,
                 "contato": contact_poses(contact_refs, f, fps, keys=keys) if contact_refs else None}
+            if rec is not None and st.get("escala"):
+                rec["escala"] = st["escala"]
             cur[sig] = rec
             return rec
 
@@ -1660,6 +1771,8 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
             else:
                 entry = {"frame": f, "source": rec["source"], "border": rec["border"], "mode": "full",
                          "crop": crop, "camada": "dinamico", "base": _base(fr.base)}
+                if rec.get("escala"):
+                    entry["escala"] = rec["escala"]
                 if rec.get("contato") is not None:
                     entry["contato"] = rec["contato"]
         if entry is not None and fr.trans is not None:
@@ -1668,6 +1781,8 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
             if orec is not None:
                 entry["transicao"] = {"source": orec["source"], "border": orec["border"], "base": _base(omid),
                                       "peso": float(w_old)}
+                if orec.get("escala"):
+                    entry["transicao"]["escala"] = orec["escala"]
                 if orec.get("contato") is not None:
                     entry["transicao"]["contato"] = orec["contato"]
         if entry is None:
@@ -1682,7 +1797,10 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
         prev_entry = body
         prev_renders = cur
     set_layer_roles(items_rt, None)
-    return {"por_quadro": por_quadro, "layer_s": layer_s, "done": done, "total": total}
+    orc = meta.get("orcamento") or {}
+    if t_decided is not None and orc.get("ativo"):
+        orc["real_render_s"] = round(time.perf_counter() - t_decided, 2)
+    return {"por_quadro": por_quadro, "layer_s": layer_s, "done": done, "total": total, "spl": spl}
 
 
 def main(spec_path: str) -> None:
@@ -1825,11 +1943,12 @@ def main(spec_path: str) -> None:
     t_loop = time.perf_counter()
     if layered:
         res = render_layered(sc, cam, spec, items_rt, meta, contact_refs, fade_mats, pass_out, out_dir, spl, amin,
-                             sun_dir, only)
-        por_quadro, layer_s, done = res["por_quadro"], res["layer_s"], res["done"]
+                             sun_dir, only, t_ref=t_start)
+        por_quadro, layer_s, done, spl = res["por_quadro"], res["layer_s"], res["done"], res["spl"]
         frames_iter = []
     else:
         meta["camadas"] = {"modo": "unica"}
+        meta["orcamento"] = {"ativo": False, "motivo": "render de quadro único (o controle usa o plano em camadas)"}
         to_render = [f for f in range(1, n_frames + 1) if any_visible(items_rt, f, fps) and (not only or f in only)]
         final_sig = frame_signature(items_rt, n_frames, fps)
         # amostras por camada (final > marco > dinâmico), com rampa antes dos quadros parados
@@ -1924,6 +2043,7 @@ def main(spec_path: str) -> None:
         "samples_config": int(spec["render"]["samples"]),
         "samples_camadas": spl,
         "camadas": meta.get("camadas"),
+        "orcamento": meta.get("orcamento"),
         "passes": meta["passes"],
         "exr": meta["exr"],
     }

@@ -293,7 +293,7 @@ class StreamComposer:
         t1 = time.perf_counter()
         contact = model.frame(desc.get("contato")) if model is not None else None
         rgba, sh, origin = load_layers(self.frames_dir / desc["source"], desc.get("border"), (self.H, self.W),
-                                       self.shadow_feather)
+                                       self.shadow_feather, escala=desc.get("escala"))
         t2 = time.perf_counter()
         out8, st = LayerAccumulator.compose_dynamic(comp, frame, base, rgba, sh, origin, grade, contact)
         t3 = time.perf_counter()
@@ -386,14 +386,15 @@ class StreamComposer:
         path = self.frames_dir / entry["source"]
         border = entry.get("border")
         if self.sequential:
-            rgba, sh = load_render_passes(path, border, (self.H, self.W))
+            rgba, sh = load_render_passes(path, border, (self.H, self.W), escala=entry.get("escala"))
             t2 = time.perf_counter()
             self._acc.update(rgba, sh, border, entry.get("mode", "full"))
             out8, st = comp.composite(entry["frame"], self._acc.rgba, self._acc.shadow, None, grade=grade,
                                       contact=contact)
             alpha, origin = self._acc.rgba[..., 3], (0, 0)
         else:
-            rgba, sh, origin = load_layers(path, border, (self.H, self.W), self.shadow_feather)
+            rgba, sh, origin = load_layers(path, border, (self.H, self.W), self.shadow_feather,
+                                           escala=entry.get("escala"))
             t2 = time.perf_counter()
             out8, st = comp.composite(entry["frame"], rgba, sh, None, origin=origin, grade=grade, contact=contact)
             alpha = rgba[..., 3]

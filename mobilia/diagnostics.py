@@ -144,6 +144,9 @@ def summary_text(report: dict) -> str:
     total = t.get("total_percebido") or t.get("total")
     if total:
         lines.append(f"Total: {format_seconds(_total(total))}")
+    orc = (report.get("render") or {}).get("orcamento") or {}
+    if orc.get("ativo") and orc.get("previsto_total_s") is not None:
+        lines.append(f"Previsão feita após o quadro final: {format_seconds(float(orc['previsto_total_s']))}")
     if report.get("primeira_execucao"):
         lines.append("Primeira execução depois da instalação — as próximas são mais rápidas.")
     return "\n".join(lines)

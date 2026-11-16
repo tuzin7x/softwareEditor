@@ -11,6 +11,9 @@ Modos:
   border (Combined + Shadow Catcher) de um quadrado que entra em cena e para, com a telemetria por
   quadro do worker real. Com ``render.camadas`` (padrão) imita o render em camadas (PT6): marcos,
   camada dinâmica sobre o marco e transição; ``camadas = false``, o quadro único. ``MOBILIA_DUBLE_SEM_FLUXO=1`` imita um worker sem os eventos por quadro.
+  Com ``render.orcamento`` ativo, decide o orçamento (PT7) depois do quadro final com a mesma função
+  pura do worker e, se a escala do CG cair abaixo de 1, grava as camadas dinâmicas reduzidas
+  (``escala`` na entrada), como o worker real.
 """
 import json
 import os
@@ -131,10 +134,32 @@ def blender(spec_path: str) -> int:
             shadow[H // 3 + side:H // 3 + side + 3, xb:xb + side] = 0.7
         return rgba, shadow
 
+    budget = {"pct": 100}
+    orc_meta = {"ativo": False, "motivo": "orçamento desligado (render.orcamento)"}
+
+    def scaled(border, rgba, shadow):
+        """Camada "renderizada" em ``resolution_percentage`` reduzida: amostra o quadro inteiro nos
+        centros dos pixels reduzidos (mesmo mapa afim do worker) e devolve o recorte + a escala."""
+        from mobilia.render import border as bd
+
+        b = (border[0] / W, 1 - border[3] / H, border[2] / W, 1 - border[1] / H)
+        full_px, esc, _ = bd.scaled_border(b, W, H, budget["pct"])
+        bx0, by0, bx1, by1 = esc["border"]
+        k, (ox, oy) = esc["k"], esc["o"]
+        xs = np.clip(np.floor(ox + k * (np.arange(bx0, bx1) + 0.5)).astype(int), 0, W - 1)
+        ys = np.clip(np.floor(oy + k * (np.arange(by0, by1) + 0.5)).astype(int), 0, H - 1)
+        return full_px, esc, rgba[ys][:, xs], shadow[ys][:, xs]
+
     def render(name, border, camada, f, rgba, shadow, extra=None):
         ti = time.perf_counter()
         x0, y0, x1, y1 = border
-        _write_exr(out / "frames" / name, rgba[y0:y1, x0:x1], shadow[y0:y1, x0:x1])
+        esc = None
+        if camada == "dinamico" and budget["pct"] < 100:
+            border, esc, rgba_c, shadow_c = scaled(border, rgba, shadow)
+            _write_exr(out / "frames" / name, rgba_c, shadow_c)
+            extra = {**(extra or {}), "escala": budget["pct"] / 100}
+        else:
+            _write_exr(out / "frames" / name, rgba[y0:y1, x0:x1], shadow[y0:y1, x0:x1])
         time.sleep(0.01)
         wall = time.perf_counter() - ti
         layer_s[camada] += wall
@@ -147,6 +172,28 @@ def blender(spec_path: str) -> int:
                            "mem_mb": 12.0, **(extra or {})})
         _emit(event="render_progress", done=len(por_quadro), frame=f, n_frames=n, camada=camada,
               estimated_total=stop_at - 4, seconds=round(wall, 3))
+        return border, esc
+
+    def decide(spl):
+        """Como ``blender_worker.decide_budget``: sonda = quadro final; plano = 1 marco + camadas."""
+        from mobilia.render import budget as bg
+
+        cfg = spec["render"].get("orcamento") or {}
+        probe = bg.measure(por_quadro[-1])
+        elapsed = time.time() - float(cfg.get("t_clique") or time.time())
+        avail = float(cfg["total_s"]) - float(cfg["reserva_s"]) - float(cfg["pos_render_s"]) - elapsed
+        dyn = [(side + 12) ** 2] * (stop_at - 4)
+        plan = bg.RenderPlan((side * side,), tuple(dyn), int(spl["marco"]), int(spl["dinamico"]))
+        st = bg.choose_settings(probe.throughput, probe.overhead, plan, avail)
+        budget["pct"] = st.render_pct
+        info = {"ativo": True, "total_s": cfg["total_s"], "decorrido_s": round(elapsed, 2),
+                "disponivel_render_s": round(avail, 2), "spp_dinamico": st.spp_dinamico,
+                "escala_cg": st.escala_cg, "render_pct": st.render_pct, "spp_marcos": st.spp_marcos,
+                "cortes": st.cortes, "cabe": st.cabe, "previsto_render_s": st.previsto_s,
+                "previsto_total_s": round(elapsed + st.previsto_s + float(cfg["pos_render_s"]), 1)}
+        orc_meta.clear()
+        orc_meta.update(info)
+        _emit(event="budget", **info)
 
     def pose(xb):
         if contact is None:
@@ -167,6 +214,8 @@ def blender(spec_path: str) -> int:
         fin_border = [max(0, bx(stop_at) - 6), H // 3 - 6, W, min(H, H // 2 + side // 2 + 10)]
         rgba, shadow = layers(bx(stop_at), True, True)
         render("m_00012.exr", fin_border, "final", stop_at, rgba, shadow, {"marco": "m_00012"})
+        if (spec["render"].get("orcamento") or {}).get("ativo"):
+            decide(spec["render"].get("samples_layers") or {"marco": 8, "dinamico": 8})
         rgba, shadow = layers(0, True, False)
         render("m_00005.exr", a_border, "marco", 5, rgba, shadow, {"marco": "m_00005"})
         m1 = {"source": "m_00005.exr", "border": a_border, "frame": 5}
@@ -186,9 +235,11 @@ def blender(spec_path: str) -> int:
                 xb = bx(f)
                 rgba, shadow = layers(xb, True, True, catcher_a=True)
                 name = f"f_{f:05d}.exr"
-                render(name, b_border(xb), "dinamico", f, rgba, shadow, {"base": "m_00005"})
-                entry = {"source": name, "border": b_border(xb), "mode": "full", "crop": True, "camada": "dinamico",
+                bb, esc = render(name, b_border(xb), "dinamico", f, rgba, shadow, {"base": "m_00005"})
+                entry = {"source": name, "border": bb, "mode": "full", "crop": True, "camada": "dinamico",
                          "base": m1}
+                if esc:
+                    entry["escala"] = esc
                 if contact is not None:
                     entry["contato"] = pose(xb)
             else:
@@ -200,10 +251,12 @@ def blender(spec_path: str) -> int:
                     xb = bx(f)
                     if f == stop_at:
                         rgba, shadow = layers(xb, True, True, catcher_a=True)
-                        render("t_00012.exr", b_border(xb), "dinamico", f, rgba, shadow,
-                               {"base": "m_00005", "transicao": True})
-                    entry["transicao"] = {"source": "t_00012.exr", "border": b_border(xb), "base": m1,
+                        t_border, t_esc = render("t_00012.exr", b_border(xb), "dinamico", f, rgba, shadow,
+                                                 {"base": "m_00005", "transicao": True})
+                    entry["transicao"] = {"source": "t_00012.exr", "border": t_border, "base": m1,
                                           "peso": round(1.0 - (f - stop_at + 1) / 4, 6)}
+                    if t_esc:
+                        entry["transicao"]["escala"] = t_esc
                     if contact is not None:
                         entry["transicao"]["contato"] = pose(xb)
             if entry == prev:
@@ -237,7 +290,7 @@ def blender(spec_path: str) -> int:
     meta = {"frames": frames, "calibration": calib,
             "device": "CPU", "width": W, "height": H, "removed_items": [],
             "exr": {"recorte": True, "codec": "RLE"}, "passes": ["Combined", "Shadow Catcher"],
-            "contact": contact, "camadas": camadas_meta,
+            "contact": contact, "camadas": camadas_meta, "orcamento": orc_meta,
             "timings": {"total_s": round(time.perf_counter() - t0, 1), "rendered_frames": len(por_quadro)},
             "telemetria": {"dispositivo": "CPU", "optix": False, "gpus": [], "threads": 4, "blender": "dublê",
                            "denoiser": "OPENIMAGEDENOISE", "denoiser_dispositivo": "CPU",
@@ -299,6 +352,9 @@ def main(argv):
         return 1
     for stage, f in (("preparo", 0.02), ("analise", 0.2), ("layout", 0.25), ("render", 0.6), ("video", 1.0)):
         print(json.dumps({"event": "progress", "stage": stage, "fraction": f, "message": f"etapa {stage}"}), flush=True)
+        if stage == "render":         # previsão do controle de orçamento (PT7), depois do quadro final
+            print(json.dumps({"event": "forecast", "total_s": 100.0, "cabe": True,
+                              "message": "Previsão: ≈ 1 min 40 s no total"}), flush=True)
         time.sleep(0.05)
     out = a["--out"]
     import imageio_ffmpeg

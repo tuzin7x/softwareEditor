@@ -32,6 +32,7 @@ class QueuedJob:
     report: str | None = None        # report.json (telemetria), quando o motor conclui
     work_dir: str | None = None
     submitted_at: float = field(default_factory=time.time)   # clique em "Gerar" (tempo percebido)
+    forecast_s: float | None = None  # previsão do tempo total (PT7), quando o render a calcula
 
 
 class JobRunner(QObject):
@@ -40,6 +41,7 @@ class JobRunner(QObject):
     progress = Signal(str, float, str)       # etapa, fração 0..1, mensagem
     preview = Signal(str)                    # caminho de imagem
     log = Signal(str)
+    forecast = Signal(float, str)            # previsão do tempo total (s, desde o clique), texto
     finished = Signal(object)                # QueuedJob
     queue_changed = Signal()
 
@@ -127,6 +129,10 @@ class JobRunner(QObject):
             self.progress.emit(ev.get("stage", ""), float(ev.get("fraction", 0.0)), ev.get("message", ""))
         elif kind == "preview":
             self.preview.emit(ev.get("path", ""))
+        elif kind == "forecast":
+            # PT7: previsão do controle de orçamento, feita depois do quadro final
+            job.forecast_s = float(ev.get("total_s") or 0.0)
+            self.forecast.emit(job.forecast_s, ev.get("message", ""))
         elif kind == "log":
             job.log.append(ev.get("message", ""))
             self.log.emit(ev.get("message", ""))
