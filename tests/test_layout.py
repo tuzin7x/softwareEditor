@@ -308,10 +308,11 @@ def test_style_analysis_stafford():
     for ph, sg in ((half, None), (half, seg), (photo, seg)):
         p2 = analyze_style(ph, sg, ctx)
         assert (p2.style, p2.floor_material, p2.floor_tone) == ("moderno", "carpete", "claro")
-    # sofá escuro em piso claro
-    from mobilia.layout.style import rank_assets
+    # sala clara (parede creme): estofado claro, nunca o sofá quase preto (PT9b)
+    from mobilia.layout.style import is_bright_room, rank_assets
 
-    assert rank_assets("sofa", prof)[0].tone == "escuro"
+    assert is_bright_room(prof)
+    assert rank_assets("sofa", prof)[0].tone == "claro"
     for key in ("accent", "rug", "textiles", "wood", "metal"):
         assert key in prof.palette
 
@@ -342,3 +343,76 @@ def test_unknown_room_type_is_rejected():
     room, grid, photo = get_room("pequena_direita")
     with pytest.raises(ValueError):
         plan_layout(room, grid, "garagem", photo)
+
+
+# ----------------------------------------------------------------------------- PT9: ativos sem cara de CG
+
+def test_bright_room_prefers_light_upholstery():
+    """Sala clara: sofá/poltrona claros; os estofados de albedo quase preto ficam fora; no máximo
+    uma massa escura em qualquer layout. Sala de paredes escuras mantém o contraste antigo."""
+    from mobilia.layout.rules import dark_masses
+    from mobilia.layout.style import DARK_UPH_TAG, is_bright_room, rank_assets
+    from mobilia.layout.state import Placement
+
+    room, grid, photo = get_room("stafford")
+    prof = analyze_style(photo, None, LayoutContext(room, grid))
+    assert is_bright_room(prof)
+    for role in ("sofa", "armchair", "ottoman"):
+        assert all(DARK_UPH_TAG not in a.tags for a in rank_assets(role, prof))
+    lay = get_layout("stafford", "sala")
+    for it in lay.items:
+        if it.role in ("sofa", "armchair", "ottoman"):
+            assert DARK_UPH_TAG not in catalog.get(it.asset_id).tags, it.asset_id
+    sofa = next(it for it in lay.items if it.role == "sofa")
+    assert catalog.get(sofa.asset_id).tone in ("claro", "neutro")
+    for name, rt in [("stafford", "sala"), ("ampla_frontal", "sala"), ("pequena_direita", "quarto")]:
+        items = [Placement.from_item(it) for it in get_layout(name, rt).items]
+        assert dark_masses(items) <= 1
+    # paredes escuras: não é sala clara, o sofá escuro volta a ser opção
+    room2, grid2, photo2 = make_room(**dict(SYNTH["ampla_frontal"], wall_rgb=(70, 66, 62)))
+    prof2 = analyze_style(photo2, None, LayoutContext(room2, grid2))
+    assert not is_bright_room(prof2)
+    assert any(DARK_UPH_TAG in a.tags for a in rank_assets("sofa", prof2))
+
+
+def test_no_placeholder_art_in_catalog():
+    """Nenhum quadro com cartão de modelo/arte esticada; a sala recebe a pintura gerada no tamanho
+    das regras de projeto (~2/3 do móvel abaixo, ou tamanhos padrão em parede livre)."""
+    ids = {a.asset_id for a in catalog.CATALOG}
+    assert not set(catalog.PLACEHOLDER_ART) & ids
+    for a in catalog.by_role("wall_art"):
+        assert a.asset_id == "proc:canvas_art" or a.asset_id.startswith("ph:fancy_picture_frame_"), a.asset_id
+    assert catalog.get("proc:canvas_art").scalable
+    for name in ("stafford", "ampla_frontal"):
+        lay = get_layout(name, "sala")
+        arts = [it for it in lay.items if it.role == "wall_art"]
+        assert arts, f"{name}: sem quadro"
+        for it in arts:
+            assert it.asset_id == "proc:canvas_art"
+            assert it.params.get("frame") in ("tela", "moldura")
+            assert it.params.get("colors") and it.params.get("ground") and "seed" in it.params
+            w, d, h = it.size
+            assert 0.3 <= w <= 1.8 and 0.3 <= h <= 1.0 and abs(d - 0.035) < 1e-6
+            assert (it.params["frame"] == "tela") == (max(w, h) >= 0.9)
+        if len(arts) == 2:      # díptico: mesmo tamanho, mesmo estilo, pinturas diferentes
+            a, b = arts
+            assert a.size == b.size and a.params["art_style"] == b.params["art_style"]
+            assert a.params["seed"] != b.params["seed"]
+
+
+def test_art_sizes_follow_design_rules():
+    from mobilia.layout.solver import ART_PAIR_GAP, Solver
+    from mobilia.layout.state import Placement
+
+    room, grid, photo = get_room("stafford")
+    ctx = LayoutContext(room, grid)
+    S = Solver(ctx, analyze_style(photo, None, ctx), "sala")
+    sofa = Placement("sofa_0", "sofa", "ph:Sofa_01", 1.8, 0.8, 0.8, 0.0, 3.0, 0.0, 0.0, "floor", None, None, {}, "")
+    single, pair = S._art_sizes(sofa)
+    assert abs(single[0][0] - 1.2) < 0.011                       # 2/3 de 1,8 m
+    assert abs(single[0][0] / single[0][2] - 1.5) < 0.03         # paisagem 3:2 a partir de 1,2 m
+    assert abs(2 * pair[0][0] + ART_PAIR_GAP - 1.2) < 0.011
+    assert abs(pair[0][2] / pair[0][0] - 4 / 3) < 0.03           # retratos 3:4
+    small = Placement("t", "tv_console", "x", 0.6, 0.4, 0.6, 0.0, 3.0, 0.0, 0.0, "floor", None, None, {}, "")
+    assert abs(S._art_sizes(small)[0][0][0] - 0.5) < 1e-6        # nunca menor que 50 cm
+    assert S._art_sizes(None)                                    # parede livre: tamanhos padrão

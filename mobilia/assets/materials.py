@@ -1,9 +1,11 @@
 """Materiais PBR procedurais (Cycles) para os assets gerados no Blender.
 
-Este módulo roda DENTRO de um processo com ``bpy``. Nenhum material usa textura
-externa: todos são grafos de nós procedurais (ruídos, ondas, Voronoi), pensados
-para parecer produto real numa foto — lã com nós e brilho de fibra, linho com
-irregularidades de fio, madeira com anéis, poros e veios, metal escovado, etc.
+Este módulo roda DENTRO de um processo com ``bpy``. Quase todos os materiais são grafos
+de nós procedurais (ruídos, ondas, Voronoi), pensados para parecer produto real numa
+foto — lã com nós e brilho de fibra, linho com irregularidades de fio, madeira com
+anéis, poros e veios, metal escovado, etc. As exceções usam imagem: o tapete
+texturizado (``rug_textured``: textura CC0 de tecido da Poly Haven, tingida pela
+paleta) e a pintura dos quadros (``canvas_paint``: imagem gerada por ``art.py``).
 
 Convenções:
 - cores de entrada em sRGB (``"#RRGGBB"``, tupla 0..1 ou 0..255); convertidas para
@@ -483,6 +485,145 @@ def _persian(g: _G, u, v, L: float, D: float, fc: RGB, ac: RGB, jit):
     col = g.mix(lt(e, g2), field, border)
     outline = m("MAXIMUM", m("MAXIMUM", band(dn, 0.93, 1.0), band(dc, 0.9, 1.0)), m("MAXIMUM", guard_line, ros))
     return col, outline
+
+
+RUG_DESIGNS = ("liso", "borda", "filete", "listras", "borda_dupla")
+
+
+def _image(path: str, non_color: bool = False) -> bpy.types.Image:
+    img = bpy.data.images.load(str(path), check_existing=True)
+    if non_color:
+        img.colorspace_settings.name = "Non-Color"
+    return img
+
+
+def rug_textured(textures: dict, field: ColorLike | None, accent: ColorLike | None, length: float,
+                 depth: float, tile_m: float, lum_mean: float, design: str = "borda", seed: int = 0,
+                 sheen: float = 0.7, back: bool = False) -> bpy.types.Material:
+    """Tapete com textura FOTOGRÁFICA de tecido CC0 (Poly Haven), tingida pela paleta.
+
+    ``textures`` = {"diff": caminho, "nor": caminho (normal OpenGL), "rough": caminho opcional}; a
+    textura cobre ``tile_m`` metros (tamanho físico da amostra fotografada). A cor final é a cor da
+    paleta vezes o DETALHE da foto (luminância / ``lum_mean``, a média linear da textura): a trama e as
+    falhas reais do tecido ficam, a cor combina com a sala. ``design`` acrescenta faixas tecidas na
+    cor de destaque, com contorno irregular de fio (nunca traço de vetor): ``liso``, ``borda``,
+    ``filete`` (fio fino), ``listras`` (nas cabeceiras) e ``borda_dupla``. UVs em metros a partir de 0
+    (``length`` x ``depth``). ``back=True`` = avesso (mais escuro, sem desenho).
+    """
+    if design not in RUG_DESIGNS:
+        raise ValueError(f"Desenho de tapete desconhecido: {design!r}")
+    fc = parse_color(field, "#cfc6b6")
+    ac = parse_color(accent, "#6b5d50")
+    key = dict(t={k: str(v) for k, v in sorted(textures.items())}, f=fc, a=ac, L=round(length, 4),
+               D=round(depth, 4), tm=round(tile_m, 4), lm=round(lum_mean, 4), d=design, s=seed,
+               sh=round(sheen, 3), b=back)
+
+    def build(mat):
+        g = _G(mat)
+        uv = g.coords("UV")
+        # leve rotação/deslocamento por semente: dois tapetes iguais não repetem a mesma trama
+        tuv = g.mapping(g.vmath("ADD", uv, _seed_offset(seed)), scale=(1.0 / tile_m, 1.0 / tile_m, 1.0))
+        tex = g.new("ShaderNodeTexImage", image=_image(textures["diff"]), interpolation="Linear")
+        g.set(tex.inputs["Vector"], tuv)
+        lum = g.new("ShaderNodeRGBToBW")
+        g.set(lum.inputs["Color"], tex.outputs["Color"])
+        # detalhe = lum / média, limitado: preserva a trama sem herdar a cor da foto
+        det = g.math("DIVIDE", lum.outputs["Val"], max(1e-4, lum_mean))
+        det = g.math("MINIMUM", g.math("MAXIMUM", det, 0.45), 1.7)
+        s = g.sep(uv)
+        u, v = s.outputs["X"], s.outputs["Y"]
+        # contorno de fio: tremor de poucos mm ao longo das faixas
+        wob = g.noise(g.vmath("ADD", uv, _seed_offset(seed + 5)), 9.0, detail=3.0)
+        jit = g.math("MULTIPLY", g.math("SUBTRACT", wob.outputs["Factor"], 0.5), 0.008)
+        du = g.math("MINIMUM", u, g.math("SUBTRACT", length, u))
+        dv = g.math("MINIMUM", v, g.math("SUBTRACT", depth, v))
+        e = g.math("ADD", g.math("MINIMUM", du, dv), jit)
+        band_w = max(0.05, min(0.09, 0.045 * min(length, depth)))
+
+        def stripe(x, c, w):     # faixa macia (≈2 fios de transição) centrada em c, largura w
+            return g.math("SUBTRACT", 1.0, g.map_range(g.math("ABSOLUTE", g.math("SUBTRACT", x, c)),
+                                                       w / 2 - 0.002, w / 2 + 0.002, 0.0, 1.0))
+
+        m = None
+        if not back and design == "borda":
+            m = g.map_range(e, band_w - 0.002, band_w + 0.002, 1.0, 0.0)
+        elif not back and design == "filete":
+            m = stripe(e, band_w + 0.02, 0.014)
+        elif not back and design == "borda_dupla":
+            m = g.math("MAXIMUM", g.map_range(e, 0.6 * band_w - 0.002, 0.6 * band_w + 0.002, 1.0, 0.0),
+                       stripe(e, band_w + 0.03, 0.016))
+        elif not back and design == "listras":
+            eu = g.math("ADD", du, jit)
+            m = None
+            for c, w in ((0.09, 0.03), (0.15, 0.012), (0.19, 0.012)):
+                st = stripe(eu, c, w)
+                m = st if m is None else g.math("MAXIMUM", m, st)
+        # fio tingido: a faixa leva 75% do destaque (lã nunca tem o contraste de um traço de vetor)
+        stripe_c = tuple(f * 0.25 + a_ * 0.75 for f, a_ in zip(fc, ac))
+        col = _rgba(fc) if m is None else g.mix(m, _rgba(fc), _rgba(stripe_c))
+        # abrash (faixas largas de tingimento), mesclado de ~5 cm e fios de ~1,5 cm: a variação de
+        # tom que um tapete de lã mostra a 2–4 m da câmera (a trama da foto é fina demais para isso)
+        abr = _variation(g, g.mapping(g.vmath("ADD", uv, _seed_offset(seed + 3)), scale=(0.7, 6.0, 1.0)), 1.0, 0.06)
+        mott = _variation(g, g.vmath("ADD", uv, _seed_offset(seed + 2)), 18.0, 0.07, detail=3.0)
+        yarn = _variation(g, g.mapping(g.vmath("ADD", uv, _seed_offset(seed + 7)), scale=(60.0, 25.0, 1.0)),
+                          1.0, 0.06, detail=2.0)
+        k = g.math("MULTIPLY", g.math("MULTIPLY", det, abr), g.math("MULTIPLY", mott, yarn))
+        col = g.scale_color(col, k)
+        if back:
+            col = g.scale_color(col, 0.72)
+        nmap = g.new("ShaderNodeNormalMap", space="TANGENT", uv_map="UVMap")
+        ntex = g.new("ShaderNodeTexImage", image=_image(textures["nor"], non_color=True), interpolation="Linear")
+        g.set(ntex.inputs["Vector"], tuv)
+        g.set(nmap.inputs["Color"], ntex.outputs["Color"])
+        g.set(nmap.inputs["Strength"], 0.6 if back else 1.5)
+        rough = 0.92
+        if textures.get("rough"):
+            rt = g.new("ShaderNodeTexImage", image=_image(textures["rough"], non_color=True), interpolation="Linear")
+            g.set(rt.inputs["Vector"], tuv)
+            rough = g.map_range(rt.outputs["Color"], 0.0, 1.0, 0.75, 1.0)
+        bsdf = g.principled(base=col, rough=rough, spec=0.25, sheen=0.2 if back else sheen, sheen_rough=0.35,
+                            sheen_tint=(1.0, 0.98, 0.95), diffuse_rough=0.8, normal=nmap.outputs["Normal"])
+        g.output(bsdf.outputs[0])
+
+    return _cached("rug_tex_back" if back else "rug_tex", key, build)
+
+
+# =========================================================================== quadros
+
+
+def canvas_paint(image: bpy.types.Image, relief: bpy.types.Image | None, width: float, height: float,
+                 seed: int = 0) -> bpy.types.Material:
+    """Pintura acrílica sobre tela: a imagem gerada (``mobilia/assets/art.py``) com o relevo da
+    tinta (empastamento, marcas de pincel) e a trama da tela de algodão em escala física
+    (~1 mm). UV 0..1 sobre a área pintada (``width`` x ``height`` m). Fosco-acetinado, sem vidro."""
+    key = dict(i=image.name, r=relief.name if relief is not None else None, w=round(width, 4),
+               h=round(height, 4), s=seed)
+
+    def build(mat):
+        g = _G(mat)
+        uv = g.coords("UV")
+        tex = g.new("ShaderNodeTexImage", image=image, interpolation="Cubic", extension="EXTEND")
+        g.set(tex.inputs["Vector"], uv)
+        # trama da tela: fios a cada ~0,9 mm nas duas direções, com irregularidade de fio
+        pm = g.mapping(uv, scale=(width / 0.0009, height / 0.0009, 1.0))
+        sp = g.sep(pm)
+        wu = g.math("SINE", g.math("MULTIPLY", sp.outputs["X"], 2 * math.pi))
+        wv = g.math("SINE", g.math("MULTIPLY", sp.outputs["Y"], 2 * math.pi))
+        weave = g.math("MULTIPLY", g.math("ADD", g.math("MULTIPLY", wu, wv), 1.0), 0.5)
+        slub = g.noise(g.mapping(uv, scale=(width * 60.0, height * 4.0, 1.0)), 1.0, detail=2.0)
+        h = g.math("ADD", g.math("MULTIPLY", weave, 0.5), g.math("MULTIPLY", slub.outputs["Factor"], 0.2))
+        nrm = g.bump(h, 0.18, 0.0003)
+        rough = 0.62
+        if relief is not None:
+            rt = g.new("ShaderNodeTexImage", image=relief, interpolation="Cubic", extension="EXTEND")
+            g.set(rt.inputs["Vector"], uv)
+            nrm = g.bump(rt.outputs["Color"], 0.35, 0.0008, normal=nrm)
+            # tinta grossa um pouco mais acetinada que a tela crua
+            rough = g.map_range(rt.outputs["Color"], 0.1, 0.8, 0.7, 0.5)
+        bsdf = g.principled(base=tex.outputs["Color"], rough=rough, spec=0.35, diffuse_rough=0.3, normal=nrm)
+        g.output(bsdf.outputs[0])
+
+    return _cached("canvas_paint", key, build)
 
 
 def rug_fringe(color: ColorLike | None = None) -> bpy.types.Material:

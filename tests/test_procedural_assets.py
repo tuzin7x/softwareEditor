@@ -22,7 +22,8 @@ REPO = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("bpy") is None,
                                 reason="bpy (Blender como módulo Python) não está instalado")
 
-KINDS = ("rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket", "book_stack")
+KINDS = ("rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket", "book_stack", "canvas_art")
+ART_COLORS = ["#b5603e", "#844b34", "#b6a99a", "#4a4440"]
 MOTIONS = {"drop", "rise", "slide", "unroll", "unfold", "grow", "settle"}
 
 # (rótulo, tipo, parâmetros) — padrões do catálogo + variações de tamanho/estilo
@@ -62,6 +63,18 @@ CASES: list[tuple[str, str, dict]] = [(k, k, {}) for k in KINDS] + [
                                          "metal_color": [0.929, 0.922, 0.902], "light_on": True}),
     ("layout_book_stack", "book_stack", {"size": [0.33, 0.26, 0.085], "count": 3,
                                          "colors": [[0.2, 0.18, 0.16], [0.86, 0.83, 0.78], [0.55, 0.3, 0.2]]}),
+    # quadros gerados (PT9a): tela de 3,5 cm e moldura fina com passe-partout, tamanhos livres
+    ("canvas_tela_paisagem", "canvas_art", {"size": [1.2, 0.035, 0.8], "frame": "tela", "colors": ART_COLORS,
+                                            "ground": "#ede9e1", "art_style": "campos", "seed": 3}),
+    ("canvas_moldura_retrato", "canvas_art", {"size": [0.45, 0.035, 0.6], "frame": "moldura",
+                                              "colors": ART_COLORS, "art_style": "formas",
+                                              "frame_color": "#1f1f21", "mat_color": "#efeae3", "seed": 4}),
+    ("canvas_moldura_madeira", "canvas_art", {"size": [0.6, 0.035, 0.6], "frame": "moldura", "art_style": "arcos",
+                                              "frame_color": [0.64, 0.48, 0.31], "passe_partout": False}),
+    # tapete texturizado (PT9c): mapas sintéticos gravados pelo subprocesso no lugar da textura CC0
+    ("rug_textured", "rug", {"size": [2.4, 1.7, 0.012], "texture": "__synthetic__", "tile_m": 0.27,
+                             "lum_mean": 0.2, "design": "filete", "color": [0.41, 0.3, 0.26],
+                             "accent": [0.76, 0.72, 0.69]}),
 ]
 
 _SCRIPT = r'''
@@ -76,6 +89,21 @@ from mobilia.assets.procedural import build_asset, animate_rug_unroll
 
 CASES = json.loads(sys.argv[1])
 out = {"cases": {}, "unroll": {}, "errors": {}}
+
+import tempfile
+from PIL import Image
+_tmp = tempfile.mkdtemp(prefix="mob_tex_")
+_rng = np.random.default_rng(0)
+_synth = {}
+for _k, _v in (("diff", 120), ("nor", 128), ("rough", 200)):
+    _a = np.clip(_v + _rng.normal(0, 12, (64, 64, 3)), 0, 255).astype(np.uint8)
+    if _k == "nor":
+        _a[..., 2] = 255
+    _synth[_k] = f"{_tmp}/{_k}.png"
+    Image.fromarray(_a).save(_synth[_k])
+for _c in CASES:
+    if _c[2].get("texture") == "__synthetic__":
+        _c[2]["texture"] = _synth
 
 
 def evaluated_points(root):
@@ -117,6 +145,24 @@ for label, kind, params in CASES:
             rot=list(c.rotation_euler), scale=list(c.scale),
         ))
     mats = {s.material for c in root.children for s in c.material_slots if s.material is not None}
+    images = sorted({n.image.name for m in mats for n in m.node_tree.nodes
+                     if n.type == "TEX_IMAGE" and n.image is not None})
+    canvas = json.loads(root["mobilia_canvas"]) if "mobilia_canvas" in root else None
+    art_uv = None
+    if canvas is not None:      # extensão (m) e faixa de UV das faces com a pintura (material 0)
+        c0 = root.children[0]
+        me = c0.data
+        uvl = me.uv_layers[0].data
+        P, U = [], []
+        for poly in me.polygons:
+            if poly.material_index != 0:
+                continue
+            for li in poly.loop_indices:
+                P.append(tuple(me.vertices[me.loops[li].vertex_index].co))
+                U.append(tuple(uvl[li].uv))
+        P, U = np.array(P), np.array(U)
+        art_uv = dict(ext=(P.max(0) - P.min(0)).tolist(), uv_lo=U.min(0).tolist(), uv_hi=U.max(0).tolist(),
+                      y=float(P[:, 1].mean() + c0.location.y))
     emissive = []
     for m in mats:
         for n in m.node_tree.nodes:
@@ -143,7 +189,7 @@ for label, kind, params in CASES:
                 ok, loc, *_ = bpy.context.scene.ray_cast(dg, o, Vector((0, 0, -1)))
                 hits.append(float(loc.z) if ok else None)
     out["cases"][label] = dict(
-        emissive=sorted(set(emissive)), mattress_top=mattress_top,
+        emissive=sorted(set(emissive)), mattress_top=mattress_top, images=images, canvas=canvas, art_uv=art_uv,
         support=sup, support_hits=hits,
         kind=kind, root_type=root.type, root_name=root.name, root_parent=root.parent is not None,
         root_loc=list(root.location), size=list(root["mobilia_size"]),
@@ -352,3 +398,61 @@ def test_book_stack_footprint(report, label):
             below = books[k - 1]
             assert abs(lo[2] - below["hi"][2]) <= 0.0015, (lo[2], below["hi"][2])   # sem vão nem interpenetração
     assert abs(books[0]["lo"][2]) <= 0.002 and abs(books[-1]["hi"][2] - H) <= 0.002
+
+
+# ----------------------------------------------------------------------------- PT9: quadros e tapete
+
+
+@pytest.mark.parametrize("label", ["canvas_tela_paisagem", "canvas_moldura_retrato", "canvas_moldura_madeira"])
+def test_canvas_art_sizes(report, label):
+    """Quadro gerado: tamanho livre exato, pintura na proporção da área pintada (sem esticar),
+    UV 0..1 cobrindo só essa área, frente em -Y e imagem própria (gerada) no material."""
+    c = report["cases"][label]
+    W, D, H = c["size"]
+    cv, uv = c["canvas"], c["art_uv"]
+    assert cv is not None and uv is not None
+    aw, ah = cv["art_w"], cv["art_h"]
+    px_w, px_h = cv["art_px"]
+    assert abs(px_w / px_h - aw / ah) <= 1.0 / min(px_w, px_h) + 1e-6, (px_w, px_h, aw, ah)
+    assert abs(uv["ext"][0] - aw) <= 1e-3 and abs(uv["ext"][2] - ah) <= 1e-3
+    assert np.allclose(uv["uv_lo"], [0, 0], atol=1e-6) and np.allclose(uv["uv_hi"], [1, 1], atol=1e-6)
+    assert uv["y"] < 0, "a pintura fica na frente (-Y), longe da parede"
+    if cv["frame"] == "tela":
+        assert aw >= W - 0.01 and ah >= H - 0.01, "tela: a pintura ocupa a frente toda"
+    else:
+        assert aw < W - 2 * cv["bar"] + 1e-6 and ah < H - 2 * cv["bar"] + 1e-6
+        if label == "canvas_moldura_retrato":
+            assert cv["mat"] > 0.03, "passe-partout presente"
+    assert any(".arte" in n for n in c["images"]) and any(".relevo" in n for n in c["images"])
+    assert len(c["parts"]) == 1 and c["parts"][0]["motion"] == "slide"
+
+
+def test_art_generator_deterministic():
+    from mobilia.assets.art import ART_STYLES, art_resolution, crop_to_aspect, generate_art
+
+    w, h = art_resolution(0.45, 0.6)
+    assert abs(w / h - 0.75) < 0.01 and max(w, h) <= 1536
+    for style in ART_STYLES:
+        a, ra = generate_art(w, h, ART_COLORS, "#ede9e1", style, seed=7)
+        b, rb = generate_art(w, h, ART_COLORS, "#ede9e1", style, seed=7)
+        c, _ = generate_art(w, h, ART_COLORS, "#ede9e1", style, seed=8)
+        assert a.shape == (h, w, 3) and a.dtype == np.uint8 and ra.shape == (h, w)
+        assert np.array_equal(a, b) and np.array_equal(ra, rb), "mesma semente -> mesmos bytes"
+        assert not np.array_equal(a, c), "outra semente -> outra pintura"
+        # pintura de verdade: fundo + tintas da paleta, nada de cartão liso
+        assert a.reshape(-1, 3).std(0).mean() > 12
+        acc = np.array([0xb5, 0x60, 0x3e], float)
+        assert np.min(np.abs(a.reshape(-1, 3).astype(float) - acc).sum(1)) < 60
+    with pytest.raises(ValueError):
+        generate_art(w, h, ART_COLORS, "#ffffff", "xadrez", 0)
+    img = np.zeros((300, 400, 3), np.uint8)
+    assert crop_to_aspect(img, 1.0).shape[:2] == (300, 300)
+    assert crop_to_aspect(img, 2.0).shape[:2] == (200, 400)
+
+
+def test_rug_uses_cc0_texture(report):
+    c = report["cases"]["rug_textured"]
+    assert any(n.startswith("diff") for n in c["images"]) and any(n.startswith("nor") for n in c["images"])
+    assert not any(p["part"] == "rug_fringe" for p in c["parts"]), "tapete texturizado sem franja procedural"
+    # sem textura volta ao desenho procedural (sem imagens)
+    assert report["cases"]["rug"]["images"] == []

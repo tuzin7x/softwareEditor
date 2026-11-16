@@ -41,7 +41,8 @@ foto.jpg ─┬─► [Preparo]   EXIF, placa imutável na resolução do vídeo
           │               teto, janelas/portas como retângulos nas paredes, grade de ocupação
           ├─► [Layout]    programa de móveis por ambiente + estilo/paleta da foto +
           │               otimização com regras de design de interiores e visibilidade na câmera
-          ├─► [Assets]    Poly Haven (CC0, glTF, cache local) + procedurais (tapete, luminária, cama, livros...)
+          ├─► [Assets]    Poly Haven (CC0, glTF + texturas de tecido, cache local) + procedurais (tapete,
+          │               luminária, cama, livros, quadro com pintura gerada na paleta...)
           ├─► [Render]    subprocesso Blender (bpy 5.x, Cycles OptiX/CUDA):
           │               câmera casada, sala-proxy = shadow catcher que emite a foto para os
           │               raios rebatidos, luz calibrada pela foto (janelas, ambiente, sol nas
@@ -217,6 +218,32 @@ dentro do fecho convexo dos acertos do tampo ao redor; o que passa da borda exte
 encontrar, o item sai da cena, com aviso no log e em `report.json` (`render.itens_removidos`). Sobre
 mesas de centro, escrivaninhas e racks os livros são uma pilha procedural de 2–3 livros deitados; a
 fileira de enciclopédias em pé fica só para estantes.
+
+**Ativos sem cara de CG (PT9).**
+- *Quadros*: os quadros modernos 01/02 da Poly Haven saíram do catálogo (`catalog.PLACEHOLDER_ART`:
+  um tem o cartão cinza de modelo "Ray Homes" no lugar da arte, o outro a imagem esticada nas bordas).
+  No lugar entra `proc:canvas_art`: a pintura abstrata é gerada localmente por `assets/art.py` (só numpy,
+  determinística pela semente; estilos `formas`, `campos` e `arcos`) nas cores da paleta da sala, sobre
+  tela de algodão com trama em escala física (~0,9 mm) e relevo de tinta no *bump*. Lado ≥ 0,9 m: tela
+  esticada de 3,5 cm sem moldura; menor: moldura fina (metal da paleta ou madeira) com passe-partout.
+  A imagem tem exatamente a proporção da área pintada (nunca é esticada). O tamanho segue regras de
+  projeto (`solver._art_sizes`): sobre um móvel o conjunto ocupa ~2/3 da largura dele (0,5–1,8 m),
+  paisagem 4:3 (3:2 a partir de 1,2 m) ou díptico de retratos 3:4 com 8 cm de vão, base 20–25 cm acima
+  do móvel; em parede livre, 60 × 80, 90 × 65 ou 2 × 45 × 60 cm. No estilo clássico entram as molduras
+  douradas "fancy" 01/02 da Poly Haven (pinturas holandesas reais escaneadas, CC0). Duas cópias da
+  mesma pintura nunca formam um par.
+- *Estofado em sala clara*: com a parede a L* ≥ 55 (exposição normalizada; a parede creme da sala de
+  teste mede ~58) o estofado claro tem preferência e os assets de albedo quase preto (tag
+  `albedo_escuro`: sofá 02, poltrona moderna 01, pufe 01, mediana sRGB da textura < 0,2) ficam fora.
+  Em qualquer sala, cada massa escura além da primeira custa pontos (`rules.dark_masses`).
+- *Tapete*: placa de quinas vivas (raio ¼ da espessura, a borda projeta a linha fina de sombra) com
+  textura fotográfica CC0 de tecido da Poly Haven por estilo (`catalog.RUG_TEXTURES`: lã espinha-de-peixe,
+  pelúcia, juta, tricô), baixada na instalação junto com os modelos e cacheada em
+  `assets/polyhaven/textures/<id>/<res>/` (o `manifest.json` registra URL de origem e licença). A cor é
+  a da paleta vezes o detalhe da foto (luminância/média) com mesclado e *abrash* de tingimento; o desenho
+  vira faixas tecidas discretas (`filete`, `borda`, `borda_dupla`). Sem a textura (offline sem cache) o
+  tapete volta ao desenho procedural antigo.
+- Antes/depois na sala de teste (640 px, 24 amostras): `docs/poc/v2/pt9_antes_depois_640.jpg`.
 
 ## 6. Animação (um único estilo, refinado)
 

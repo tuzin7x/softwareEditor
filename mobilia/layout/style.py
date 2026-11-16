@@ -461,6 +461,13 @@ def _palette(style: str, material: str, floor_tone: str, f_lab: np.ndarray, w_la
 # ----------------------------------------------------------------------------- escolha de assets
 
 UPHOLSTERY = {"sofa", "armchair", "ottoman", "pillows", "throw"}
+# Sala clara: parede com L* (exposição normalizada, percentil 70) a partir deste valor. A parede
+# creme da sala de teste (sombreada pela luz de janela) mede ~58; paredes cinza/médias ficam < 50.
+BRIGHT_WALL_L = 55.0
+# Estofado grande numa sala clara: claro > neutro > colorido > madeira >> escuro (um sofá quase
+# preto numa sala branca vira um "buraco" na foto; ver tag "albedo_escuro" no catálogo).
+_TONE_UPH_BRIGHT = {"claro": 1.0, "neutro": 0.85, "colorido": 0.75, "madeira": 0.65, "escuro": 0.1}
+DARK_UPH_TAG = "albedo_escuro"
 _TONE_UPH = {
     "claro": {"escuro": 1.0, "madeira": 0.8, "colorido": 0.7, "neutro": 0.6, "claro": 0.2},
     "medio": {"escuro": 0.75, "claro": 0.75, "neutro": 0.7, "colorido": 0.7, "madeira": 0.5},
@@ -468,11 +475,26 @@ _TONE_UPH = {
 }
 
 
+def wall_lightness(profile: StyleProfile) -> float:
+    """L* da parede (CIELAB, exposição normalizada) medido na foto."""
+    lab = (profile.features or {}).get("wall_lab")
+    if lab is not None:
+        return float(lab[0])
+    return float(rgb_to_lab(np.asarray(profile.wall_rgb, np.float64))[0])
+
+
+def is_bright_room(profile: StyleProfile) -> bool:
+    """Sala clara (paredes claras): estofado claro, nada de massas quase pretas."""
+    return wall_lightness(profile) >= BRIGHT_WALL_L
+
+
 def asset_preference(spec: AssetSpec, profile: StyleProfile) -> float:
     """Nota de adequação de um asset ao estilo/tons da foto (maior = melhor)."""
     compat = STYLE_COMPAT[profile.style]
     style_score = max(compat.get(s, 0.1) for s in spec.styles) if spec.styles else 0.3
-    if spec.role in UPHOLSTERY:
+    if spec.role in UPHOLSTERY and is_bright_room(profile):
+        tone_score = _TONE_UPH_BRIGHT.get(spec.tone, 0.5)
+    elif spec.role in UPHOLSTERY:
         tone_score = _TONE_UPH[profile.floor_tone].get(spec.tone, 0.5)
     elif profile.floor_material == "madeira":
         tone_score = {"madeira": 0.35, "claro": 0.8, "escuro": 0.8, "neutro": 0.7}.get(spec.tone, 0.6)
@@ -482,12 +504,24 @@ def asset_preference(spec: AssetSpec, profile: StyleProfile) -> float:
 
 
 def rank_assets(role: str, profile: StyleProfile) -> list[AssetSpec]:
-    """Assets do papel ordenados por adequação (desempate estável pelo id)."""
+    """Assets do papel ordenados por adequação (desempate estável pelo id).
+
+    Em sala clara o estofado de albedo quase preto (tag ``albedo_escuro``) sai da lista; se o papel
+    só tiver esse asset (ex.: pufe), o papel fica sem asset e o layout simplesmente não o usa."""
     cands = catalog.by_role(role)
+    if role in UPHOLSTERY and is_bright_room(profile):
+        cands = [a for a in cands if DARK_UPH_TAG not in a.tags]
     return sorted(cands, key=lambda a: (-asset_preference(a, profile), a.asset_id))
 
 
-def proc_params(role: str, profile: StyleProfile, size) -> dict:
+# Arte gerada por estilo da sala (a semente do quadro escolhe entre as opções)
+ART_STYLE_BY_STYLE = {"moderno": ("formas", "arcos"), "escandinavo": ("campos", "formas"),
+                      "industrial": ("campos",), "classico": ("campos",)}
+ART_CANVAS_MIN = 0.9    # quadro com lado >= isto: tela de 3,5 cm sem moldura; menor: moldura fina
+
+
+def proc_params(role: str, profile: StyleProfile, size, seed: int | None = None,
+                style_seed: int | None = None) -> dict:
     """Parâmetros dos assets procedurais (cores sRGB 0..1 e medidas), coerentes com a paleta.
 
     Contrato com o gerador procedural (``PlacedItem.params``; ``size`` = tamanho final, igual a
@@ -501,17 +535,26 @@ def proc_params(role: str, profile: StyleProfile, size) -> dict:
     - proc:throw_blanket color
     - proc:curtain      color
     - proc:book_stack   colors (capas de baixo para cima), count
+    - proc:canvas_art   colors (tintas), ground (fundo), art_style, frame (tela|moldura),
+                        frame_color, mat_color, seed (a pintura é gerada com ela)
+    O tapete leva também texture_id/tile_m/lum_mean/sheen/design (textura CC0 de tecido; a cena
+    troca o id pelos caminhos dos mapas no cache) e mantém ``pattern`` para o caso sem textura.
     """
-    out = _proc_colors(role, profile, size)
+    out = _proc_colors(role, profile, size, seed, style_seed)
     out["size"] = [round(float(v), 4) for v in size]      # o gerador dimensiona pelo params["size"]
     return out
 
 
-def _proc_colors(role: str, profile: StyleProfile, size) -> dict:
+def _proc_colors(role: str, profile: StyleProfile, size, seed: int | None = None,
+                 style_seed: int | None = None) -> dict:
     P = profile.palette
     if role == "rug":
+        tex = catalog.RUG_TEXTURES.get(profile.style, catalog.RUG_TEXTURES["moderno"])
         return dict(color=P["rug"]["base"], pattern_color=P["rug"]["pattern"], pattern=P["rug"]["pattern_kind"],
-                    thickness=0.012)
+                    thickness=0.012, texture_id=tex.tex_id, tile_m=tex.tile_m, lum_mean=tex.lum_mean,
+                    sheen=tex.sheen, design=catalog.RUG_DESIGNS.get(profile.style, "borda"))
+    if role == "wall_art":
+        return art_params(profile, size, seed or 0, style_seed)
     if role == "floor_lamp":       # luminárias sempre apagadas: a luz da foto original não muda
         return dict(shade_color=P["lamp_shade"], metal_color=P["metal"])
     if role == "table_lamp":
@@ -531,3 +574,26 @@ def _proc_colors(role: str, profile: StyleProfile, size) -> dict:
         hue = _lch(rgb_to_lab(np.asarray(P["accent2"], np.float64)))[2]
         return dict(colors=[_r(_from_lch(27.0, 5.0, hue)), P["accent2"], P["accent"]], count=3)
     return {}
+
+
+def art_params(profile: StyleProfile, size, seed: int, style_seed: int | None = None) -> dict:
+    """Parâmetros do quadro gerado (``proc:canvas_art``) coerentes com a paleta da sala.
+
+    Tintas: destaque, destaque profundo, neutro quente das paredes e um neutro escuro no matiz da
+    parede (uma massa escura pequena dá peso à composição). Fundo: branco-linho levemente quente
+    (ou frio). Lado >= ``ART_CANVAS_MIN``: tela de 3,5 cm sem moldura; menor: moldura fina (metal
+    da paleta no moderno/industrial, madeira nos outros) com passe-partout. ``style_seed`` escolhe o
+    estilo da pintura (um par de quadros usa o mesmo e só muda a ``seed``).
+    """
+    P = profile.palette
+    hue = _lch(rgb_to_lab(np.asarray(P["accent2"], np.float64)))[2]
+    deep = _from_lch(30.0, 6.0, hue)
+    ground = _from_lch(92.0, 4.0, 80.0 if profile.warmth >= 0 else 250.0)
+    styles = ART_STYLE_BY_STYLE.get(profile.style, ("formas",))
+    w, _, h = (float(v) for v in size)
+    frame = "tela" if max(w, h) >= ART_CANVAS_MIN else "moldura"
+    frame_color = P["metal"] if profile.style in ("moderno", "industrial") else P["wood"]
+    return dict(colors=[P["accent"], P["textiles"][2], P["accent2"], _r(deep)], ground=_r(ground),
+                art_style=styles[int(seed if style_seed is None else style_seed) % len(styles)], frame=frame,
+                frame_color=frame_color,
+                mat_color=P["linen"], seed=int(seed))

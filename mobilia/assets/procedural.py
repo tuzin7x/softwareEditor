@@ -27,8 +27,12 @@ Parâmetros por tipo (todos opcionais; cores em sRGB "#RRGGBB" ou tupla 0..1). O
 usados pelo motor de layout (``pattern_color``, ``metal_color``, ``frame_color``,
 ``linen_color``, ``top_color``, ``leg_color``...) são traduzidos por ``normalize_params``:
 - comuns: ``size`` [l, p, a] (ou ``width``/``depth``/``height``), ``seed``;
-- rug: ``pattern`` (solid_border | berber | stripes | persian), ``color``, ``accent``,
-  ``fringe`` (bool), ``fringe_length``, ``fringe_color``, ``unroll_axis`` (x | y);
+- rug: ``color``, ``accent``, ``fringe`` (bool), ``fringe_length``, ``fringe_color``,
+  ``unroll_axis`` (x | y); com ``texture`` ({"diff", "nor", "rough"}: caminhos de uma textura CC0 de
+  tecido), ``tile_m`` (lado da amostra em m), ``lum_mean`` (luminância linear média da textura),
+  ``design`` (liso | borda | filete | listras | borda_dupla) e ``sheen`` o tapete é TEXTURIZADO
+  (trama fotográfica tingida pela paleta); sem textura volta ao desenho procedural ``pattern``
+  (solid_border | berber | stripes | persian);
 - floor_lamp: ``metal`` (black | graphite | brass | chrome | matte_black | white),
   ``shade_color``, ``shade_shape`` (drum | tapered);
 - table_lamp: ``base_material`` (ceramic | wood | brass | black | chrome),
@@ -44,7 +48,11 @@ usados pelo motor de layout (``pattern_color``, ``metal_color``, ``frame_color``
   ``drawer`` (bool);
 - throw_blanket: ``color``, ``accent``, ``pattern`` (solid | stripes), ``tassels`` (bool);
 - book_stack: ``count`` (2 | 3 livros deitados), ``colors`` (capas, de baixo para cima),
-  ``page_color`` (corte das páginas). Cada livro é uma peça ``book_<i>`` (ordem i, "drop").
+  ``page_color`` (corte das páginas). Cada livro é uma peça ``book_<i>`` (ordem i, "drop");
+- canvas_art: ``frame`` (tela | moldura), ``colors`` (tintas), ``ground`` (fundo da tela),
+  ``art_style`` (formas | campos | arcos), ``frame_color``, ``mat_color``, ``passe_partout``
+  (bool), ``frame_width``. Pintura gerada por ``mobilia/assets/art.py`` com a semente do asset;
+  uma peça ``quadro`` ("slide"), frente em -Y, encostada na parede em +Y.
 """
 from __future__ import annotations
 
@@ -743,6 +751,9 @@ def build_asset(kind: str, params: dict | None, name: str, *,
 # =========================================================================== tapete
 
 
+RUG_EDGE_RADIUS = 0.25     # raio das quinas do tapete (fração da espessura)
+
+
 def _rug_body(mb: MeshBuilder, Lx: float, Ly: float, T: float, dense: str, long_axis: str,
               seed: int = 0) -> None:
     step = (0.01, 0.05, 1.0) if dense == "x" else (0.05, 0.01, 1.0)
@@ -755,7 +766,9 @@ def _rug_body(mb: MeshBuilder, Lx: float, Ly: float, T: float, dense: str, long_
         P[:, 1] += np.sign(P[:, 1]) * ey * 0.0016 * _fbm2(P[:, 0] * 7.0, np.sign(P[:, 1]) * 5.0, seed + 1, 2)
         return P
 
-    rounded_box(mb, (0.0, 0.0, T / 2), (Lx, Ly, T), T / 2,
+    # placa de quinas vivas (raio ~1/4 da espessura): a borda quase vertical projeta a linha fina
+    # de sombra de um tapete real (um raio de meia espessura deixava a borda "derretida")
+    rounded_box(mb, (0.0, 0.0, T / 2), (Lx, Ly, T), RUG_EDGE_RADIUS * T,
                 mat={"+z": 0, "-z": 1, "side": 0}, step=step, seg=4, guard=0.002, uv="xy",
                 uv_swap=(long_axis == "y"), deform=wobble)
     # UVs começam em 0 (as bordas do desenho dependem disso)
@@ -788,7 +801,7 @@ def _build_rug(a: _Asset) -> None:
     pattern = str(p.get("pattern", "solid_border"))
     if pattern not in M.RUG_PATTERNS:
         raise ValueError(f"Padrão de tapete desconhecido: {pattern!r}")
-    fringe = bool(p.get("fringe", pattern in ("berber", "persian")))
+    fringe = bool(p.get("fringe", pattern in ("berber", "persian") and not p.get("texture")))
     long_axis = "x" if W >= D else "y"
     dense = str(p.get("unroll_axis", long_axis)).lower()
     if dense not in ("x", "y"):
@@ -797,8 +810,16 @@ def _build_rug(a: _Asset) -> None:
     Lx = W - (2 * fl if long_axis == "x" else 0.0)
     Ly = D - (2 * fl if long_axis == "y" else 0.0)
     Lu, Lv = (Lx, Ly) if long_axis == "x" else (Ly, Lx)
-    mats = [M.rug_wool(pattern, p.get("color"), p.get("accent"), Lu, Lv, a.seed),
-            M.rug_wool(pattern, p.get("color"), p.get("accent"), Lu, Lv, a.seed, back=True)]
+    tex = p.get("texture")
+    if tex:     # trama fotográfica CC0 tingida pela paleta (desenho só em faixas tecidas)
+        design = str(p.get("design", "borda"))
+        kw = dict(tile_m=float(p.get("tile_m", 0.27)), lum_mean=float(p.get("lum_mean", 0.2)), design=design,
+                  seed=a.seed, sheen=float(p.get("sheen", 0.7)))
+        mats = [M.rug_textured(tex, p.get("color"), p.get("accent"), Lu, Lv, **kw),
+                M.rug_textured(tex, p.get("color"), p.get("accent"), Lu, Lv, back=True, **kw)]
+    else:
+        mats = [M.rug_wool(pattern, p.get("color"), p.get("accent"), Lu, Lv, a.seed),
+                M.rug_wool(pattern, p.get("color"), p.get("accent"), Lu, Lv, a.seed, back=True)]
     mb = MeshBuilder()
     _rug_body(mb, Lx, Ly, T, dense, long_axis, a.seed)
     a.part("rug_body", mb, mats, 0, "unroll")
@@ -1638,9 +1659,126 @@ def _build_book_stack(a: _Asset) -> None:
                pivot=(b["x"], b["y"], b["z"]))
 
 
+# =========================================================================== quadro (arte procedural)
+
+CANVAS_FRAMES = ("tela", "moldura")
+CANVAS_EDGE_RADIUS = 0.003      # quina arredondada da tela esticada no chassi
+FRAME_BAR = 0.022               # largura da face da moldura fina (m)
+MAT_RECESS = 0.006              # recuo do passe-partout atrás da frente da moldura (m)
+
+
+def canvas_layout(size, params: dict | None = None) -> dict:
+    """Medidas do quadro: área pintada (``art_w`` x ``art_h``, centrada) e larguras de moldura
+    (``bar``) e passe-partout (``mat``). ``tela`` = tela esticada de 3,5 cm sem moldura (a pintura
+    cobre a frente toda); ``moldura`` = moldura fina + passe-partout (≈12% do lado menor)."""
+    W, D, H = (float(v) for v in size)
+    p = params or {}
+    frame = str(p.get("frame", "tela"))
+    if frame not in CANVAS_FRAMES:
+        raise ValueError(f"Moldura desconhecida: {frame!r} (válidas: {', '.join(CANVAS_FRAMES)})")
+    if frame == "tela":
+        bar, mat = 0.0, 0.0
+        aw, ah = W - 2 * CANVAS_EDGE_RADIUS, H - 2 * CANVAS_EDGE_RADIUS
+    else:
+        bar = float(np.clip(float(p.get("frame_width", FRAME_BAR)), 0.01, 0.2 * min(W, H)))
+        mat = float(np.clip(0.12 * min(W, H), 0.035, 0.1)) if p.get("passe_partout", True) else 0.0
+        aw, ah = W - 2 * (bar + mat), H - 2 * (bar + mat)
+    if aw < 0.05 or ah < 0.05:
+        raise ValueError(f"Quadro pequeno demais para a moldura: {W:.3f} x {H:.3f} m")
+    return dict(frame=frame, bar=bar, mat=mat, art_w=aw, art_h=ah)
+
+
+def _np_image(name: str, arr: Array, non_color: bool = False) -> bpy.types.Image:
+    """Imagem do Blender (8 bits, em memória) a partir de uma matriz HxW[x3] uint8 ou float 0..1."""
+    a = np.asarray(arr)
+    a = a.astype(np.float32) / 255.0 if a.dtype == np.uint8 else a.astype(np.float32)
+    if a.ndim == 2:
+        a = np.repeat(a[..., None], 3, axis=2)
+    h, w = a.shape[:2]
+    rgba = np.concatenate([a[::-1], np.ones((h, w, 1), np.float32)], axis=2)   # Blender: linha 0 embaixo
+    img = bpy.data.images.new(name, w, h, alpha=False)
+    img.colorspace_settings.name = "Non-Color" if non_color else "sRGB"
+    img.pixels.foreach_set(rgba.ravel())
+    img.update()
+    return img
+
+
+def _frame_material(color, axis: str, seed: int) -> bpy.types.Material:
+    rgb = M.parse_color(color, "#1f1f21")
+    lum = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    if lum < 0.05:              # preto: laca acetinada (madeira escura demais não lê como preto)
+        return M.painted(color, "satin", seed)
+    return wood_or_lacquer(color, axis, seed)
+
+
+def _build_canvas_art(a: _Asset) -> None:
+    """Quadro com pintura abstrata GERADA na paleta (``mobilia/assets/art.py``): tela esticada de
+    3,5 cm ou moldura fina com passe-partout. Largura e altura livres; uma peça ("quadro")."""
+    from .art import art_resolution, generate_art
+
+    W, D, H = a.size
+    p = a.params
+    lay = canvas_layout(a.size, p)
+    style = str(p.get("art_style", "formas"))
+    colors = list(p.get("colors") or ["#b5603e", "#3d3f42", "#cdbda2", "#7b7d45"])
+    ground = p.get("ground", "#eeeae2")
+    aw, ah = lay["art_w"], lay["art_h"]
+    pw, ph = art_resolution(aw, ah)
+    img, relief = generate_art(pw, ph, colors, ground, style, a.seed)
+    m_art = M.canvas_paint(_np_image(f"{a.name}.arte", img), _np_image(f"{a.name}.relevo", relief, True),
+                           aw, ah, a.seed)
+    mb = MeshBuilder()
+    yf = -D / 2                                     # frente do quadro
+    zc = H / 2
+
+    def art_plane(y: float) -> None:
+        P = np.array([[[-aw / 2, y, zc - ah / 2], [aw / 2, y, zc - ah / 2]],
+                      [[-aw / 2, y, zc + ah / 2], [aw / 2, y, zc + ah / 2]]])
+        UV = np.array([[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]])
+        mb.grid(P, UV, 0)
+
+    if lay["frame"] == "tela":
+        edge = M.fabric(ground, "cotton", seed=a.seed)
+        rounded_box(mb, (0.0, 0.0, zc), (W, D, H), CANVAS_EDGE_RADIUS, 1, step=(0.2, 0.05, 0.2), seg=3,
+                    guard=0.001)
+        art_plane(yf - 0.0003)
+        mats = [m_art, edge]
+    else:
+        bar, mat = lay["bar"], lay["mat"]
+        fh = _frame_material(p.get("frame_color"), "X", a.seed)
+        fv = _frame_material(p.get("frame_color"), "Z", a.seed)
+        board = M.painted(p.get("mat_color", "#f3f0e9"), "matte", a.seed)
+        backing = M.painted("#8c7b66", "matte", a.seed + 1)
+        r = min(0.002, 0.2 * bar)
+        for z in (bar / 2, H - bar / 2):            # travessas horizontais (largura total)
+            rounded_box(mb, (0.0, 0.0, z), (W, D, bar), r, 1, step=(0.2, 0.05, 0.05), seg=2, guard=0.0008)
+        for x in (-W / 2 + bar / 2, W / 2 - bar / 2):
+            rounded_box(mb, (x, 0.0, zc), (bar, D, H - 2 * bar), r, 2, step=(0.05, 0.05, 0.2), seg=2,
+                        guard=0.0008)
+        x0, x1, z0, z1 = -W / 2 + bar, W / 2 - bar, bar, H - bar
+        y_mat = yf + MAT_RECESS
+        if mat > 0:                                 # passe-partout: 4 faixas em volta da janela
+            t = 0.002
+            yc = y_mat + t / 2
+            for zz0, zz1 in ((z0, zc - ah / 2), (zc + ah / 2, z1)):
+                rounded_box(mb, (0.0, yc, (zz0 + zz1) / 2), (x1 - x0, t, zz1 - zz0), 0.0, 3, step=0.5)
+            for xx0, xx1 in ((x0, -aw / 2), (aw / 2, x1)):
+                rounded_box(mb, ((xx0 + xx1) / 2, yc, zc), (xx1 - xx0, t, ah), 0.0, 3, step=0.5)
+            art_plane(y_mat + t + 0.0003)
+        else:
+            art_plane(y_mat)
+        y_back0 = y_mat + 0.0028                    # fundo (chapa) atrás da arte, até a parede
+        rounded_box(mb, (0.0, (y_back0 + D / 2) / 2, zc), (x1 - x0, D / 2 - y_back0, z1 - z0), 0.0, 4,
+                    step=0.5)
+        mats = [m_art, fh, fv, board, backing]
+    a.part("quadro", mb, mats, 0, "slide")
+    a.root["mobilia_canvas"] = json.dumps(dict(lay, art_px=[pw, ph], art_style=style))
+
+
 # =========================================================================== registro
 
 _BUILDERS: dict[str, Callable[[_Asset], None]] = {
+    "canvas_art": _build_canvas_art,
     "rug": _build_rug,
     "floor_lamp": _build_floor_lamp,
     "table_lamp": _build_table_lamp,

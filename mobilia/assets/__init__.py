@@ -2,9 +2,11 @@
 
 - ``procedural.py`` — gera no Blender (``bpy``) os itens que a biblioteca CC0 da
   Poly Haven não tem: tapete, luminária de piso, abajur, cama, cortina, escrivaninha,
-  manta e pilha de livros deitados. Cada asset é um EMPTY raiz (origem no centro da base, frente para -Y,
+  manta, pilha de livros deitados e quadro com pintura abstrata gerada na paleta. Cada asset é um EMPTY raiz (origem no centro da base, frente para -Y,
   metros) com as peças como filhos, prontas para a coreografia de montagem.
-- ``materials.py`` — materiais PBR procedurais (sem texturas externas).
+- ``materials.py`` — materiais PBR procedurais; as únicas imagens usadas são texturas CC0 de
+  tecido da Poly Haven (tapete) e a pintura gerada localmente por ``art.py`` (quadros).
+- ``art.py`` — gerador determinístico de arte abstrata (só numpy, sem ``bpy``).
 
 Este ``__init__`` não importa ``bpy``: pode ser usado por qualquer processo (layout,
 interface) para consultar os tipos e movimentos válidos e, via ``support_surface``, a
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 # Tipos procedurais (asset_id "proc:<tipo>" no catálogo)
 PROCEDURAL_KINDS: tuple[str, ...] = (
-    "rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket", "book_stack",
+    "rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket", "book_stack", "canvas_art",
 )
 
 # Movimentos de montagem que uma peça pode declarar em obj["assembly_motion"]

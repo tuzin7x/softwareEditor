@@ -151,3 +151,34 @@ def test_frame_samples_ramp_before_static_frames():
     assert s[7] < s[8] < s[9] == 128                    # rampa curta (só 2 dinâmicos) até o final
     assert frame_samples(seq, spl, ramp=0) == [spl[c] for c in seq]
     assert adaptive_min("dinamico", 32) == 8 and adaptive_min("final", 128) == 32 and adaptive_min("final", 16) == 16
+
+
+def test_canvas_art_and_textured_rug_params():
+    """PT9: o quadro gerado leva paleta/moldura/semente ao Blender; o tapete leva os caminhos da
+    textura CC0 (e cai no desenho procedural quando não há textura)."""
+    a = normalize_procedural_params("canvas_art", {
+        "size": [0.45, 0.035, 0.6], "colors": [(0.71, 0.38, 0.24), "#3d3f42"], "ground": (0.93, 0.91, 0.87),
+        "art_style": "formas", "frame": "moldura", "frame_color": (0.12, 0.12, 0.13), "mat_color": "#f3f0e9",
+        "seed": 18})
+    assert a["frame"] == "moldura" and a["art_style"] == "formas" and a["seed"] == 18
+    assert a["colors"] == ["#b5613d", "#3d3f42"] and a["ground"].startswith("#")
+    assert normalize_procedural_params("canvas_art", {"frame": "vidro"})["frame"] == "tela"
+    tex = {"diff": "/x/d.jpg", "nor": "/x/n.jpg", "rough": "/x/r.jpg"}
+    r = normalize_procedural_params("rug", {"pattern": "geometrico", "texture": tex, "tile_m": 0.27,
+                                            "lum_mean": 0.18, "design": "filete", "texture_id": "poly_wool_herringbone"})
+    assert r["texture"] == tex and r["design"] == "filete" and r["tile_m"] == 0.27
+    assert "texture_id" not in r
+    r2 = normalize_procedural_params("rug", {"pattern": "geometrico", "texture": None, "design": "filete"})
+    assert "texture" not in r2 and r2["pattern"] == "berber"
+
+
+def test_rug_texture_paths_offline_falls_back(tmp_path, monkeypatch):
+    from mobilia.render import scene_spec as ss
+
+    def boom(*a, **k):
+        raise RuntimeError("sem rede")
+
+    monkeypatch.setattr(ss, "ensure_texture", boom)
+    assert ss.rug_texture_paths("poly_wool_herringbone", tmp_path) is None
+    monkeypatch.setattr(ss, "ensure_texture", lambda t, d, r: {"diff": tmp_path / "d.jpg", "nor": tmp_path / "n.jpg"})
+    assert ss.rug_texture_paths("x", tmp_path) == {"diff": str(tmp_path / "d.jpg"), "nor": str(tmp_path / "n.jpg")}

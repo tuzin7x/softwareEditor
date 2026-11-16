@@ -12,7 +12,7 @@ from scipy import ndimage
 
 from ..analysis.room import RoomModel
 from ..analysis.segmentation import SegmentationResult
-from ..assets.polyhaven import ensure_model
+from ..assets.polyhaven import ensure_model, ensure_texture
 from ..layout import catalog
 from ..layout.model import Layout
 from ..photo import srgb_to_linear
@@ -21,6 +21,7 @@ from .border import EXR_CODEC
 from .layers import ADAPTIVE_MIN, ADAPTIVE_THRESHOLD, RAMP_FRAMES, clamp_layers
 
 
+_RUG_DESIGNS = ("liso", "borda", "filete", "listras", "borda_dupla")    # = materials.RUG_DESIGNS
 _RUG_PATTERN_MAP = {"geometrico": "berber", "berbere": "berber", "berber": "berber", "listras": "stripes",
                     "stripes": "stripes", "persa": "persian", "persian": "persian", "borda": "solid_border", "liso": "solid_border",
                     "solid_border": "solid_border"}
@@ -67,6 +68,14 @@ def normalize_procedural_params(kind: str, params: dict) -> dict:
         out["accent"] = _hex(p.get("accent", p.get("pattern_color")))
         if "fringe" in p:
             out["fringe"] = bool(p["fringe"])
+        tex = p.get("texture")
+        if isinstance(tex, dict) and tex.get("diff") and tex.get("nor"):
+            out["texture"] = {k: str(v) for k, v in tex.items() if k in ("diff", "nor", "rough") and v}
+            for k in ("tile_m", "lum_mean", "sheen"):
+                if p.get(k) is not None:
+                    out[k] = float(p[k])
+            design = str(p.get("design", "borda"))
+            out["design"] = design if design in _RUG_DESIGNS else "borda"
     elif kind in ("floor_lamp", "table_lamp"):
         out["metal"] = p["metal"] if p.get("metal") in ("black", "brass", "chrome", "matte_black") \
             else _metal_finish(p.get("metal_color"))
@@ -97,12 +106,30 @@ def normalize_procedural_params(kind: str, params: dict) -> dict:
             out["count"] = int(p["count"])
         if p.get("page_color") is not None:
             out["page_color"] = _hex(p["page_color"])
+    elif kind == "canvas_art":
+        out["frame"] = p["frame"] if p.get("frame") in ("tela", "moldura") else "tela"
+        out["colors"] = [_hex(c) for c in p.get("colors") or [] if c is not None]
+        out["ground"] = _hex(p.get("ground"))
+        out["art_style"] = str(p.get("art_style", "formas"))
+        out["frame_color"] = _hex(p.get("frame_color"))
+        out["mat_color"] = _hex(p.get("mat_color"))
+        if "passe_partout" in p:
+            out["passe_partout"] = bool(p["passe_partout"])
     elif kind == "curtain":
         out["color"] = _hex(p.get("color"))
         for k in ("sheer", "panels", "coverage"):
             if k in p:
                 out[k] = p[k]
     return {k: v for k, v in out.items() if v is not None}
+
+
+def rug_texture_paths(tex_id: str, assets_dir: Path, texture_res: str = "1k") -> dict | None:
+    """Caminhos dos mapas da textura CC0 do tapete (do cache; baixa se faltar). ``None`` quando não
+    há como obtê-la (offline sem cache): o tapete volta ao desenho procedural."""
+    try:
+        return {k: str(v) for k, v in ensure_texture(str(tex_id), assets_dir, texture_res).items()}
+    except Exception:
+        return None
 
 
 def surface_stats(photo8: np.ndarray, seg: SegmentationResult) -> dict:
@@ -274,6 +301,8 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
             kind = it.asset_id[5:]
             params = dict(it.params)
             params.setdefault("size", list(it.size))
+            if kind == "rug" and params.get("texture_id"):
+                params["texture"] = rug_texture_paths(params["texture_id"], assets_dir, texture_res)
             spec_item["source"] = {"type": "procedural", "kind": kind,
                                    "params": normalize_procedural_params(kind, params)}
         else:

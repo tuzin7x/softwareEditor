@@ -1,8 +1,10 @@
-"""Download e cache de modelos 3D da Poly Haven (licença CC0 — uso comercial livre).
+"""Download e cache de modelos 3D e texturas da Poly Haven (licença CC0 — uso comercial livre).
 
 Os arquivos glTF (+ texturas) são baixados uma única vez para
-``<DATA_DIR>/assets/polyhaven/<id>/<res>/`` e verificados por MD5 (fornecido pela API).
-Depois disso o software funciona offline.
+``<DATA_DIR>/assets/polyhaven/<id>/<res>/`` e as texturas de tecido (tapete) para
+``<DATA_DIR>/assets/polyhaven/textures/<id>/<res>/``, verificados por MD5 (fornecido pela API).
+O ``manifest.json`` de cada pasta registra a origem (URL da Poly Haven) e a licença. Depois disso
+o software funciona offline.
 """
 from __future__ import annotations
 
@@ -88,9 +90,12 @@ def prefetch_catalog(cache_dir: Path, resolutions: tuple[str, ...] = ("1k", "2k"
     para que o software funcione 100% offline depois. Retorna os ids com falha."""
     from ..layout.catalog import CATALOG
 
+    from ..layout.catalog import RUG_TEXTURES
+
     ids = sorted({a.asset_id[3:] for a in CATALOG if a.asset_id.startswith("ph:")})
+    tex_ids = sorted({t.tex_id for t in RUG_TEXTURES.values()})
     failed = []
-    total = len(ids) * len(resolutions)
+    total = (len(ids) + len(tex_ids)) * len(resolutions)
     k = 0
     for pid in ids:
         for res in resolutions:
@@ -101,7 +106,48 @@ def prefetch_catalog(cache_dir: Path, resolutions: tuple[str, ...] = ("1k", "2k"
                 failed.append(f"{pid}@{res}")
             if progress:
                 progress(k / total, pid)
+    for tid in tex_ids:
+        for res in resolutions:
+            k += 1
+            try:
+                ensure_texture(tid, cache_dir, res)
+            except Exception:
+                failed.append(f"textura:{tid}@{res}")
+            if progress:
+                progress(k / total, tid)
     return failed
+
+
+# Mapas de textura usados (nome na API -> chave local) e formato
+TEXTURE_MAPS = {"Diffuse": "diff", "nor_gl": "nor", "Rough": "rough"}
+
+
+def ensure_texture(tex_id: str, cache_dir: Path, res: str = "1k") -> dict[str, Path]:
+    """Garante no cache os mapas JPG (difuso, normal OpenGL, rugosidade) de uma textura da Poly
+    Haven e devolve {"diff": caminho, "nor": caminho, "rough": caminho}."""
+    base = Path(cache_dir) / "polyhaven" / "textures" / tex_id / res
+    manifest = base / "manifest.json"
+    if manifest.exists():
+        m = json.loads(manifest.read_text(encoding="utf-8"))
+        paths = {k: base / rel for k, rel in m["maps"].items()}
+        if all(p.exists() for p in paths.values()):
+            return paths
+    files = _get_json(f"{API}/files/{tex_id}")
+    maps, urls = {}, {}
+    for api_name, key in TEXTURE_MAPS.items():
+        entry = files.get(api_name, {})
+        r = res if res in entry else ("1k" if "1k" in entry else (sorted(entry)[0] if entry else None))
+        if r is None or "jpg" not in entry[r]:
+            raise RuntimeError(f"Textura {tex_id} sem mapa {api_name} em JPG")
+        info = entry[r]["jpg"]
+        name = Path(info["url"]).name
+        _download(info["url"], base / name, info.get("md5"))
+        maps[key] = name
+        urls[key] = info["url"]
+    manifest.write_text(json.dumps({"id": tex_id, "res": res, "maps": maps, "origem": urls,
+                                    "fonte": f"https://polyhaven.com/a/{tex_id}", "license": "CC0"}),
+                        encoding="utf-8")
+    return {k: base / v for k, v in maps.items()}
 
 
 def ensure_model(asset_id: str, cache_dir: Path, res: str = "1k") -> Path:

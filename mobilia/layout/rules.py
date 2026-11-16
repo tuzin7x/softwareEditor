@@ -34,6 +34,8 @@ PONTUAÇÃO (maior = melhor) = soma dos termos abaixo × peso (``Weights``, valo
 - window_cover [6.0]   fração de janela/porta escondida (mesmo abaixo do limite rígido).
 - prominence [3.0]     âncora (sofá/cama/mesa) longe do centro horizontal ou pequena (<3%).
 - asset_pref [0.8]     adequação do asset ao estilo e tons da foto (``style.asset_preference``).
+- dark_mass [2.0]      no máximo UMA massa escura (móvel volumoso de tom "escuro" no catálogo);
+                       cada uma a mais custa 1 (duas massas pretas "furam" a composição).
 """
 from __future__ import annotations
 
@@ -113,9 +115,19 @@ class Weights:
     window_cover: float = 6.0
     prominence: float = 3.0
     asset_pref: float = 0.8
+    dark_mass: float = 2.0
 
 
 WEIGHTS = Weights()
+
+
+def dark_masses(items: list[Placement]) -> int:
+    """Quantas peças volumosas (assentos e móveis grandes) de tom "escuro" há no layout."""
+    from .catalog import CATALOG
+
+    dark = {a.asset_id for a in CATALOG if a.tone == "escuro"}
+    return sum(1 for p in items if p.mount == "floor" and (p.role in BULKY or p.role in SEATING)
+               and p.asset_id in dark)
 
 
 @dataclass
@@ -548,6 +560,7 @@ def score_layout(items: list[Placement], cache: GeoCache, ctx: LayoutContext, pr
                                                      + 30.0 * max(0.0, 0.03 - area))
     T["asset_pref"] = weights.asset_pref * sum(prefs.get(p.asset_id, 2.0) - 2.0 for p in items
                                                if p.asset_id.startswith("ph:"))
+    T["dark_mass"] = -weights.dark_mass * max(0, dark_masses(items) - 1)
     total = float(sum(T.values()))
     if viol:
         total -= 1000.0 * len(viol)

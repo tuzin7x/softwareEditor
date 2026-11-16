@@ -75,6 +75,8 @@ GROUP_ROLES = {
 }
 ART_ABOVE = ("sofa", "bed", "tv_console", "desk", "dresser", "desk_storage", "shelf")
 ART_MIN_VIEW_COS = 0.45        # cos do ângulo entre a normal da parede e a direção da câmera (~63°)
+ART_PAIR_GAP = 0.08            # vão entre os dois quadros de um díptico (m)
+ART_DEPTH = 0.035              # profundidade do quadro gerado (tela de 3,5 cm / moldura)
 CHOREO_CLASS = {"rug": 0}
 for _r in ("sofa", "bed", "dining_table", "desk", "tv_console", "dresser", "shelf", "shelf_large", "desk_storage"):
     CHOREO_CLASS[_r] = 1
@@ -350,13 +352,50 @@ class Solver:
         return list(best[1])
 
     # ------------------------------------------------------------------ quadros e espelho
-    def _art_arrangements(self, role: str) -> list[list[AssetSpec]]:
-        specs = self.ranked(role, 2)
+    def _art_sets(self, role: str, below: Placement | None) -> list[list[tuple[AssetSpec, tuple]]]:
+        """Arranjos candidatos (lista de (asset, tamanho)) para um quadro/espelho.
+
+        Assets de tamanho fixo entram sozinhos (ou em par de dois DIFERENTES: duas cópias da mesma
+        pintura denunciam o CG); o quadro gerado (``scalable``) recebe tamanhos pelas regras de
+        projeto de ``_art_sizes``, inclusive em díptico."""
         out = []
+        specs = self.ranked(role, 2)
         for s in specs:
-            out.append([s])
-            if role == "wall_art":
-                out.append([s, s])
+            if s.scalable:
+                out += [[(s, sz) for sz in sizes] for sizes in self._art_sizes(below)]
+            else:
+                out.append([(s, tuple(s.size))])
+        fixed = [s for s in specs if not s.scalable]
+        if role == "wall_art" and len(fixed) == 2:
+            out.append([(fixed[0], tuple(fixed[0].size)), (fixed[1], tuple(fixed[1].size))])
+        return out
+
+    def _art_sizes(self, below: Placement | None) -> list[list[tuple[float, float, float]]]:
+        """Tamanhos do quadro gerado pelas regras de projeto (largura x profundidade x altura, m).
+
+        - sobre um móvel: o conjunto ocupa ~2/3 da largura do móvel (0,5–1,8 m): um quadro
+          paisagem (4:3; 3:2 a partir de 1,2 m) ou um díptico de retratos 3:4 com 8 cm de vão;
+          a altura cabe entre o móvel + ``ART_ABOVE_GAP`` e o teto − 25 cm;
+        - parede livre: retrato 60 x 80 cm, paisagem 90 x 65 cm ou díptico 45 x 60 cm.
+        """
+        D = ART_DEPTH
+        r2 = lambda v: round(float(v), 2)   # noqa: E731 — tamanhos em centímetros inteiros
+        if below is None:
+            return [[(0.6, D, 0.8)], [(0.9, D, 0.65)], [(0.45, D, 0.6), (0.45, D, 0.6)]]
+        tw = float(np.clip(below.w * 2.0 / 3.0, 0.5, 1.8))
+        hmax = self.ctx.ceiling - 0.25 - (below.h + ART_ABOVE_GAP)
+        if hmax < 0.3:
+            return []
+        out = []
+        w1 = tw
+        h1 = w1 / (1.5 if w1 >= 1.2 else 4.0 / 3.0)
+        k = min(1.0, hmax / h1, 1.0 / h1)
+        out.append([(r2(w1 * k), D, r2(h1 * k))])
+        w2 = (tw - ART_PAIR_GAP) / 2
+        if w2 >= 0.3:
+            h2 = w2 * 4.0 / 3.0
+            k = min(1.0, hmax / h2, 1.0 / h2)
+            out.append([(r2(w2 * k), D, r2(h2 * k))] * 2)
         return out
 
     def _place_wall_art(self, items: list[Placement]) -> list[Placement]:
@@ -364,6 +403,27 @@ class Solver:
         for role in roles:
             items = self._place_one_art(items, role)
         return items
+
+    def _art_placements(self, role: str, arr: list[tuple[AssetSpec, tuple]], w, s: float,
+                        zc: float) -> list[Placement]:
+        gapx = ART_PAIR_GAP if len(arr) > 1 else 0.0
+        tot_w = sum(sz[0] for _, sz in arr) + gapx * (len(arr) - 1)
+        ah = max(sz[2] for _, sz in arr)
+        arts = []
+        x0 = s - tot_w / 2
+        style_seed = self.seed * 7 + int(round(tot_w * 100))
+        for i, (a, (aw, ad, ahh)) in enumerate(arr):
+            sc_ = x0 + aw / 2
+            x0 += aw + gapx
+            c = w.point(sc_) + w.normal * (ad / 2 + 0.005)
+            params = {}
+            if a.scalable:
+                params = proc_params(role, self.profile, (aw, ad, ahh), seed=self.seed * 1009 + 17 * i + 1,
+                                     style_seed=style_seed)
+            arts.append(Placement(f"{role}_{i}", role, a.asset_id, aw, ad, ahh, float(c[0]), float(c[1]),
+                                  float(zc - ah / 2 + (ah - ahh) / 2), geom.yaw_facing(*w.normal), "wall", w.id,
+                                  None, params, ""))
+        return arts
 
     def _place_one_art(self, items: list[Placement], role: str) -> list[Placement]:
         ctx = self.ctx
@@ -378,44 +438,38 @@ class Solver:
                     w = ctx.wall_by_id(wid)
                     below_cands.append((p, w, float((p.xy - w.p0) @ w.direction)))
         blocked_near = self._fixture_walls() if role == "wall_mirror" else {}
-        for arr in self._art_arrangements(role):
-            gapx = 0.08 if len(arr) > 1 else 0.0
-            tot_w = sum(a.size[0] for a in arr) + gapx * (len(arr) - 1)
-            ah = max(a.size[2] for a in arr)
-            options = []
-            for p, w, s in below_cands:
+        options = []          # (arranjo, parede, s, z do centro, bônus)
+        for p, w, s in below_cands:
+            for arr in self._art_sets(role, p):
+                tot_w = sum(sz[0] for _, sz in arr) + ART_PAIR_GAP * (len(arr) - 1)
+                ah = max(sz[2] for _, sz in arr)
                 ratio = tot_w / p.w
-                zc = max(ART_CENTER_Z, p.h + ART_ABOVE_GAP + ah / 2)
-                options.append((w, s, zc, p, 3.0 - 4.0 * abs(ratio - 2.0 / 3.0)))
+                # base 20–25 cm acima do móvel; o centro não passa da altura dos olhos sem precisar
+                zc = max(min(ART_CENTER_Z, p.h + ART_ABOVE_GAP + 0.05 + ah / 2), p.h + ART_ABOVE_GAP + ah / 2)
+                options.append((arr, w, s, zc, 3.0 - 4.0 * abs(ratio - 2.0 / 3.0)))
+        for arr in self._art_sets(role, None):
+            tot_w = sum(sz[0] for _, sz in arr) + ART_PAIR_GAP * (len(arr) - 1)
             for w in ctx.walls:
                 for s0, s1 in w.intervals(w.vis_art & (w.view_cos > ART_MIN_VIEW_COS), min_len=tot_w + 0.2):
                     for s in np.arange(s0 + tot_w / 2 + 0.1, s1 - tot_w / 2 - 0.1 + 1e-9, 0.2):
                         bonus = 0.0
                         if role == "wall_mirror" and w.id in blocked_near:
                             bonus = 1.5 if any(a <= s <= b for a, b in blocked_near[w.id]) else 0.0
-                        options.append((w, float(s), ART_CENTER_Z, None, bonus))
-            for w, s, zc, below, bonus in options:
-                if zc + ah / 2 > ctx.ceiling - 0.12:
-                    continue
-                arts = []
-                x0 = s - tot_w / 2
-                for i, a in enumerate(arr):
-                    sc_ = x0 + a.size[0] / 2
-                    x0 += a.size[0] + gapx
-                    c = w.point(sc_) + w.normal * (a.size[1] / 2 + 0.005)
-                    p = Placement(f"{role}_{i}", role, a.asset_id, a.size[0], a.size[1], a.size[2], float(c[0]),
-                                  float(c[1]), float(zc - ah / 2 + (ah - a.size[2]) / 2),
-                                  geom.yaw_facing(*w.normal), "wall", w.id, None, {}, "")
-                    arts.append(p)
-                if not self._art_ok(arts, w, base_items):
-                    continue
-                cand = base_items + arts
-                sc = self.score(cand)
-                if not sc.feasible:
-                    continue
-                total = sc.total + bonus
-                if best is None or total > best[0]:
-                    best = (total, cand)
+                        options.append((arr, w, float(s), ART_CENTER_Z, bonus))
+        for arr, w, s, zc, bonus in options:
+            ah = max(sz[2] for _, sz in arr)
+            if zc + ah / 2 > ctx.ceiling - 0.12:
+                continue
+            arts = self._art_placements(role, arr, w, s, zc)
+            if not self._art_ok(arts, w, base_items):
+                continue
+            cand = base_items + arts
+            sc = self.score(cand)
+            if not sc.feasible:
+                continue
+            total = sc.total + bonus
+            if best is None or total > best[0]:
+                best = (total, cand)
         if best is None or best[0] <= base:
             return items
         return best[1]
