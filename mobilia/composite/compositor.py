@@ -17,6 +17,10 @@ valor intermediário é o mesmo do quadro inteiro: o resultado é idêntico byte
 
 AJUSTE DO CG (PT8, ``grade.py``): mapa de ganho residual, curva de tom e joelho das altas luzes
 multiplicam só C onde A > 0, antes do casamento de nitidez. A placa e a sombra não mudam.
+
+SOMBRA DE CONTATO (PT10, ``contact.py``): a oclusão analítica ``c`` das silhuetas de baixo das
+peças de piso, levada à imagem pela homografia do piso, entra como ``S' = S · (1 − k·c)`` antes do
+peso da região de influência: fora dela nada muda (mesma garantia da placa).
 """
 from __future__ import annotations
 
@@ -55,6 +59,7 @@ class CompositeSettings:
     alpha_eps: float = 1.0 / 1024.0    # alfa abaixo disso é considerado 0
     grain_strength: float = 1.0        # 1 = igual ao ruído estimado da foto
     match_sharpness: bool = True
+    contact_strength: float = 0.65     # k da sombra de contato (S' = S · (1 − k·c)); 0 desliga
 
 
 @dataclass
@@ -65,6 +70,7 @@ class FrameStats:
     shadow_pixels: int = 0
     preserved_exact: bool = True
     max_diff_outside: int = 0
+    contact_pixels: int = 0           # pixels em que a sombra de contato (PT10) entrou
     box: list[int] | None = None      # retângulo composto [x0, y0, x1, y1]; fora dele, a foto
 
 
@@ -168,13 +174,14 @@ class Compositor:
 
     def composite(self, frame: int, rgba: np.ndarray | None, shadow: np.ndarray | None,
                   border: list[int] | None, origin: tuple[int, int] | None = None,
-                  grade: CGGrade | None = None) -> tuple[np.ndarray, FrameStats]:
+                  grade: CGGrade | None = None, contact=None) -> tuple[np.ndarray, FrameStats]:
         """Compõe um quadro. ``rgba``/``shadow`` são passes do Cycles (float, h×w×4 / h×w×3).
 
         Sem ``origin`` as camadas são do quadro inteiro. Com ``origin`` = (x, y) elas cobrem só um
         retângulo do quadro (p. ex. o border do render) e fora dele valem RGBA 0 e sombra 1. A
         conta é feita só em ``composition_box``; o resto do quadro é cópia da foto. ``grade``: o
-        ajuste do CG da calibração (só a camada CG muda)."""
+        ajuste do CG da calibração (só a camada CG muda). ``contact``: a sombra de contato do quadro
+        (``contact.ContactFrame``, com ``occlusion(box)``), só dentro da região de influência."""
         st = FrameStats(frame)
         if rgba is None:
             return self.photo8.copy(), st
@@ -196,14 +203,15 @@ class Compositor:
             if shadow is not None:
                 sh = np.ones((y1 - y0, x1 - x0, shadow.shape[2]), shadow.dtype)
                 sh[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0] = shadow[iy0 - oy:iy1 - oy, ix0 - ox:ix1 - ox]
-        sub = self._composite_region(st, rg, sh, border, box, grade)
+        sub = self._composite_region(st, rg, sh, border, box, grade, contact)
         out8 = self.photo8.copy()
         out8[y0:y1, x0:x1] = sub
         st.box = list(box)
         return out8, st
 
     def _composite_region(self, st: FrameStats, rgba: np.ndarray, shadow: np.ndarray | None,
-                          border: list[int] | None, box: list[int], grade: CGGrade | None = None) -> np.ndarray:
+                          border: list[int] | None, box: list[int], grade: CGGrade | None = None,
+                          contact=None) -> np.ndarray:
         """A conta da composição no retângulo ``box`` do quadro (camadas já recortadas nele).
 
         Mesmas operações, na mesma ordem, do quadro inteiro; ``diag`` (raio de influência e
@@ -251,6 +259,18 @@ class Compositor:
         # luz rebatida pelos móveis pode clarear o entorno; em cantos escuros a razão do
         # shadow catcher explode (denominador pequeno) — limitamos o ganho a +15%
         S = np.minimum(S, 1.15)
+        k = float(self.s.contact_strength)
+        if contact is not None and k > 0 and obj.any():
+            # sombra de contato analítica (PT10): entra antes do peso da influência, que a zera
+            # fora da vizinhança dos móveis
+            c = contact.occlusion(box)
+            if c is not None:
+                cm = c > 1e-4
+                if valid is not None:
+                    cm &= valid
+                st.contact_pixels = int(np.count_nonzero(cm & (w > 0)))
+                if cm.any():
+                    S = np.where(cm, S * (1.0 - k * np.clip(c, 0.0, 1.0)), S).astype(np.float32)
         dev = S - 1.0
         # encolhimento suave: desvios menores que eps (ruído de render) viram exatamente 0
         dev = np.sign(dev) * np.maximum(np.abs(dev) - self.s.shadow_eps, 0.0)

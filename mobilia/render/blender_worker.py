@@ -1124,6 +1124,86 @@ def _check_rest_support(items_rt: list[dict], sc=None, n_frames: int | None = No
     return removed
 
 
+# ============================================================================ sombra de contato (PT10)
+
+# papéis de piso sem sombra de contato própria (o tapete é a própria superfície; a cortina pende)
+CONTACT_SKIP_ROLES = ("rug", "curtain")
+
+
+def underside_heights(part, cell: float, h_max: float):
+    """Silhueta ortográfica de baixo de uma peça, na pose atual: numa grade de ``cell`` m sob a
+    caixa da peça, a altura (m, z do mundo) do primeiro ponto da malha acima de cada célula, por um
+    raio vertical de baixo para cima; NaN onde não há malha até ``h_max``. Devolve (alturas (ny,
+    nx), centro da célula [0, 0] (x, y)) ou None (peça toda acima de ``h_max``)."""
+    mn, mx = _world_bbox([part])
+    if mn.z > h_max or mx.x <= mn.x or mx.y <= mn.y:
+        return None
+    bvh = _world_bvh([part])
+    if bvh is None:
+        return None
+    nx = max(1, int(math.ceil((mx.x - mn.x) / cell)))
+    ny = max(1, int(math.ceil((mx.y - mn.y) / cell)))
+    x0 = (mn.x + mx.x) / 2 - (nx - 1) * cell / 2
+    y0 = (mn.y + mx.y) / 2 - (ny - 1) * cell / 2
+    z0 = min(-0.02, mn.z - 0.02)
+    up = mathutils.Vector((0.0, 0.0, 1.0))
+    reach = h_max - z0
+    out = np.full((ny, nx), np.nan)
+    for j in range(ny):
+        y = y0 + j * cell
+        for i in range(nx):
+            loc, _n, _k, _d = bvh.ray_cast(mathutils.Vector((x0 + i * cell, y, z0)), up, reach)
+            if loc is not None and loc.z <= h_max:
+                out[j, i] = loc.z
+    return out, (x0, y0)
+
+
+def contact_model(items_rt: list[dict], spec: dict) -> tuple[dict | None, list]:
+    """Modelo da sombra de contato (``frames.json["contact"]``, ``composite/contact.py``) na pose
+    final (chamar com a cena em repouso) e, por peça registrada, (rt, peça, M_repouso⁻¹) para as
+    poses de cada quadro (``contact_poses``). Só itens de piso."""
+    from mobilia.composite import contact as ct
+
+    recs, refs = [], []
+    for rt in items_rt:
+        it = rt["item"]
+        if it.get("mount", "floor") != "floor" or it.get("role") in CONTACT_SKIP_ROLES:
+            continue
+        for part in rt["parts"]:
+            try:
+                res = underside_heights(part, ct.CELL_M, ct.HEIGHT_MAX_M)
+            except ReferenceError:
+                continue
+            if res is None:
+                continue
+            rec = ct.part_record(f"{it['id']}/{part.name}", it["id"], res[1], ct.CELL_M, res[0])
+            if rec is None:
+                continue
+            recs.append(rec)
+            refs.append((rt, part, np.linalg.inv(np.asarray(part.matrix_world, np.float64))))
+    if not recs:
+        return None, []
+    meta = {"versao": ct.VERSION, "width": int(spec["width"]), "height": int(spec["height"]),
+            "camera": {"intrinsics": spec["intrinsics"], "cam_to_room": spec["cam_to_room"]},
+            "celula_m": ct.CELL_M, "altura_max_m": ct.HEIGHT_MAX_M, "pecas": recs}
+    return meta, refs
+
+
+def contact_poses(refs: list, f: int, fps: int) -> list:
+    """Poses das peças de piso visíveis no quadro f (a cena já em ``frame_set(f)``):
+    ``[peça, fade, D 3×4]`` com D = M_quadro · M_repouso⁻¹."""
+    from mobilia.composite import contact as ct
+
+    out = []
+    for k, (rt, part, inv_rest) in enumerate(refs):
+        pose = rt["plans"][part.name].pose((f - 1) / fps)
+        if not pose.visible or pose.fade <= ct.MIN_AMP:
+            continue
+        D = np.asarray(part.matrix_world, np.float64) @ inv_rest
+        out.append(ct.pose_record(k, pose.fade, D))
+    return out
+
+
 def _key_pose(part, rest, pose: "ch.Pose", s: float, f: int) -> None:
     part.location = (rest.x + pose.dx / s, rest.y + pose.dy / s, rest.z + pose.dz / s)
     part.rotation_euler = (pose.rx, pose.ry, pose.rz)
@@ -1442,6 +1522,17 @@ def main(spec_path: str) -> None:
     bake_animation(sc, items_rt, fps, n_frames)
     removed = _check_rest_support(items_rt, sc, n_frames)
     tempos["cena_montagem"] += time.perf_counter() - t
+    # silhuetas de baixo das peças de piso na pose final (a cena está em repouso no último quadro)
+    t = time.perf_counter()
+    contact, contact_refs = (None, [])
+    if spec["render"].get("contact_shadow", True):
+        sc.frame_set(n_frames)
+        bpy.context.view_layer.update()
+        contact, contact_refs = contact_model(items_rt, spec)
+    tempos["sombra_contato"] = time.perf_counter() - t          # informativo: já dentro de cena_montagem
+    tempos["cena_montagem"] += tempos["sombra_contato"]
+    if contact is not None:
+        emit(event="contact", **contact)
     emit(event="log", level="info", message=f"Cena montada: {len(items_rt)} itens, dispositivo {dev}")
 
     # --- render quadro a quadro
@@ -1450,7 +1541,8 @@ def main(spec_path: str) -> None:
     # EXR recortado no border (só os pixels renderizados vão ao disco)
     crop = bool(spec["render"].get("crop_to_border", True))
     meta = {"frames": [], "calibration": calib, "device": dev, "width": W, "height": H,
-            "removed_items": removed, "exr": {"recorte": crop, "codec": sc.render.image_settings.exr_codec}}
+            "removed_items": removed, "exr": {"recorte": crop, "codec": sc.render.image_settings.exr_codec},
+            "contact": contact}
     last_sig, last_src, last_border = None, None, None
     # Render incremental (só a região das peças em movimento) é EXPERIMENTAL: em testes
     # reduziu a área renderizada em ~14%, mas o sombreamento suave de peças junto à parede
@@ -1526,7 +1618,10 @@ def main(spec_path: str) -> None:
         name = f"f_{f:05d}.exr"
         t_prep = time.perf_counter() - t_it
         st = render_frame(sc, out_dir / "frames" / name, pass_out)
-        add_frame(meta, {"frame": f, "source": name, "border": border_px, "mode": mode, "crop": crop})
+        entry = {"frame": f, "source": name, "border": border_px, "mode": mode, "crop": crop}
+        if contact_refs:
+            entry["contato"] = contact_poses(contact_refs, f, fps)
+        add_frame(meta, entry)
         last_sig, last_src, last_border = sig, name, border_px
         done += 1
         area = max(0, border_px[2] - border_px[0]) * max(0, border_px[3] - border_px[1])

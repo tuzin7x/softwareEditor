@@ -324,3 +324,54 @@ def test_stream_calibration_from_frames_json_or_mismatch(tmp_path, capture):
     with pytest.raises(RuntimeError, match="calibração"):
         sc.finish({**meta, "calibration": calib})
     sc.abort()
+
+
+def test_stream_contact_shadow_like_recompose(tmp_path, capture):
+    """PT10: o modelo da sombra de contato chega pelo evento ``contact`` (``set_contact``) no fluxo e
+    pelo ``frames.json`` no ``recompor``; as poses vêm em cada quadro (``contato``). Os quadros saem
+    iguais nos dois caminhos, mudam em relação ao quadro sem sombra de contato e a placa continua
+    exata fora da influência (a verificação de cada quadro passa)."""
+    from test_compositor import _contact_meta, _pose
+
+    from mobilia.composite.stream import StreamComposer
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _job(tmp_path)
+    contact = _contact_meta(footprint=(3.0, 3.0), center=(0.0, 3.0), cell=0.03)
+    frames = [dict(fr, contato=_pose(0.02 * k)) if fr.get("source") and not fr.get("reused") else dict(fr)
+              for k, fr in enumerate(meta["frames"])]
+    meta = {**meta, "frames": frames, "contact": contact}
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "a.mp4", 12, 7, ProgressEmitter(), streaming=True,
+                        n_frames=len(frames), workers=2)
+    sc.set_contact(contact)
+    for fr in frames:
+        sc.push(dict(fr))
+    res = sc.finish(meta)
+    streamed = list(capture["frames"])
+    sumc = res["composicao"]["sombra_contato"]
+    assert sumc["aplicada"] is True and sumc["pecas"] == 1 and sumc["pixels_total"] > 0
+    assert res["preservacao"]["preservado_exato_todos"] is True
+    capture["frames"].clear()
+    StreamComposer(tmp_path, plate8, tmp_path / "b.mp4", 12, 7, ProgressEmitter(), n_frames=len(frames),
+                   contact=contact).finish(meta)
+    assert capture["frames"] == streamed
+    # worker sem o evento: vale o frames.json (nenhum quadro de móvel composto antes)
+    capture["frames"].clear()
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "c.mp4", 12, 7, ProgressEmitter(), streaming=True,
+                        n_frames=len(frames))
+    sc.push(dict(frames[0]))
+    sc.finish(meta)
+    assert capture["frames"] == streamed
+    # sem modelo (trabalho antigo): outro quadro, sem sombra de contato
+    capture["frames"].clear()
+    res0 = StreamComposer(tmp_path, plate8, tmp_path / "d.mp4", 12, 7, ProgressEmitter(),
+                          n_frames=len(frames)).finish({k: v for k, v in meta.items() if k != "contact"})
+    assert res0["composicao"]["sombra_contato"] == {"aplicada": False}
+    assert capture["frames"][0] == streamed[0] and capture["frames"][1] != streamed[1]
+    # quadros de móvel já compostos com outro modelo: erro
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "e.mp4", 12, 7, ProgressEmitter(), streaming=True)
+    for fr in frames[:3]:
+        sc.push(dict(fr))
+    with pytest.raises(RuntimeError, match="sombra de contato"):
+        sc.finish(meta)
+    sc.abort()

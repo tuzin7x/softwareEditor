@@ -270,7 +270,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             with vram.track("render"):
                 render_meta, proc = _run_render_worker(work / "scene.json", em, with_times=True,
                                                        on_frame=composer.push,
-                                                       on_calibration=composer.set_calibration)
+                                                       on_calibration=composer.set_calibration,
+                                                       on_contact=composer.set_contact)
             _blender_stages(sw, render_meta.get("telemetria") or {}, proc)
             # ------------------------------------------------------------ cauda da composição + vídeo
             # cada EXR é apagado assim que o último quadro que o usa vai para o codificador (PT4)
@@ -504,7 +505,7 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
     composer = StreamComposer(work, plate8, out_path, fps, seed, em, codec=codec, delete_exr=delete_exr,
                               workers=workers, sequential=any(fr.get("mode") == "incremental" for fr in frames),
                               n_frames=len(frames), last_use=last_use,
-                              calibration=render_meta.get("calibration"))
+                              calibration=render_meta.get("calibration"), contact=render_meta.get("contact"))
     try:
         for fr in frames:
             composer.push(fr)
@@ -579,7 +580,7 @@ def _blender_worker_command(spec_path: Path) -> list[str]:
 
 
 def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = False, on_frame=None,
-                       on_calibration=None):
+                       on_calibration=None, on_contact=None):
     """Roda o worker do Blender e devolve o ``frames.json``.
 
     Com ``with_times`` devolve também os instantes (``perf_counter`` deste processo) do
@@ -587,7 +588,8 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
     ``on_frame(entrada)`` recebe cada quadro anunciado (evento ``frame_ready``, na ordem do vídeo,
     com o EXR já completo no disco). Se ele levantar um erro (composição falhou), o Blender é
     encerrado na hora e o erro sobe. ``on_calibration(calibração)`` recebe a calibração da luz
-    (evento ``calibration``, sempre antes do primeiro quadro), com o ajuste do CG.
+    (evento ``calibration``, sempre antes do primeiro quadro), com o ajuste do CG. ``on_contact``
+    recebe o modelo da sombra de contato (evento ``contact``, também antes do primeiro quadro).
     """
     env = blender_worker_env()
     cmd = _blender_worker_command(spec_path)
@@ -607,7 +609,7 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
     th = threading.Thread(target=_drain_err, daemon=True)
     th.start()
     try:
-        meta_path = _read_worker_events(proc, em, times, on_frame, on_calibration)
+        meta_path = _read_worker_events(proc, em, times, on_frame, on_calibration, on_contact)
     except BaseException:
         if proc.poll() is None:
             proc.kill()
@@ -622,7 +624,8 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
     return (meta, times) if with_times else meta
 
 
-def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame, on_calibration=None) -> str | None:
+def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame, on_calibration=None,
+                        on_contact=None) -> str | None:
     """Lê os eventos JSON do worker até ele fechar a saída; devolve o caminho do ``frames.json``."""
     meta_path = None
     for line in proc.stdout:
@@ -652,6 +655,9 @@ def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame, on_cal
             em.log(calibration_log(ev))
             if on_calibration is not None:
                 on_calibration({k: v for k, v in ev.items() if k != "event"})
+        elif kind == "contact":
+            if on_contact is not None:
+                on_contact({k: v for k, v in ev.items() if k != "event"})
         elif kind == "log":
             em.log(ev.get("message", ""), ev.get("level", "info"))
         elif kind == "render_done":

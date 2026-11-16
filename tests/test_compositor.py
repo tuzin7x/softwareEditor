@@ -544,3 +544,272 @@ def test_tone_curve_identity_on_bad_fit():
     out = g.apply(C * A[..., None], A, [0, 0, 2, 2])
     unp = out[A > 0] / A[A > 0][:, None]
     assert np.allclose(unp, unp[0], atol=1e-6) and out[1, 1].sum() == 0
+
+
+# ---------------------------------------------------------------- PT10: sombra de contato analítica
+_CH, _CW = 120, 160
+
+
+def _contact_meta(footprint=(0.4, 0.4), center=(0.0, 2.6), heights=0.0, cell=0.02):
+    """Câmera a 1,5 m olhando +y, 35° para baixo; uma peça com a silhueta de baixo retangular."""
+    from mobilia.composite import contact as ct
+
+    a = np.radians(35.0)
+    x_c = np.array([1.0, 0.0, 0.0])
+    z_c = np.array([0.0, np.cos(a), -np.sin(a)])
+    y_c = np.cross(z_c, x_c)
+    M = np.eye(4)
+    M[:3, :3] = np.column_stack([x_c, y_c, z_c])
+    M[:3, 3] = [0.0, 0.0, 1.5]
+    intr = {"width": _CW, "height": _CH, "fx": 130.0, "fy": 130.0, "cx": _CW / 2, "cy": _CH / 2}
+    nx, ny = int(round(footprint[0] / cell)), int(round(footprint[1] / cell))
+    h = np.full((ny, nx), float(heights)) if np.isscalar(heights) else np.asarray(heights, float)
+    origin = (center[0] - (nx - 1) * cell / 2, center[1] - (ny - 1) * cell / 2)
+    rec = ct.part_record("peca/base", "peca", origin, cell, h)
+    return {"versao": 1, "width": _CW, "height": _CH, "camera": {"intrinsics": intr, "cam_to_room": M.tolist()},
+            "celula_m": cell, "altura_max_m": ct.HEIGHT_MAX_M, "pecas": [rec]}
+
+
+def _pose(dz=0.0, fade=1.0):
+    from mobilia.composite import contact as ct
+
+    D = np.eye(4)[:3]
+    D[2, 3] = dz
+    return [ct.pose_record(0, fade, D)]
+
+
+def _floor_plate():
+    rng = np.random.default_rng(5)
+    img = rng.integers(0, 256, size=(_CH, _CW, 3), dtype=np.uint8)
+    img[40:, :] = (170, 150, 130)                       # piso liso
+    return img
+
+
+def _project(meta, pts):
+    from mobilia.render.calibration import project_points
+
+    spec = {"cam_to_room": meta["camera"]["cam_to_room"], "intrinsics": meta["camera"]["intrinsics"]}
+    uv, z = project_points(spec, np.asarray(pts, float))
+    assert (z > 0).all()
+    return uv
+
+
+def test_contact_homography_matches_projection():
+    """A homografia piso→imagem é a mesma projeção da câmera usada no resto do motor; a silhueta
+    codificada volta igual (mm)."""
+    from mobilia.composite import contact as ct
+
+    meta = _contact_meta(heights=np.array([[0.0, 0.0123], [np.nan, 0.5996]]), footprint=(0.04, 0.04))
+    Hf = ct.floor_homography(meta["camera"]["intrinsics"], meta["camera"]["cam_to_room"])
+    P = np.array([[0.3, 2.0, 0.0], [-0.5, 3.4, 0.0], [0.0, 2.6, 0.0]])
+    q = np.column_stack([P[:, :2], np.ones(3)]) @ Hf.T
+    assert np.allclose(q[:, :2] / q[:, 2:], _project(meta, P), atol=1e-9)
+    h = ct.decode_heights(meta["pecas"][0]["alturas_mm"], 4)
+    assert h[0] == 0.0 and h[1] == 0.012 and np.isnan(h[2]) and h[3] == 0.6
+    m = ct.ContactModel.from_meta(meta)
+    assert m.n_parts == 1 and len(m.parts[0].pts) == 3
+
+
+def test_contact_shadow_inside_influence_only():
+    """PT10: a sombra de contato escurece o piso junto à base, mas só dentro da região de
+    influência dos móveis. Uma silhueta enorme (4 m × 4 m, cobrindo quase todo o piso da imagem)
+    junto de um móvel pequeno: fora da máscara independente de ``verify.py`` o quadro continua a
+    foto byte a byte."""
+    from mobilia.composite import contact as ct
+    from mobilia.composite.verify import MARGIN_PX, influence_mask, outside_mask_equal
+
+    plate8 = _floor_plate()
+    meta = _contact_meta(footprint=(4.0, 4.0), center=(0.0, 3.0), cell=0.04)
+    model = ct.ContactModel.from_meta(meta)
+    # a oclusão sozinha cobre boa parte do piso da imagem
+    c = model.occlusion(_pose(), [0, 0, _CW, _CH])
+    assert (c > 0.5).mean() > 0.3
+    # móvel pequeno no meio do piso
+    rgba = np.zeros((_CH, _CW, 4), np.float32)
+    rgba[70:84, 72:88, :3] = 0.2
+    rgba[70:84, 72:88, 3] = 1.0
+    comp = Compositor(plate8, CompositeSettings(grain_strength=0.0))
+    base, _ = comp.composite(3, rgba, None, None)
+    out, st = comp.composite(3, rgba, None, None, contact=model.frame(_pose()))
+    assert st.preserved_exact and st.contact_pixels > 0
+    mask = influence_mask(rgba[..., 3], (0, 0), (_CH, _CW), comp.influence_px + MARGIN_PX)
+    ok, n_bad, _ = outside_mask_equal(out, plate8, mask)
+    assert ok and n_bad == 0
+    assert not mask.all() and (c[~mask] > 0.5).any()      # havia sombra a aplicar fora da máscara
+    # dentro da influência, o piso junto ao móvel escureceu em relação ao quadro sem contato
+    near = (slice(84, 90), slice(70, 90))
+    assert out[near].astype(float).mean() < base[near].astype(float).mean() - 20
+    # o móvel em si não muda (alfa 1: a sombra só multiplica a foto atrás dele)
+    assert np.array_equal(out[71:83, 73:87], base[71:83, 73:87])
+    # força 0: exatamente o quadro sem sombra de contato
+    off = Compositor(plate8, CompositeSettings(grain_strength=0.0, contact_strength=0.0))
+    o0, _ = off.composite(3, rgba, None, None, contact=model.frame(_pose()))
+    assert np.array_equal(o0, base)
+
+
+def test_contact_shadow_fades_with_height():
+    """Peça subindo/caindo: colada no piso a linha é escura e estreita; quanto mais alta, mais
+    fraca e larga; invisível (fade 0) não faz sombra."""
+    from mobilia.composite import contact as ct
+
+    meta = _contact_meta(footprint=(0.3, 0.3), center=(0.0, 2.6), cell=0.015)
+    # o campo lido num quadro 4× maior (≈ 0,5 cm por pixel no piso): a câmera escala junto
+    big = ct.ContactModel(meta, (4 * _CH, 4 * _CW))
+    # pixel do piso na borda da base e um a 12 cm dela
+    uv = 4 * _project(meta, [[0.0, 2.6 - 0.15 - 0.0075, 0.0], [0.0, 2.6 - 0.15 - 0.12, 0.0]])
+    box = [0, 0, 4 * _CW, 4 * _CH]
+    near, far, peak = [], [], []
+    for dz in (0.0, 0.05, 0.15, 0.35, 0.6):
+        c = big.occlusion(_pose(dz), box)
+        near.append(float(c[int(uv[0, 1]), int(uv[0, 0])]))
+        far.append(float(c[int(uv[1, 1]), int(uv[1, 0])]))
+        peak.append(float(c.max()))
+    assert all(a > b for a, b in zip(peak, peak[1:])), peak
+    assert peak[0] > 0.9 and peak[-1] < 0.1
+    assert near[0] > near[2] > near[-1]
+    # subindo, a sombra alarga: a 12 cm da base ela só aparece com a peça no alto (desfoque maior)
+    assert far[0] < 0.005 and max(far[1:4]) > far[0] + 0.01, far
+    # fade: proporcional; invisível não conta
+    model = ct.ContactModel.from_meta(meta)
+    box = [0, 0, _CW, _CH]
+    c1 = model.occlusion(_pose(0.0, 1.0), box)
+    c5 = model.occlusion(_pose(0.0, 0.5), box)
+    assert c5.max() < c1.max() and model.occlusion(_pose(0.0, 0.0), box) is None
+    assert model.frame([]) is None
+    # na composição: mais escuro com a peça no piso que no alto
+    plate8 = _floor_plate()
+    rgba = np.zeros((_CH, _CW, 4), np.float32)
+    corners = _project(meta, [[x, y, 0.0] for x in (-0.15, 0.15) for y in (2.45, 2.75)])
+    x0, y0 = np.floor(corners.min(0)).astype(int)
+    x1, y1 = np.ceil(corners.max(0)).astype(int)
+    rgba[y0 - 12:y0 + 2, x0:x1, :3] = 0.3                  # o corpo da peça logo acima da base
+    rgba[y0 - 12:y0 + 2, x0:x1, 3] = 1.0
+    comp = Compositor(plate8, CompositeSettings(grain_strength=0.0))
+    ring = (slice(y1 - 1, y1 + 4), slice(x0, x1))
+    lum = []
+    for dz in (0.0, 0.15, 0.6):
+        out, st = comp.composite(1, rgba, None, None, contact=model.frame(_pose(dz)))
+        assert st.preserved_exact
+        lum.append(out[ring].astype(float).mean())
+    assert lum[0] < lum[1] < lum[2] <= plate8[ring].astype(float).mean() + 1e-9
+
+
+def test_contact_shadow_follows_part_motion():
+    """A silhueta segue a matriz da peça (deslize lateral): a sombra anda junto, e abaixo do piso
+    (surgir do chão) conta como encostada."""
+    from mobilia.composite import contact as ct
+
+    meta = _contact_meta(footprint=(0.3, 0.3), center=(0.0, 2.6), cell=0.015)
+    model = ct.ContactModel.from_meta(meta)
+    D = np.eye(4)[:3]
+    D[0, 3] = 0.5
+    box = [0, 0, _CW, _CH]
+    c0 = model.occlusion(_pose(), box)
+    c1 = model.occlusion([ct.pose_record(0, 1.0, D)], box)
+    u0 = (c0.sum(0) * np.arange(_CW)).sum() / c0.sum()
+    u1 = (c1.sum(0) * np.arange(_CW)).sum() / c1.sum()
+    assert u1 > u0 + 10
+    below = model.occlusion(_pose(-0.2), box)
+    assert np.allclose(below, c0)
+
+
+_CONTACT_SCRIPT = r'''
+import json, sys
+import bpy, mathutils
+import numpy as np
+from mobilia.render import blender_worker as bw
+from mobilia.render import choreography as ch
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+sc = bpy.context.scene
+
+def box(name, size, loc):
+    bpy.ops.mesh.primitive_cube_add(size=1, location=loc)
+    o = bpy.context.object
+    o.name = name
+    o.scale = size
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    return o
+
+def item(iid, role, mount, parts, pos):
+    root = bpy.data.objects.new(iid, None)
+    sc.collection.objects.link(root)
+    for p in parts:
+        p.parent = root
+        p["rest_location"] = list(p.location)
+    root.location = pos
+    it = {"id": iid, "role": role, "mount": mount, "start": 0.5, "duration": 1.0, "size": [0.8, 0.5, 0.44]}
+    plans = {p.name: p2 for p, p2 in zip(parts, ch.plan_parts(it, [p.name for p in parts]))}
+    return {"item": it, "root": root, "parts": parts, "plans": plans}
+
+legs = [box(f"mesa_leg{i}", (0.04, 0.04, 0.4), (sx * 0.35, sy * 0.2, 0.2))
+        for i, (sx, sy) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)])]
+top = box("mesa_top", (0.8, 0.5, 0.04), (0.0, 0.0, 0.42))
+rts = [item("mesa", "coffee_table", "floor", legs + [top], (1.0, 2.0, 0.0)),
+       item("quadro", "wall_art", "wall", [box("quadro_tela", (0.5, 0.02, 0.4), (0, 0, 0))], (0, 3, 1.2)),
+       item("tapete", "rug", "floor", [box("tapete_base", (2.0, 1.4, 0.01), (0, 0, 0.005))], (1, 2, 0))]
+fps, n = 24, 72
+bw.bake_animation(sc, rts, fps, n)
+sc.frame_set(n)
+bpy.context.view_layer.update()
+a = np.radians(35.0)
+x_c, z_c = np.array([1.0, 0, 0]), np.array([0, np.cos(a), -np.sin(a)])
+M = np.eye(4)
+M[:3, :3] = np.column_stack([x_c, np.cross(z_c, x_c), z_c])
+M[:3, 3] = [1.0, 0.0, 1.5]
+spec = {"width": 160, "height": 120, "intrinsics": {"fx": 130, "fy": 130, "cx": 80, "cy": 60},
+        "cam_to_room": M.tolist()}
+meta, refs = bw.contact_model(rts, spec)
+rest = bw.contact_poses(refs, n, fps)
+f_mid = 16                                  # queda da base em andamento
+sc.frame_set(f_mid)
+bpy.context.view_layer.update()
+mid = bw.contact_poses(refs, f_mid, fps)
+dz = [rts[0]["plans"][p.name].pose((f_mid - 1) / fps).dz for p, _ in [(r[1], 0) for r in refs]]
+print("RESULT:" + json.dumps({"meta": meta, "rest": rest, "mid": mid, "dz": dz}))
+'''
+
+
+@pytest.mark.skipif(__import__("importlib").util.find_spec("bpy") is None, reason="bpy não está instalado")
+def test_worker_contact_model_records_floor_parts(tmp_path):
+    """Worker (bpy real): a silhueta de baixo das peças de piso vai para o modelo (pés colados no
+    piso; tampo a 0,40 m), quadro e tapete ficam de fora, e a pose de cada quadro é a matriz da
+    peça relativa ao repouso (identidade no repouso, a queda da animação no meio)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    from mobilia.composite import contact as ct
+
+    repo = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run([sys.executable, "-c", textwrap.dedent(_CONTACT_SCRIPT), str(tmp_path)],
+                          cwd=repo, env=env, capture_output=True, text=True, timeout=600)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT:")]
+    assert proc.returncode == 0 and lines, proc.stderr[-3000:]
+    res = json.loads(lines[-1][len("RESULT:"):])
+    meta = res["meta"]
+    ids = [p["id"] for p in meta["pecas"]]
+    assert sorted(i.split("/")[1] for i in ids) == ["mesa_leg0", "mesa_leg1", "mesa_leg2", "mesa_leg3", "mesa_top"]
+    model = ct.ContactModel.from_meta(meta)
+    for rec, part in zip(meta["pecas"], model.parts):
+        z = part.pts[:, 2]
+        if rec["id"].endswith("top"):
+            assert abs(z.min() - 0.40) < 0.002 and len(z) >= 0.9 * (0.8 / ct.CELL_M) * (0.5 / ct.CELL_M)
+        else:
+            assert abs(z.max()) < 0.002 and 4 <= len(z) <= 16
+            assert abs(part.pts[:, 0].mean() - (1.0 + np.sign(part.pts[:, 0].mean() - 1.0) * 0.35)) < 0.01
+    ident = np.array(ct.IDENTITY)
+    assert len(res["rest"]) == 5 and all(np.allclose(r[2:], ident, atol=1e-5) and r[1] == 1.0 for r in res["rest"])
+    assert res["mid"]
+    lift = []
+    for r in res["mid"]:
+        pts = model.parts[r[0]].pts
+        moved = pts @ np.array(r[2:]).reshape(3, 4).T
+        lift.append(float((moved[:, 2] - pts[:, 2]).mean()))
+        assert abs(lift[-1] - res["dz"][r[0]]) < 0.01, (lift[-1], res["dz"][r[0]])
+    assert max(lift) > 0.05

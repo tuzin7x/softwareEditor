@@ -326,6 +326,31 @@ A/B na sala de teste a 640 px / 24 amostras em CPU (`docs/poc/v2/pt8_ab_sala_640
 `pt8_ab_detalhe.jpg`) e uma sala branca sintética com 78% das superfícies estouradas
 (`pt8_sala_clara_640.jpg`). Custo do ajuste: ~0,06–0,12 s por quadro com 1 MP de CG.
 
+**Sombra de contato analítica (PT10, `composite/contact.py`).** A emissão da foto suaviza a sombra
+do shadow catcher e some a linha escura onde o móvel encosta no piso. Ela volta sem segunda camada
+de render:
+- **No worker**, depois de montar a cena (pose final), cada peça de um item de piso (menos tapete e
+  cortina) ganha a "silhueta ortográfica de baixo": numa grade de 1,5 cm sob a peça, a altura do
+  primeiro ponto da malha (raio vertical de baixo para cima, BVH), até 0,6 m. Pés e bases ficam a
+  0 m, o fundo do sofá a ~0,15 m; tampos altos ficam de fora. Vai para `frames.json["contact"]`
+  (alturas em mm, base64), com a câmera, e para o evento `contact` antes do primeiro quadro.
+  Custo: ~0,1 s na sala de teste.
+- **Em cada quadro renderizado**, `entry["contato"]` traz `[peça, fade, D]` das peças visíveis, com
+  `D = M_quadro · M_repouso⁻¹`: a silhueta segue qualquer movimento (queda, giro, deslize, surgir
+  do chão; abaixo do piso conta como no piso).
+- **Na composição**, cada ponto pesa `fade · 1/(1 + (h/0,10 m)²)` e é desfocado por
+  `σ = 1,2 cm + 0,5·h` (faixas de altura), numa grade do piso; o campo é lido em cada pixel pela
+  homografia piso→imagem. Entra como `S' = S · (1 − k·c)`, k = 0,65, **antes** do peso da região de
+  influência: fora da vizinhança dos móveis o peso é 0 e a placa continua byte a byte a foto
+  (verificação independente de cada quadro inalterada; testado com uma silhueta maior que a
+  região de influência). Peça subindo: linha mais fraca e mais larga; no alto, nada.
+- Limite: a sombra só escurece a **foto**. Sobre um tapete renderizado (CG) a linha não aparece;
+  ali vale a sombra do próprio render. `render.contact_shadow: false` no `scene.json` desliga.
+- `report.json`: `composicao.sombra_contato` (`aplicada`, `pecas`, `forca`, `pixels_total`).
+- Validação em CPU (sala de teste, 640 px, 24 amostras): quadro final + 3 quadros da queda do sofá,
+  todos byte a byte iguais à foto fora da máscara de influência; `docs/poc/v2/pt10_contato_detalhe.jpg`
+  (sem/com) e `pt10_queda_sofa.jpg`. Custo na composição: ~0,06 s por quadro a 640 px com 9 peças.
+
 **Casamento com a câmera:**
 
 - Grão do sensor: o ruído estimado nas regiões planas da foto é aplicado **só** sobre o CG, com um
@@ -416,7 +441,8 @@ A melhoria sugerida por essa pesquisa — material de catcher com `Light Path �
   render/calib_pred.npy   predição da sala vazia com a luz final (base do ajuste do CG)
   render/frames/*.exr     camadas 3D (Combined + Shadow Catcher) por quadro renderizado, recortadas
                           no border; apagadas depois da composição (MOBILIA_MANTER_EXR=1 mantém)
-  render/frames.json      mapa quadro → render/border/reuso + calibração + telemetria do worker
+  render/frames.json      mapa quadro → render/border/reuso (+ poses da sombra de contato) + calibração
+                          + silhuetas de contato + telemetria do worker
   quadros/*.jpg           prévias de quadros compostos
   report.json             preservação, PSNR do encode, telemetria completa (tempos, GPU, render)
   encode.log, interface.log  registros do FFmpeg e da saída do motor (vão no zip de diagnóstico)

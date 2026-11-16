@@ -173,6 +173,8 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     assert cl["fracao_limite_inferior"] == pytest.approx(0.025)
     assert c["ajuste_cg"] == {"aplicado": True, "mapa_ganho": "mapa", "curva_tom": False, "joelho": 0.8}
     assert any(e["event"] == "log" and "ganho do CG: mapa" in e["message"] for e in events)
+    # PT10: o modelo da sombra de contato chegou no evento ``contact`` e as poses em cada quadro
+    assert c["sombra_contato"]["aplicada"] is True and c["sombra_contato"]["pecas"] == 1
     # a cena manda a máscara de calibração de 3 níveis e as manchas de sol da foto ao worker
     spec = json.loads((tmp_path / "job" / "scene.json").read_text(encoding="utf-8"))
     assert spec["lighting"]["photo_emission"] is True
@@ -238,6 +240,7 @@ def test_fast_pipeline_worker_without_frame_events(tmp_path, monkeypatch):
     rep = json.loads(Path(pipeline.run_job(req, ProgressEmitter()).report_path).read_text(encoding="utf-8"))
     c, q = rep["composicao"], rep["render"]["quadros"]
     assert c["compostos_durante_render"] == 0 and c["quadros_compostos"] == q["renderizados"]
+    assert c["sombra_contato"]["aplicada"] is True          # do frames.json (sem eventos de quadro)
     assert rep["preservacao"]["preservado_exato_todos"] is True
     assert rep["preservacao"]["quadros_verificados"] == q["total"]
 

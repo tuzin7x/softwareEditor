@@ -54,6 +54,25 @@ def blender_warmup(out_dir: str) -> int:
     return 0
 
 
+def _contact(spec: dict, uv) -> dict | None:
+    """Modelo da sombra de contato com uma base quadrada no ponto do piso sob o pixel ``uv``."""
+    import numpy as np
+
+    from mobilia.composite import contact as ct
+
+    if not spec.get("cam_to_room") or not spec.get("intrinsics"):
+        return None
+    Hf = ct.floor_homography(spec["intrinsics"], spec["cam_to_room"])
+    q = np.linalg.inv(Hf) @ np.array([uv[0], uv[1], 1.0])
+    if q[2] <= 0:
+        return None
+    x, y = q[0] / q[2], q[1] / q[2]
+    rec = ct.part_record("movel/base", "movel", (x - 0.15, y - 0.15), 0.03, np.zeros((11, 11)))
+    return {"versao": ct.VERSION, "width": int(spec["width"]), "height": int(spec["height"]),
+            "camera": {"intrinsics": spec["intrinsics"], "cam_to_room": spec["cam_to_room"]},
+            "celula_m": 0.03, "altura_max_m": ct.HEIGHT_MAX_M, "pecas": [rec]}
+
+
 def blender(spec_path: str) -> int:
     import numpy as np
 
@@ -87,6 +106,10 @@ def blender(spec_path: str) -> int:
     layer_s = {"final": 0.0, "marco": 0.0, "dinamico": 0.0}
     side = max(8, W // 6)
     stop_at = 12
+    # sombra de contato (PT10): uma base de 30 cm no piso sob a posição final do "móvel"
+    contact = _contact(spec, (stop_at * (W - side) // (2 * stop_at) + side / 2, H // 3 + side + 2))
+    if contact is not None:
+        _emit(event="contact", **contact)
     last = None
     for f in range(1, n + 1):
         if f <= 4:
@@ -112,7 +135,12 @@ def blender(spec_path: str) -> int:
         camada = "dinamico" if f < stop_at else "final"
         layer_s[camada] += wall
         area = (border[2] - border[0]) * (border[3] - border[1])
-        _add_frame(frames, {"frame": f, "source": name, "border": border, "mode": "full", "crop": True})
+        entry = {"frame": f, "source": name, "border": border, "mode": "full", "crop": True}
+        if contact is not None:
+            D = np.eye(4)[:3]
+            D[0, 3] = (x - stop_at * (W - side) // (2 * stop_at)) * 0.005
+            entry["contato"] = [[0, 1.0] + [float(v) for v in D.ravel()]]
+        _add_frame(frames, entry)
         por_quadro.append({"quadro": f, "camada": camada, "itens": 1, "pecas_em_movimento": int(f < stop_at),
                            "area_px": area, "cobertura": round(area / (W * H), 4), "spp": 8, "amostras": 8,
                            "amostragem_s": round(wall * 0.6, 4), "denoise_s": round(wall * 0.2, 4),
@@ -127,6 +155,7 @@ def blender(spec_path: str) -> int:
     meta = {"frames": frames, "calibration": calib,
             "device": "CPU", "width": W, "height": H, "removed_items": [],
             "exr": {"recorte": True, "codec": "RLE"}, "passes": ["Combined", "Shadow Catcher"],
+            "contact": contact,
             "timings": {"total_s": round(time.perf_counter() - t0, 1), "rendered_frames": len(por_quadro)},
             "telemetria": {"dispositivo": "CPU", "optix": False, "gpus": [], "threads": 4, "blender": "dublê",
                            "denoiser": "OPENIMAGEDENOISE", "denoiser_dispositivo": "CPU",

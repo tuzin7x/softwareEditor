@@ -13,6 +13,9 @@ do Blender o anuncia (evento ``frame_ready``), enquanto a GPU ainda renderiza os
 - O ajuste do CG da calibração da luz (mapa de ganho, curva de tom, joelho: ``grade.py``) chega no
   evento ``calibration`` do worker, antes do primeiro quadro (``set_calibration``); o ``recompor``
   o lê do ``frames.json``. Cada quadro usa o ajuste vigente quando foi entregue.
+- A sombra de contato (PT10, ``contact.py``) usa o modelo das silhuetas de baixo (evento ``contact``
+  do worker ou ``frames.json["contact"]``, ``set_contact``) e as poses de cada quadro
+  (``entry["contato"]``).
 - No fim, a verificação do MP4 decodifica só o início, o meio e o fim, por *seek*.
 
 O mesmo caminho serve ao ``recompor`` (todos os quadros entregues de uma vez, sem render).
@@ -33,6 +36,7 @@ from PIL import Image
 
 from ..video.encoder import EncodeSettings, VideoWriter, psnr, seek_frames
 from .compositor import CompositeSettings, Compositor, FrameStats, LayerAccumulator, load_layers, load_render_passes
+from .contact import ContactModel
 from .grade import CGGrade
 from .verify import MARGIN_PX, TILE_PX, influence_mask, outside_mask_equal
 
@@ -84,7 +88,7 @@ class StreamComposer:
     def __init__(self, work: str | Path, plate8: np.ndarray, out_path: str | Path, fps: int, seed: int, em,
                  *, codec: str = "libx264", delete_exr: bool = False, workers: int | None = None,
                  sequential: bool = False, n_frames: int | None = None, last_use: dict | None = None,
-                 streaming: bool = False, calibration: dict | None = None):
+                 streaming: bool = False, calibration: dict | None = None, contact: dict | None = None):
         self.t0 = time.perf_counter()
         self.work = Path(work)
         self.frames_dir = self.work / "render" / "frames"
@@ -114,6 +118,11 @@ class StreamComposer:
         self._calib: dict | None = None
         self._grade_fut: Future = Future()
         self._grade_fut.set_result(None)
+        # sombra de contato (PT10): sem modelo, nenhuma
+        self._contact_meta: dict | None = None
+        self._contact_fut: Future = Future()
+        self._contact_fut.set_result(None)
+        self._contact_px = 0
         self.settings = EncodeSettings(codec=codec)
         self._enc = VideoWriter(out_path, self.W, self.H, self.fps, self.settings,
                                 log_path=self.work / "encode.log")
@@ -150,6 +159,8 @@ class StreamComposer:
         self._writer.start()
         if calibration is not None:
             self.set_calibration(calibration)
+        if contact is not None:
+            self.set_contact(contact)
         self.t_setup = time.perf_counter() - self.t0
 
     # ------------------------------------------------------------------ entrada
@@ -164,6 +175,13 @@ class StreamComposer:
     @property
     def calibration(self) -> dict | None:
         return self._calib
+
+    def set_contact(self, meta: dict | None) -> None:
+        """Modelo da sombra de contato (``frames.json["contact"]`` ou o evento ``contact`` do
+        worker): vale para os quadros entregues depois desta chamada."""
+        with self._cond:
+            self._contact_meta = dict(meta) if meta else None
+            self._contact_fut = self._pool.submit(ContactModel.from_meta, self._contact_meta, (self.H, self.W))
 
     def push(self, entry: dict) -> None:
         """Entrega o próximo quadro do vídeo (entrada do ``frames.json``). Bloqueia quando há
@@ -187,7 +205,7 @@ class StreamComposer:
                     while self._inflight >= self._max_inflight and self._error is None:
                         self._cond.wait()
                     self._raise_if_failed()
-                    fut = self._pool.submit(self._compose_source, entry, self._grade_fut)
+                    fut = self._pool.submit(self._compose_source, entry, self._grade_fut, self._contact_fut)
                     self._cache[src] = fut
                     self._inflight += 1
                     item = _Item(pos, entry, "novo", src, fut)
@@ -202,10 +220,12 @@ class StreamComposer:
         self._t_plate = time.perf_counter() - t
         return comp
 
-    def _compose_source(self, entry: dict, grade_fut: Future) -> dict:
+    def _compose_source(self, entry: dict, grade_fut: Future, contact_fut: Future | None = None) -> dict:
         t0 = time.perf_counter()
         comp = self._comp_fut.result()
         grade = grade_fut.result()
+        model = contact_fut.result() if contact_fut is not None else None
+        contact = model.frame(entry.get("contato")) if model is not None else None
         t1 = time.perf_counter()
         path = self.frames_dir / entry["source"]
         border = entry.get("border")
@@ -213,12 +233,13 @@ class StreamComposer:
             rgba, sh = load_render_passes(path, border, (self.H, self.W))
             t2 = time.perf_counter()
             self._acc.update(rgba, sh, border, entry.get("mode", "full"))
-            out8, st = comp.composite(entry["frame"], self._acc.rgba, self._acc.shadow, None, grade=grade)
+            out8, st = comp.composite(entry["frame"], self._acc.rgba, self._acc.shadow, None, grade=grade,
+                                      contact=contact)
             alpha, origin = self._acc.rgba[..., 3], (0, 0)
         else:
             rgba, sh, origin = load_layers(path, border, (self.H, self.W), self.shadow_feather)
             t2 = time.perf_counter()
-            out8, st = comp.composite(entry["frame"], rgba, sh, None, origin=origin, grade=grade)
+            out8, st = comp.composite(entry["frame"], rgba, sh, None, origin=origin, grade=grade, contact=contact)
             alpha = rgba[..., 3]
         t3 = time.perf_counter()
         # verificação independente: fora da máscara de influência, os bytes da foto
@@ -301,6 +322,7 @@ class StreamComposer:
                "recorte_composicao_px": _area(st.box) if new else 0}
         self.per_frame.append(rec)
         if new:
+            self._contact_px += int(getattr(st, "contact_pixels", 0) or 0)
             self._tot["leitura"] += res["leitura_s"]
             self._tot["composicao"] += res["composicao_s"]
             self._tot["verificacao"] += res["verificacao_s"]
@@ -398,6 +420,11 @@ class StreamComposer:
                 if any(fr.get("source") for fr in pushed):
                     raise RuntimeError("A calibração do frames.json não é a que o worker anunciou antes dos quadros.")
                 self.set_calibration(cal_meta)        # worker sem o evento: vale o arquivo
+            con_meta = render_meta.get("contact")
+            if con_meta and _canon(con_meta) != _canon(self._contact_meta):
+                if any(fr.get("source") for fr in pushed):
+                    raise RuntimeError("A sombra de contato do frames.json não é a que o worker anunciou antes dos quadros.")
+                self.set_contact(con_meta)
             for fr in frames[len(pushed):]:
                 self.push(fr)
         n = len(self._pushed)
@@ -453,6 +480,14 @@ class StreamComposer:
             return {"aplicado": False}
         return {"aplicado": True, **g.describe()}
 
+    def _contact_summary(self) -> dict:
+        f = self._contact_fut
+        m = f.result() if f.done() and f.exception() is None else None
+        if m is None:
+            return {"aplicada": False}
+        return {"aplicada": True, "pecas": m.n_parts, "forca": CompositeSettings().contact_strength,
+                "pixels_total": self._contact_px}
+
     def _result(self, tail0, t_drained, t_close, t_done, verify_s, check) -> dict:
         W, H = self.W, self.H
         per_frame = self.per_frame
@@ -502,6 +537,7 @@ class StreamComposer:
                 "exr_apagados": self._exr["apagados"],
                 "exr_bytes_apagados": self._exr["bytes"],
                 "ajuste_cg": self._grade_summary(),
+                "sombra_contato": self._contact_summary(),
                 "por_quadro": per_frame,
             },
             "preservacao": {
