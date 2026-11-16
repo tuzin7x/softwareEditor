@@ -14,4 +14,6 @@ shapely
 OpenEXR
 imageio-ffmpeg
 nvidia-ml-py
-moge @ git+https://github.com/microsoft/MoGe.git
+tqdm
+# MoGe-2 e utils3d_moge: instalados à parte, sem dependências, por runtime-nodeps.txt
+# (ZIP com commit fixo: não exige Git no computador do cliente).

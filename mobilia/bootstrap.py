@@ -12,7 +12,13 @@ O executável (.exe) é leve — só a interface. Na primeira execução este m�
    funciona offline.
 
 Cada etapa concluída é gravada em ``setup_state.json``: se a internet cair, a próxima
-tentativa continua de onde parou. Usa só a biblioteca padrão (roda dentro do .exe).
+tentativa continua de onde parou.
+
+Atualizações: o estado guarda uma impressão digital (SHA-256) do código ``mobilia`` e dos
+``requirements`` que vieram no .exe. Ao instalar um .exe novo, só as etapas cujo conteúdo mudou são
+refeitas — em geral, apenas a cópia do motor (segundos); o pip só roda de novo se as dependências
+mudaram, e mesmo assim baixa apenas o que é diferente. PyTorch, Blender e os modelos não são
+baixados de novo. Usa só a biblioteca padrão (roda dentro do .exe).
 """
 from __future__ import annotations
 
@@ -93,6 +99,36 @@ def pending_steps(state: dict) -> list[str]:
     return [s for s in STEPS if s not in state.get("done", [])]
 
 
+def fingerprint(root: Path, skip: tuple[str, ...] = ("__pycache__",)) -> str:
+    """SHA-256 dos caminhos relativos e do conteúdo dos arquivos sob ``root`` (ordem estável)."""
+    h = hashlib.sha256()
+    if not root.exists():
+        return ""
+    for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        rel = f.relative_to(root).as_posix()
+        if any(part in skip for part in rel.split("/")) or f.suffix in (".pyc", ".pyo"):
+            continue
+        h.update(rel.encode("utf-8") + b"\0")
+        h.update(f.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def payload_fingerprints(payload: Path) -> dict[str, str]:
+    """Impressões digitais do que vem no .exe: o código do motor e as dependências fixadas."""
+    return {"app": fingerprint(payload / "mobilia", skip=("__pycache__", "ui")),
+            "dependencias": fingerprint(payload / "requirements")}
+
+
+def sync_with_payload(state: dict, fps: dict[str, str]) -> dict:
+    """Marca como pendentes as etapas cujo conteúdo mudou desde a última instalação (atualização)."""
+    done = state.get("done", [])
+    for step, fp in fps.items():
+        if fp and step in done and state.get("hashes", {}).get(step) != fp:
+            done.remove(step)
+    state["done"] = done
+    return state
+
+
 def has_nvidia_driver() -> bool:
     """Verifica o driver NVIDIA sem PyTorch (nvidia-smi vem com o driver)."""
     exe = shutil.which("nvidia-smi") or (r"C:\Windows\System32\nvidia-smi.exe" if os.name == "nt" else None)
@@ -162,8 +198,9 @@ def install(progress: Progress, paths: runtime.RuntimePaths | None = None, force
     paths = paths or runtime.runtime_paths()
     paths.runtime.mkdir(parents=True, exist_ok=True)
     paths.logs_dir.mkdir(parents=True, exist_ok=True)
-    state = load_state(paths.state_file)
     payload = runtime.payload_root()
+    fps = payload_fingerprints(payload)
+    state = sync_with_payload(load_state(paths.state_file), fps)
     log = open(paths.logs_dir / "instalacao.log", "a", encoding="utf-8")
     try:
         for step in pending_steps(state):
@@ -188,8 +225,11 @@ def install(progress: Progress, paths: runtime.RuntimePaths | None = None, force
                 gpu = has_nvidia_driver() and not force_cpu
                 req = payload / "requirements" / ("runtime-cuda.txt" if gpu else "runtime-cpu.txt")
                 state["variant"] = "cuda" if gpu else "cpu"
-                _run([str(paths.python_exe), "-m", "pip", "install", "--no-warn-script-location",
-                      "--disable-pip-version-check", "-r", str(req)], progress, step, log=log)
+                pip = [str(paths.python_exe), "-m", "pip", "install", "--no-warn-script-location",
+                       "--disable-pip-version-check"]
+                _run(pip + ["-r", str(req)], progress, step, log=log)
+                _run(pip + ["--no-deps", "-r", str(payload / "requirements" / "runtime-nodeps.txt")],
+                     progress, step, log=log)
             elif step == "app":
                 if paths.app_dir.exists():
                     shutil.rmtree(paths.app_dir)
@@ -200,6 +240,8 @@ def install(progress: Progress, paths: runtime.RuntimePaths | None = None, force
                 _run(runtime.worker_command(["prefetch", "--json"], frozen=True, paths=paths), progress, step,
                      env=env, log=log)
             state.setdefault("done", []).append(step)
+            if step in fps:
+                state.setdefault("hashes", {})[step] = fps[step]
             save_state(paths.state_file, state)
             progress(step, 1.0, STEP_LABELS[step] + " — concluído")
         shutil.rmtree(paths.downloads, ignore_errors=True)
@@ -209,7 +251,8 @@ def install(progress: Progress, paths: runtime.RuntimePaths | None = None, force
 
 def runtime_ready(paths: runtime.RuntimePaths | None = None) -> bool:
     paths = paths or runtime.runtime_paths()
-    return paths.python_exe.exists() and not pending_steps(load_state(paths.state_file))
+    state = sync_with_payload(load_state(paths.state_file), payload_fingerprints(runtime.payload_root()))
+    return paths.python_exe.exists() and not pending_steps(state)
 
 
 def sha256(path: Path) -> str:
