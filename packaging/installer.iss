@@ -1,5 +1,13 @@
-; Instalador Inno Setup 6 (por usuário, sem UAC). Gerar com: iscc packaging\installer.iss
-#define AppName "Mobília Studio"
+﻿; Instalador Inno Setup 6 do 7xAi (por usuário, sem UAC). Opcional: serve para instalar em OUTROS PCs.
+; (No PC onde o GERAR_EXE.bat roda, o build_windows.ps1 já instala o 7xAi e cria o atalho sozinho.)
+; Gerar com: iscc packaging\installer.iss   ->   dist\7xAi-Setup-<versão>.exe
+; Arquivo salvo em UTF-8 com BOM: o Inno Setup só lê os acentos corretamente assim.
+;
+; O AppId é o mesmo da época do nome "Mobília Studio": o Windows trata como atualização do mesmo
+; programa. Os dados (motor de IA de vários GB, modelos e trabalhos) continuam em
+; %LOCALAPPDATA%\MobiliaStudio de propósito, para não baixar tudo de novo.
+#define AppName "7xAi"
+#define ExeName "7xAi.exe"
 #ifndef AppVersion
   #define AppVersion "0.1.0"
 #endif
@@ -7,16 +15,26 @@
 AppId={{6E1E7C1A-6A0C-4E58-9B7E-4D5F2C0B9A11}
 AppName={#AppName}
 AppVersion={#AppVersion}
-AppPublisher=Mobília Studio
-DefaultDirName={localappdata}\Programs\Mobilia Studio
+AppVerName={#AppName} {#AppVersion}
+AppPublisher={#AppName}
+DefaultDirName={localappdata}\Programs\7xAi
+; instalações antigas ficavam em "Programs\Mobilia Studio": usa sempre a pasta nova
+UsePreviousAppDir=no
 DefaultGroupName={#AppName}
+DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
-OutputBaseFilename=MobiliaStudio-Setup-{#AppVersion}
+OutputBaseFilename=7xAi-Setup-{#AppVersion}
 SetupIconFile=assets\icon.ico
-UninstallDisplayIcon={app}\MobiliaStudio.exe
+UninstallDisplayIcon={app}\{#ExeName}
+UninstallDisplayName={#AppName}
+VersionInfoProductName={#AppName}
+VersionInfoDescription=Instalador do {#AppName}
+VersionInfoCompany={#AppName}
+VersionInfoVersion={#AppVersion}
+CloseApplications=yes
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -25,26 +43,35 @@ WizardStyle=modern
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Criar atalho na área de trabalho"; GroupDescription: "Atalhos:"
+; marcada por padrão (sem a flag "unchecked"): o ícone 7xAi vai para a Área de Trabalho
+Name: "desktopicon"; Description: "Criar o ícone 7xAi na Área de Trabalho"; GroupDescription: "Atalhos:"
+
+[InstallDelete]
+; atalhos e pasta do programa da época do nome antigo (os dados em %LOCALAPPDATA%\MobiliaStudio ficam)
+Type: files; Name: "{userdesktop}\Mobília Studio.lnk"
+Type: files; Name: "{userprograms}\Mobília Studio.lnk"
+Type: filesandordirs; Name: "{userprograms}\Mobília Studio"
+Type: filesandordirs; Name: "{localappdata}\Programs\Mobilia Studio"
 
 [Files]
-Source: "..\dist\MobiliaStudio\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\7xAi\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\MobiliaStudio.exe"
-Name: "{userdesktop}\{#AppName}"; Filename: "{app}\MobiliaStudio.exe"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#ExeName}"
+Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#ExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\MobiliaStudio.exe"; Description: "Abrir o {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#ExeName}"; Description: "Abrir o {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var Dir: String;
 begin
   if CurUninstallStep = usPostUninstall then begin
+    // pasta de dados do 7xAi (nome antigo mantido de propósito: ver o cabeçalho)
     Dir := ExpandConstant('{localappdata}\MobiliaStudio');
     if DirExists(Dir) then
-      if MsgBox('Remover também o motor de IA, os modelos e os trabalhos salvos (' + Dir + ')?',
+      if MsgBox('Remover também o motor de IA, os modelos e os trabalhos salvos do 7xAi (' + Dir + ')?',
                 mbConfirmation, MB_YESNO) = IDYES then
         DelTree(Dir, True, True, True);
   end;
