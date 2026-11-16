@@ -5,6 +5,7 @@ Modos:
 - ``run ...``: imita o protocolo JSON do motor (``mobilia.cli run --json``), grava um MP4
   minúsculo de verdade com o FFmpeg e, com ``--work-dir``, os arquivos de um trabalho
   (report.json, frames.json, registros e uma placa derivada da foto);
+- ``blender --aquecimento <pasta>``: imita o aquecimento do instalador (``warmup_done``);
 - ``blender <scene.json>``: imita o worker do Blender (``mobilia.render.blender_worker``): emite
   ``worker_ready``/``render_progress``/``render_done`` e grava EXRs (Combined + Shadow Catcher)
   de um quadrado que entra em cena e para, com a telemetria por quadro do worker real.
@@ -28,6 +29,19 @@ def _write_exr(path: Path, rgba, shadow) -> None:
     header = {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage}
     with OpenEXR.File(header, ch) as f:
         f.write(str(path))
+
+
+def blender_warmup(out_dir: str) -> int:
+    """Imita ``blender_worker --aquecimento``: progresso, um aviso e ``warmup_done``."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    _emit(event="progress", fraction=0.1, message="Preparando os kernels de render (CPU)")
+    _emit(event="log", level="warning", message="Nenhuma GPU NVIDIA disponível para o Cycles: aquecendo a CPU.")
+    res = {"ok": True, "blender": "dublê", "tamanho_px": 64, "amostras": 8, "parede_s": 0.01,
+           "dispositivos": [{"dispositivo": "CPU", "ok": True, "kernels_s": 0.002, "parede_s": 0.01}]}
+    (Path(out_dir) / "aquecimento.json").write_text(json.dumps(res), encoding="utf-8")
+    _emit(event="progress", fraction=1.0, message="Kernels de render prontos")
+    _emit(event="warmup_done", resultado=res)
+    return 0
 
 
 def blender(spec_path: str) -> int:
@@ -136,6 +150,8 @@ def main(argv):
                           "profile": {"name": "ultra", "description": "teste"}}), flush=True)
         return 0
     if argv and argv[0] == "blender":
+        if argv[1] == "--aquecimento":
+            return blender_warmup(argv[2])
         return blender(argv[1])
     a, i = {}, 1
     while i < len(argv):                               # --chave valor | --opcao

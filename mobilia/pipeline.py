@@ -77,7 +77,7 @@ def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | Non
     t, tg = time.perf_counter(), {}
     geo = estimate_geometry(rgb, model_id=prof.geometry_model, device=dev, use_fp16=prof.use_fp16,
                             num_tokens=prof.geometry_tokens, timings=tg)
-    total = time.perf_counter() - t
+    total = _minus_download(sw, time.perf_counter() - t, tg)
     sw.add("analise.geometria_carga", min(total, tg.get("carga", 0.0)))
     sw.add("analise.geometria_inferencia", total - min(total, tg.get("carga", 0.0)))
     with sw.measure("analise.gravacao"):
@@ -85,7 +85,7 @@ def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | Non
     em.stage("analise", 0.55, "Identificando piso, paredes, janelas e portas (OneFormer)")
     t, ts = time.perf_counter(), {}
     seg = segment(rgb, device=dev, use_fp16=prof.use_fp16, timings=ts)
-    total = time.perf_counter() - t
+    total = _minus_download(sw, time.perf_counter() - t, ts)
     sw.add("analise.segmentacao_carga", min(total, ts.get("carga", 0.0)))
     sw.add("analise.segmentacao_inferencia", total - min(total, ts.get("carga", 0.0)))
     with sw.measure("analise.gravacao"):
@@ -102,16 +102,27 @@ def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | Non
     return rgb, geo, seg, room, dbg["grid"]
 
 
-def first_run_state() -> tuple[bool, Path | None]:
-    """(primeira execução?, arquivo de estado). Primeira = nenhuma geração concluída desde a
-    instalação ou desde a última troca das dependências (kernels e caches ainda frios)."""
+def _minus_download(sw: Stopwatch, total: float, timings: dict) -> float:
+    """Tira da chamada do modelo o tempo de rede para baixar pesos que faltavam no cache: ele vai
+    para ``tempos_s.download`` (custo de primeira execução), não para ``analise.*``."""
+    dl = min(max(0.0, float(timings.get("download", 0.0) or 0.0)), total)
+    if dl:
+        sw.add("download", dl)
+    return total - dl
+
+
+def first_run_state() -> tuple[bool, Path | None, dict]:
+    """(primeira execução?, arquivo de estado, situação do aquecimento do instalador). Primeira =
+    nenhuma geração concluída desde a instalação, a última troca das dependências ou o último
+    aquecimento (kernels e caches possivelmente frios)."""
     from . import bootstrap, runtime
 
     try:
         path = runtime.runtime_paths().state_file
-        return bootstrap.is_first_run(bootstrap.load_state(path)), path
+        state = bootstrap.load_state(path)
+        return bootstrap.is_first_run(state), path, bootstrap.warmup_status(state)
     except Exception:
-        return False, None
+        return False, None, {}
 
 
 def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) -> JobResult:
@@ -130,7 +141,7 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
     t_click = t_ref if t_click is None or t_click > t_ref else t_click
     sw = Stopwatch()
     vram = VramMonitor().start()
-    first, state_path = first_run_state()
+    first, state_path, warm_state = first_run_state()
     # lançamento + imports + NVML + estado da instalação (o resto do início é medido abaixo)
     sw.set("inicio_motor", time.time() - t_ref)
     cfg = AppConfig()
@@ -142,7 +153,9 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             q = _quality(req, prof)
             em.log(f"Perfil: {prof.name} — {prof.description} | qualidade: {q['name']}")
             if first:
-                em.log("Primeira execução depois da instalação: pode ser mais lenta (caches frios).")
+                em.log("Primeira execução depois da instalação: pode ser mais lenta (caches frios)."
+                       + ("" if warm_state.get("ok") else " O aquecimento da GPU do instalador não foi "
+                          "feito: os kernels de render serão preparados agora."))
         with sw.measure("carga_foto"):
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             work = Path(req.work_dir) if req.work_dir else cfg.jobs_dir / f"{stamp}_{Path(req.photo_path).stem}"
@@ -202,6 +215,7 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             em.log(f"Layout: {len(layout.items)} itens, estilo {layout.style}")
 
         # ---------------------------------------------------------------- assets + cena
+        dl_models = float(sw.get("download", 0.0))        # pesos dos modelos que faltavam (análise)
         t = time.perf_counter()
         net = polyhaven.reset_net_stats()
         em.stage("assets", 0.1, "Baixando/verificando modelos 3D (CC0)")
@@ -219,8 +233,11 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         dl = min(float(net["s"]), time.perf_counter() - t)
         sw.add("download", dl)
         sw.add("ativos", time.perf_counter() - t - dl)
-        download = {"s": round(dl, 2), "bytes": int(net["bytes"]), "arquivos": int(net["arquivos"]),
+        download = {"s": round(dl + dl_models, 2), "ativos_s": round(dl, 2), "modelos_s": round(dl_models, 2),
+                    "bytes": int(net["bytes"]), "arquivos": int(net["arquivos"]),
                     "consultas": int(net["consultas"])}
+        if dl_models:
+            em.log(f"Pesos de modelos de IA baixados durante o trabalho: {dl_models:.0f} s (fora do tempo de análise)")
         if net["arquivos"]:
             em.log(f"Modelos 3D baixados: {net['arquivos']} arquivo(s), {net['bytes'] / 1e6:.0f} MB em {dl:.0f} s")
 
@@ -262,6 +279,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             "kernels_cycles_total_s": _kernels_total(render_meta.get("telemetria") or {}),
             "modelos_carga_s": round(value_total(tempos["analise"].get("geometria_carga", 0.0))
                                      + value_total(tempos["analise"].get("segmentacao_carga", 0.0)), 2),
+            # o que o instalador já pagou (PT2): kernels OptiX/CUDA e carga dos modelos
+            "aquecimento_instalador": warm_state or None,
         }
         rp = work / "report.json"
         rp.write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -543,14 +562,30 @@ def recompose(work_dir: str | Path, out_path: str | Path | None, em: ProgressEmi
     return report
 
 
-def _blender_worker_command(spec_path: Path) -> list[str]:
+def blender_worker_prefix() -> list[str]:
+    """Comando do worker do Blender sem argumentos (``MOBILIA_BLENDER_WORKER`` substitui)."""
     override = os.environ.get(ENV_BLENDER_WORKER)
     if override:
         prefix = json.loads(override)
         if not isinstance(prefix, list) or not prefix or not all(isinstance(p, str) for p in prefix):
             raise ValueError(f"{ENV_BLENDER_WORKER} deve ser uma lista JSON não vazia de strings.")
-        return prefix + [str(spec_path)]
-    return [sys.executable, "-m", "mobilia.render.blender_worker", str(spec_path)]
+        return list(prefix)
+    return [sys.executable, "-m", "mobilia.render.blender_worker"]
+
+
+def blender_worker_env() -> dict:
+    """Ambiente do worker do Blender: o pacote ``mobilia`` no ``PYTHONPATH`` e caches de kernels
+    da NVIDIA grandes (``runtime.GPU_CACHE_ENV``)."""
+    from .runtime import apply_gpu_cache_env
+
+    env = dict(os.environ)
+    pkg_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = pkg_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    return apply_gpu_cache_env(env)
+
+
+def _blender_worker_command(spec_path: Path) -> list[str]:
+    return blender_worker_prefix() + [str(spec_path)]
 
 
 def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = False):
@@ -559,9 +594,7 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
     Com ``with_times`` devolve também os instantes (``perf_counter`` deste processo) do
     lançamento, do evento ``worker_ready`` e do fim do processo, para a telemetria.
     """
-    env = dict(os.environ)
-    pkg_root = str(Path(__file__).resolve().parents[1])
-    env["PYTHONPATH"] = pkg_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env = blender_worker_env()
     cmd = _blender_worker_command(spec_path)
     times: dict[str, float | None] = {"start": time.perf_counter(), "ready": None, "exit": None}
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,

@@ -8,7 +8,20 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
                                QTextEdit, QVBoxLayout)
 
-from .. import APP_NAME, bootstrap
+from .. import APP_NAME, bootstrap, runtime
+
+
+def intro_text(state: dict) -> tuple[str, str]:
+    """Título e texto do assistente: instalação nova ou atualização (só as etapas pendentes)."""
+    if not state.get("done"):
+        return ("Primeiro uso: vamos instalar o motor de IA e renderização",
+                "Tudo roda no seu computador, na sua GPU NVIDIA. O download (~7 GB) acontece uma única "
+                "vez; depois o Mobília Studio funciona sem internet. No fim, a GPU é preparada (kernels de "
+                "render e modelos de IA) para que o primeiro vídeo já saia rápido. Se a conexão cair, é só "
+                "abrir de novo: a instalação continua de onde parou.")
+    pend = [bootstrap.STEP_LABELS[s].split(" (")[0].lower() for s in bootstrap.pending_steps(state)]
+    return ("Atualização: preparando o motor para esta versão",
+            "Só falta: " + "; ".join(pend) + ". O que já está instalado não é baixado de novo.")
 
 
 class _Bridge(QObject):
@@ -23,11 +36,12 @@ class SetupDialog(QDialog):
         self.setMinimumWidth(620)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 22, 24, 22)
-        t = QLabel("Primeiro uso: vamos instalar o motor de IA e renderização")
+        state = bootstrap.sync_with_payload(bootstrap.load_state(runtime.runtime_paths().state_file),
+                                            bootstrap.payload_fingerprints(runtime.payload_root()))
+        title, text = intro_text(state)
+        t = QLabel(title)
         t.setObjectName("title")
-        info = QLabel("Tudo roda no seu computador, na sua GPU NVIDIA. O download (~7 GB) acontece uma única "
-                      "vez; depois o Mobília Studio funciona sem internet. Se a conexão cair, é só abrir de "
-                      "novo: a instalação continua de onde parou.")
+        info = QLabel(text)
         info.setWordWrap(True); info.setObjectName("subtitle")
         self.step = QLabel("Pronto para começar.")
         self.bar = QProgressBar(); self.bar.setRange(0, 1000)

@@ -48,9 +48,12 @@ def _fake_analysis(monkeypatch, tmp_path):
 
     def fake_geometry(rgb8, timings=None, **kw):
         t = time.perf_counter()
+        time.sleep(0.02)                                   # "rede": pesos que faltavam no cache
+        dl = time.perf_counter() - t
         time.sleep(0.03)                                   # "carga dos pesos"
         if timings is not None:
-            timings["carga"] = time.perf_counter() - t
+            timings["download"] = dl
+            timings["carga"] = time.perf_counter() - t - dl
         time.sleep(0.02)                                   # "inferência"
         h, w = rgb8.shape[:2]
         z = np.zeros((h, w), np.float32)
@@ -110,7 +113,13 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     st = bootstrap.load_state(runtime.runtime_paths().state_file)
     assert st["execucoes"] == 1 and not bootstrap.is_first_run(st)
     assert set(rep["primeira_execucao_custos"]) >= {"download_s", "blender_kernels_s", "modelos_carga_s",
-                                                   "kernels_cycles_total_s"}
+                                                   "kernels_cycles_total_s", "aquecimento_instalador"}
+    # sem instalador (desenvolvimento): o aquecimento não foi feito e isso fica registrado
+    assert rep["primeira_execucao_custos"]["aquecimento_instalador"]["feito"] is False
+    # download = rede dos móveis (Poly Haven) + dos pesos dos modelos, fora de "ativos" e "analise"
+    d = rep["download"]
+    assert d["modelos_s"] >= 0.02 and d["ativos_s"] > 0 and abs(d["s"] - d["modelos_s"] - d["ativos_s"]) < 0.02
+    assert abs(t["download"] - d["s"]) < 0.02
     # render: dispositivo efetivo, denoiser, camadas, por quadro, quadros
     r = rep["render"]
     assert r["dispositivo"] == "CPU" and r["denoiser_dispositivo"] == "CPU" and r["optix"] is False

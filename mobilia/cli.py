@@ -4,6 +4,8 @@ Uso:
   python -m mobilia.cli run --photo sala.jpg --room sala --out video.mp4 [--quality final] [--json]
   python -m mobilia.cli hardware [--json]
   python -m mobilia.cli analyze --photo sala.jpg --out pasta/
+  python -m mobilia.cli prefetch [--modelos] [--ativos] [--res 1k,2k] [--json]
+  python -m mobilia.cli aquecer [--sem-blender] [--sem-modelos] [--json]
 
 Com ``--json`` cada evento de progresso é impresso como uma linha JSON (protocolo em
 mobilia/jobs.py) — é assim que a interface gráfica acompanha o trabalho.
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import traceback
@@ -98,30 +101,59 @@ def _cmd_batch(a) -> int:
     return 0 if ok == len(results) else 1
 
 
-def _cmd_prefetch(a) -> int:
-    """Baixa pesos dos modelos de IA e assets 3D para uso 100% offline (primeiro uso/instalador)."""
-    from .assets.polyhaven import prefetch_catalog
-    from .config import (ASSETS_DIR, GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL,
-                         SEGMENTATION_MODEL_ID)
-
+def _json_or_human(a):
     def emit(ev):
         if a.json:
             print(json.dumps(ev, ensure_ascii=False), flush=True)
         elif ev.get("event") == "progress":
             print(f"[{ev['fraction'] * 100:5.1f}%] {ev['message']}", flush=True)
+        elif ev.get("event") == "log":
+            print(f"{ev.get('level', 'info').upper()}: {ev.get('message', '')}", flush=True)
+    return emit
 
-    from huggingface_hub import snapshot_download
 
-    repos = [GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL, SEGMENTATION_MODEL_ID]
-    for i, repo in enumerate(repos):
-        emit({"event": "progress", "stage": "modelos", "fraction": round(0.6 * i / len(repos), 3),
-              "message": f"Baixando modelo de IA {repo}"})
-        snapshot_download(repo, allow_patterns=["*.json", "*.pt", "*.bin", "*.safetensors", "*.txt"])
-    failed = prefetch_catalog(ASSETS_DIR, ("1k", "2k"), progress=lambda f, pid: emit(
-        {"event": "progress", "stage": "assets", "fraction": round(0.6 + 0.4 * f, 3),
-         "message": f"Baixando modelo 3D {pid}"}))
+def _cmd_prefetch(a) -> int:
+    """Baixa pesos dos modelos de IA e assets 3D para uso 100% offline (instalador).
+
+    ``--modelos``/``--ativos`` limitam a uma das partes (o instalador roda cada uma como uma
+    etapa própria, retomável); sem nenhuma das duas, baixa tudo. Idempotente: o que já está no
+    cache só é conferido."""
+    from .assets.polyhaven import prefetch_catalog
+    from .config import ASSETS_DIR
+
+    emit = _json_or_human(a)
+    both = not (a.modelos or a.ativos)
+    failed: list[str] = []
+    if a.modelos or both:
+        from .analysis.weights import prefetch_models
+
+        span = 0.6 if both else 1.0
+        prefetch_models(lambda f, repo: emit({"event": "progress", "stage": "modelos",
+                                              "fraction": round(span * f, 3),
+                                              "message": f"Baixando modelo de IA {repo}"}))
+    if a.ativos or both:
+        res = tuple(r.strip() for r in a.res.split(",") if r.strip()) or ("2k",)
+        off = 0.6 if both else 0.0
+        failed = prefetch_catalog(ASSETS_DIR, res, progress=lambda f, pid: emit(
+            {"event": "progress", "stage": "assets", "fraction": round(off + (1 - off) * f, 3),
+             "message": f"Baixando modelo 3D {pid} ({'/'.join(res)})"}))
     emit({"event": "done", "failed": failed})
     return 0 if not failed else 1
+
+
+def _cmd_warmup(a) -> int:
+    """Aquecimento do instalador: kernels do Cycles (OptiX/CUDA) e carga dos modelos de IA.
+
+    Sempre termina com ``{"event": "done", "aquecimento": {...}}``; falhas ficam no resultado
+    (o instalador registra e segue)."""
+    from .warmup import run
+
+    emit = _json_or_human(a)
+    res = run(emit, blender=not a.sem_blender, models=not a.sem_modelos)
+    emit({"event": "done", "aquecimento": res})
+    if not a.json:
+        print(json.dumps(res, ensure_ascii=False, indent=1))
+    return 0
 
 
 def _cmd_hardware(a) -> int:
@@ -172,12 +204,24 @@ def main(argv=None) -> int:
     b.add_argument("--seed", type=int, default=7)
     pf = sub.add_parser("prefetch", help="baixa modelos de IA e assets 3D (uso offline)")
     pf.add_argument("--json", action="store_true")
+    pf.add_argument("--modelos", action="store_true", help="só os pesos dos modelos de IA")
+    pf.add_argument("--ativos", action="store_true", help="só os móveis 3D do catálogo")
+    pf.add_argument("--res", default="1k,2k", help="resoluções das texturas dos móveis (ex.: 1k,2k)")
+    aq = sub.add_parser("aquecer", help="aquece kernels da GPU (Cycles) e modelos de IA (instalador)")
+    aq.add_argument("--json", action="store_true")
+    aq.add_argument("--sem-blender", action="store_true")
+    aq.add_argument("--sem-modelos", action="store_true")
     rc = sub.add_parser("recompor", help="refaz composição e MP4 de um trabalho já renderizado")
     rc.add_argument("--work-dir", required=True)
     rc.add_argument("--out", default=None, help="MP4 de saída (padrão: o do pedido original)")
     a = p.parse_args(argv)
+    # caches de kernels da NVIDIA grandes também quando a CLI é chamada direto (desenvolvimento);
+    # precisa vir antes do primeiro import do PyTorch e vale para o Blender (processo filho)
+    from .runtime import apply_gpu_cache_env
+
+    apply_gpu_cache_env(os.environ)
     return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch,
-            "prefetch": _cmd_prefetch, "recompor": _cmd_recompose}[a.cmd](a)
+            "prefetch": _cmd_prefetch, "aquecer": _cmd_warmup, "recompor": _cmd_recompose}[a.cmd](a)
 
 
 if __name__ == "__main__":

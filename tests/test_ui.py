@@ -127,3 +127,39 @@ def test_worker_receives_click_time(app, win):
     finally:
         runner_mod.subprocess.Popen = orig
     assert env_time(ENV_T_CLIQUE, seen) <= env_time(ENV_T_INICIO, seen)
+
+
+def test_first_run_notice(app, win, tmp_path):
+    """Aviso "primeira execução — mais lenta" na tela de progresso, só enquanto for a primeira."""
+    from mobilia import bootstrap, runtime
+    sf = runtime.runtime_paths().state_file
+    win.load_photo(str(FX)); win.select_room("sala")
+    win.generate(); app.processEvents()
+    assert win.notice.isVisible() and "Primeira execução" in win.notice.text()
+    assert "kernels" in win.notice.text()                     # sem aquecimento do instalador
+    _shot(win, "5_primeira_execucao")
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+    # instalador aqueceu a GPU: aviso brando
+    st = bootstrap.load_state(sf)
+    st.update(done=list(bootstrap.STEPS))
+    bootstrap.mark_warmup(st, {"ok": True}, {"dependencias": st.get("hashes", {}).get("dependencias")})
+    bootstrap.save_state(sf, st)
+    win.new_photo(); win.load_photo(str(FX)); win.select_room("sala")
+    win.generate(); app.processEvents()
+    assert win.notice.isVisible() and "um pouco mais lenta" in win.notice.text()
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+    # depois de uma geração concluída: sem aviso
+    bootstrap.record_run(sf)
+    win.new_photo(); win.load_photo(str(FX)); win.select_room("sala")
+    win.generate(); app.processEvents()
+    assert not win.notice.isVisible()
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+
+
+def test_setup_dialog_text_for_update(app):
+    from mobilia import bootstrap
+    from mobilia.ui.setup_dialog import intro_text
+    title, _ = intro_text({"done": []})
+    assert title.startswith("Primeiro uso")
+    title, text = intro_text({"done": [s for s in bootstrap.STEPS if s != "aquecimento"]})
+    assert title.startswith("Atualização") and "preparando a gpu" in text

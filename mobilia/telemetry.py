@@ -23,7 +23,7 @@ ETAPAS: tuple[str, ...] = (
     "analise",           # dicionário (ver ETAPAS_ANALISE)
     "layout",
     "ativos",            # cena (scene.json) e cache de modelos, sem a parte de rede
-    "download",          # só o tempo de rede (Poly Haven); 0 com o cache completo
+    "download",          # só o tempo de rede (Poly Haven + pesos dos modelos); 0 com o cache completo
     "blender_inicio",    # subprocesso do Blender até o dispositivo configurado
     "blender_kernels",   # render de aquecimento minúsculo: carga/compilação dos kernels
     "cena_montagem",     # sala proxy, luzes, importação e animação dos móveis

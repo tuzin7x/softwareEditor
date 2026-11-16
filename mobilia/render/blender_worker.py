@@ -1,6 +1,7 @@
 """Worker de render (roda em processo separado, com o módulo bpy = Blender 5.x).
 
 Uso: python -m mobilia.render.blender_worker <scene.json>
+     python -m mobilia.render.blender_worker --aquecimento <pasta>   (instalador: ``warmup_main``)
 
 Monta a cena 3D a partir da especificação gerada pelo pipeline:
 - câmera casada à foto (intrínsecos + pose do MoGe/modelo da sala);
@@ -109,8 +110,8 @@ def warmup_kernels(sc) -> dict:
 # ============================================================================ configuração
 
 
-def configure_device(sc, device: str) -> str:
-    """Seleciona OptiX/CUDA quando há GPU NVIDIA; cai para CPU com aviso."""
+def configure_device(sc, device: str, quiet: bool = False) -> str:
+    """Seleciona OptiX/CUDA quando há GPU NVIDIA; cai para CPU com aviso (``quiet``: sem eventos)."""
     sc.cycles.device = "CPU"
     if device.upper() == "CPU":
         return "CPU"
@@ -131,9 +132,11 @@ def configure_device(sc, device: str) -> str:
                 d.use = d.type == kind
             sc.cycles.device = "GPU"
             DEVICE_INFO.update(dispositivo=kind, gpus=[d.name for d in gpus])
-            emit(event="log", level="info", message=f"Render na GPU via {kind}: {', '.join(d.name for d in gpus)}")
+            if not quiet:
+                emit(event="log", level="info", message=f"Render na GPU via {kind}: {', '.join(d.name for d in gpus)}")
             return kind
-    emit(event="log", level="warning", message="Nenhuma GPU NVIDIA disponível para o Cycles: usando CPU.")
+    if not quiet:
+        emit(event="log", level="warning", message="Nenhuma GPU NVIDIA disponível para o Cycles: usando CPU.")
     return "CPU"
 
 
@@ -1265,5 +1268,175 @@ def main(spec_path: str) -> None:
     emit(event="render_done", rendered=done, meta=str(out_dir / "frames.json"))
 
 
+# ============================================================================ aquecimento do instalador
+
+WARMUP_PX = 64
+WARMUP_SAMPLES = 8
+# Ordem dos backends aquecidos: o render usa OptiX quando existe; o CUDA é o plano B do
+# ``configure_device`` e o OIDN na GPU usa o CUDA de qualquer jeito.
+WARMUP_KINDS = ("OPTIX", "CUDA")
+
+
+def _warm_material(name: str, kind: str, img=None):
+    """Materiais com os mesmos nós/recursos dos trabalhos: Principled com textura e relevo,
+    vidro, cortina (translúcido + transparente) e proxy difuso com textura."""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = _node(nt, "ShaderNodeOutputMaterial", (400, 0))
+    if kind == "curtain":
+        tr = _node(nt, "ShaderNodeBsdfTranslucent")
+        tp = _node(nt, "ShaderNodeBsdfTransparent")
+        mix = _node(nt, "ShaderNodeMixShader", (200, 0))
+        mix.inputs["Fac"].default_value = 0.4
+        nt.links.new(tr.outputs[0], mix.inputs[1])
+        nt.links.new(tp.outputs[0], mix.inputs[2])
+        nt.links.new(mix.outputs[0], out.inputs["Surface"])
+        return mat
+    if kind == "proxy":
+        d = _node(nt, "ShaderNodeBsdfDiffuse", (200, 0))
+        tc = _node(nt, "ShaderNodeTexCoord", (-400, 0))
+        tex = _node(nt, "ShaderNodeTexImage", (-200, 0))
+        tex.image = img
+        nt.links.new(tc.outputs["Window"], tex.inputs["Vector"])
+        nt.links.new(tex.outputs["Color"], d.inputs["Color"])
+        nt.links.new(d.outputs[0], out.inputs["Surface"])
+        return mat
+    bsdf = _node(nt, "ShaderNodeBsdfPrincipled", (100, 0))
+    nt.links.new(bsdf.outputs[0], out.inputs["Surface"])
+    if kind == "glass":
+        for k, v in (("Transmission Weight", 1.0), ("Roughness", 0.05), ("IOR", 1.45)):
+            if k in bsdf.inputs:
+                bsdf.inputs[k].default_value = v
+        return mat
+    tex = _node(nt, "ShaderNodeTexImage", (-300, 100))
+    tex.image = img
+    noise = _node(nt, "ShaderNodeTexNoise", (-300, -150))
+    bump = _node(nt, "ShaderNodeBump", (-100, -150))
+    bump.inputs["Strength"].default_value = 0.2
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    nt.links.new(noise.outputs["Fac"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    bsdf.inputs["Roughness"].default_value = 0.45
+    return mat
+
+
+def build_warmup_scene(sc) -> None:
+    """Cena mínima com os recursos que mudam o conjunto de kernels do Cycles/OptiX nos trabalhos:
+    shadow catcher, filme transparente, desfoque de movimento (objeto animado), vidro,
+    transparência, texturas de imagem, relevo, luz de área, sol e mundo."""
+    img = bpy.data.images.new("aquecimento", 8, 8)
+    img.pixels.foreach_set(np.tile(np.array([0.6, 0.5, 0.4, 1.0], np.float32), 64))
+    cam_d = bpy.data.cameras.new("cam")
+    cam = bpy.data.objects.new("cam", cam_d)
+    sc.collection.objects.link(cam)
+    cam.location = (0.0, -3.0, 1.2)
+    cam.rotation_euler = (math.radians(75), 0.0, 0.0)
+    sc.camera = cam
+
+    mesh = _mesh_object
+    floor = mesh("piso", [(-3, -3, 0), (3, -3, 0), (3, 3, 0), (-3, 3, 0)], [(0, 1, 2, 3)],
+                 _warm_material("piso", "proxy", img))
+    floor.is_shadow_catcher = True
+    cube_v = [(x, y, z) for x in (-0.3, 0.3) for y in (-0.3, 0.3) for z in (0.0, 0.6)]
+    cube_f = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    box = mesh("movel", cube_v, cube_f, _warm_material("movel", "principled", img))
+    box.location = (-0.6, 0.0, 0.0)
+    box.keyframe_insert("location", frame=1)
+    box.location = (-0.4, 0.0, 0.15)
+    box.keyframe_insert("location", frame=3)
+    glass = mesh("vaso", cube_v, cube_f, _warm_material("vaso", "glass"))
+    glass.scale = (0.4, 0.4, 0.8)
+    glass.location = (0.5, 0.2, 0.0)
+    mesh("cortina", [(-1, 1, 0), (1, 1, 0), (1, 1, 2), (-1, 1, 2)], [(0, 1, 2, 3)],
+         _warm_material("cortina", "curtain"))
+    ld = bpy.data.lights.new("janela", "AREA")
+    ld.shape, ld.size, ld.size_y, ld.energy = "RECTANGLE", 1.0, 1.2, 300.0
+    lo = bpy.data.objects.new("janela", ld)
+    sc.collection.objects.link(lo)
+    lo.location = (0.0, 2.0, 1.5)
+    lo.rotation_euler = (math.radians(-90), 0.0, 0.0)
+    sd = bpy.data.lights.new("sol", "SUN")
+    sd.energy = 2.0
+    so = bpy.data.objects.new("sol", sd)
+    sc.collection.objects.link(so)
+    so.rotation_euler = (math.radians(40), 0.0, math.radians(30))
+    world = bpy.data.worlds.new("World")
+    sc.world = world
+    world.use_nodes = True
+    world.node_tree.nodes.get("Background").inputs["Color"].default_value = (0.3, 0.3, 0.3, 1.0)
+
+
+def _warm_render(sc, out: Path, motion_blur: bool) -> dict:
+    sc.render.use_motion_blur = motion_blur
+    sc.frame_set(2)
+    sc.render.filepath = str(out)
+    st = timed_render(sc, write_still=True)
+    return {k: st.get(k) for k in ("parede_s", "kernels_s", "sincronizacao_s", "amostras", "mem_mb")}
+
+
+def warmup_main(out_dir: str) -> dict:
+    """Aquecimento do instalador (PT2): renders de 64 × 64 com OptiX e com CUDA (ou CPU, sem GPU)
+    na MESMA instalação do Blender que os trabalhos usam. Preenche os caches de kernels do driver
+    NVIDIA (OptiX e CUDA) e do denoiser, para que o primeiro vídeo não pague a compilação.
+
+    Para cada dispositivo: um render sem e outro com desfoque de movimento (o OptiX monta um
+    pipeline diferente para cada caso) e um terceiro, já com os kernels prontos, como referência.
+    Grava ``aquecimento.json`` em ``out_dir`` e emite ``warmup_done``."""
+    t0 = time.perf_counter()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    install_stats_handler()
+    sc = bpy.context.scene
+    spec = {"width": WARMUP_PX, "height": WARMUP_PX,
+            "render": {"device": "CPU", "fps": 24, "n_frames": 3, "samples": WARMUP_SAMPLES,
+                       "denoise": True, "motion_blur": True, "seed": 7}}
+    configure_render(sc, spec)
+    sc.render.use_persistent_data = False       # troca de dispositivo entre os renders
+    build_warmup_scene(sc)
+    emit(event="progress", fraction=0.05, message=f"Blender {bpy.app.version_string} pronto")
+    kinds = []
+    for kind in WARMUP_KINDS:
+        if configure_device(sc, kind, quiet=True) == kind:
+            kinds.append(kind)
+    if not kinds:
+        kinds = ["CPU"]
+        emit(event="log", level="warning", message="Nenhuma GPU NVIDIA disponível para o Cycles: aquecendo a CPU.")
+    results = []
+    for i, kind in enumerate(kinds):
+        dev = configure_device(sc, kind)
+        try:
+            sc.cycles.denoising_use_gpu = dev != "CPU"
+        except (AttributeError, TypeError):
+            pass
+        emit(event="progress", fraction=round(0.1 + 0.85 * i / len(kinds), 3),
+             message=f"Preparando os kernels de render ({kind}) — na primeira vez pode levar alguns minutos")
+        res = {"dispositivo": dev, "gpus": list(DEVICE_INFO.get("gpus") or []) if dev != "CPU" else [],
+               **denoiser_info(sc, dev)}
+        try:
+            t = time.perf_counter()
+            renders = [_warm_render(sc, out / f"{kind.lower()}_{j}.exr", mb)
+                       for j, mb in enumerate((False, True, True))]
+            res.update(ok=True, parede_s=round(time.perf_counter() - t, 3), renders=renders,
+                       kernels_s=round(sum(float(r.get("kernels_s") or 0.0) for r in renders), 3),
+                       aquecido_s=renders[-1].get("parede_s"))
+        except Exception as e:  # um backend com problema não impede o outro
+            res.update(ok=False, erro=f"{e.__class__.__name__}: {e}")
+            emit(event="log", level="warning", message=f"Aquecimento {kind} falhou: {e}")
+        results.append(res)
+    result = {"ok": any(r.get("ok") for r in results), "blender": bpy.app.version_string,
+              "tamanho_px": WARMUP_PX, "amostras": WARMUP_SAMPLES, "dispositivos": results,
+              "parede_s": round(time.perf_counter() - t0, 3)}
+    (out / "aquecimento.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    emit(event="progress", fraction=1.0, message="Kernels de render prontos")
+    emit(event="warmup_done", resultado=result)
+    return result
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if len(sys.argv) > 2 and sys.argv[1] == "--aquecimento":
+        warmup_main(sys.argv[2])
+    else:
+        main(sys.argv[1])

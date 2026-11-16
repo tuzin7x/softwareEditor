@@ -21,6 +21,8 @@ QLabel#title {{ font-size: 22px; font-weight: 600; }}
 QLabel#subtitle {{ color: {MUTED}; font-size: 13px; }}
 QLabel#section {{ color: {MUTED}; font-size: 12px; font-weight: 600; letter-spacing: 1px; }}
 QLabel#muted {{ color: {MUTED}; }}
+QLabel#notice {{ color: {ACCENT}; background: #2a241d; border: 1px solid #5a4a38; border-radius: 8px;
+                 padding: 8px 10px; }}
 QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 14px; }}
 QFrame#drop {{ background: {SURFACE}; border: 2px dashed {BORDER}; border-radius: 16px; }}
 QFrame#drop[hover="true"] {{ border-color: {ACCENT}; }}

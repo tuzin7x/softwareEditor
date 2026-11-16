@@ -34,6 +34,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ENV_HOME = "MOBILIA_HOME"
+# Caches de kernels do driver NVIDIA: o padrão (256 MB a 1 GB) é pequeno para PyTorch + Cycles
+# (OptiX e CUDA) + OIDN, e um cache cheio faz a compilação de kernels voltar a cada execução.
+# 4 GiB é o máximo aceito pelo driver. Valem para o worker e para o Blender (processo filho).
+GPU_CACHE_ENV = {"CUDA_CACHE_MAXSIZE": str(4 << 30), "OPTIX_CACHE_MAXSIZE": str(4 << 30)}
 ENV_WORKER = "MOBILIA_WORKER"
 WORKER_MODULE = "mobilia.cli"
 CREATE_NO_WINDOW = 0x08000000
@@ -176,6 +180,7 @@ def worker_environment(base: Mapping[str, str] | None = None, frozen: bool | Non
 
     - UTF-8 sempre (além do ``-X utf8``);
     - ``MOBILIA_HOME`` explícito: interface e worker usam a mesma pasta de dados;
+    - caches de kernels da NVIDIA com 4 GiB (``GPU_CACHE_ENV``);
     - no motor embutido, ``HF_HOME`` aponta para os modelos baixados no primeiro uso;
     - em desenvolvimento, a raiz do código entra no ``PYTHONPATH``.
     """
@@ -189,6 +194,7 @@ def worker_environment(base: Mapping[str, str] | None = None, frozen: bool | Non
     # (~900 MB) a cada execução online; os pesos .bin já baixados bastam.
     env["DISABLE_SAFETENSORS_CONVERSION"] = "1"
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    apply_gpu_cache_env(env)
     if uses_embedded_runtime(env, frozen):
         env["HF_HOME"] = str(paths.hf_home)
         env.pop("PYTHONPATH", None)
@@ -196,6 +202,14 @@ def worker_environment(base: Mapping[str, str] | None = None, frozen: bool | Non
     else:
         old = env.get("PYTHONPATH")
         env["PYTHONPATH"] = str(SOURCE_ROOT) + (os.pathsep + old if old else "")
+    return env
+
+
+def apply_gpu_cache_env(env: dict) -> dict:
+    """Define o tamanho dos caches de kernels da NVIDIA (``GPU_CACHE_ENV``) sem sobrescrever um
+    valor já escolhido pelo usuário."""
+    for k, v in GPU_CACHE_ENV.items():
+        env.setdefault(k, v)
     return env
 
 

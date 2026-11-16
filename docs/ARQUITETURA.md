@@ -184,10 +184,25 @@ o vídeo mostra exatamente essas funções.
 - Lote: a CLI (`python -m mobilia.cli run ...`, `python -m mobilia.cli batch --dir fotos/ --out videos/`
   com CSV opcional `arquivo,ambiente`) e a fila da UI usam o mesmo contrato. Cada trabalho tem sua pasta
   com todos os intermediários e um `report.json`.
-- Uso offline: `python -m mobilia.cli prefetch` baixa os pesos dos modelos e todos os assets do
-  catálogo; depois disso nada mais é baixado.
+- Uso offline: `python -m mobilia.cli prefetch` baixa os pesos dos modelos (com os metadados de classes
+  do OneFormer, `shi-labs/oneformer_demo`) e todos os assets do catálogo (`--modelos`/`--ativos`/`--res`
+  separam as partes); depois disso nada mais é baixado. Se um peso faltar no cache durante um trabalho,
+  o tempo de rede vai para `tempos_s.download` (e `download.modelos_s`), não para `analise.*`.
 - Empacotamento Windows: um `.exe` leve (UI) e um *runtime* pesado (Python + PyTorch CUDA + Blender
   bpy + modelos), instalado no primeiro uso em `%LOCALAPPDATA%\MobiliaStudio`. Detalhes em `packaging/`.
+- Instalação prepara tudo (PT2, `mobilia/bootstrap.py`): etapas `python`, `pip`, `dependencias`, `app`,
+  `modelos` (pesos), `ativos` (móveis do catálogo, texturas 1k+2k com GPU) e `aquecimento`
+  (`mobilia.cli aquecer`, `mobilia/warmup.py`): renders de 64 × 64 com OptiX e com CUDA no Blender
+  instalado — sem e com desfoque de movimento, shadow catcher, vidro, transparência, texturas e o
+  denoiser na GPU — para deixar os kernels compilados nos caches do driver, e uma carga dos dois modelos
+  de análise com uma inferência minúscula. `CUDA_CACHE_MAXSIZE`/`OPTIX_CACHE_MAXSIZE` = 4 GiB no worker e
+  no Blender (`runtime.GPU_CACHE_ENV`). Cada etapa grava `setup_state.json` ao terminar (retomável) e tem
+  uma impressão digital: o código refaz só a cópia do motor, o catálogo refaz `ativos`, os ids dos
+  modelos refazem `modelos`, e dependências ou GPU/driver novos refazem o `aquecimento`. O aquecimento
+  nunca bloqueia: a falha fica em `setup_state.json` e o primeiro vídeo paga o custo. Ao terminar, ele
+  marca a próxima geração como primeira execução (`primeira_execucao_pendente`); a interface mostra o
+  aviso "primeira execução" na tela de progresso, e o `report.json` traz
+  `primeira_execucao_custos.aquecimento_instalador` (feito/ok, dispositivos, kernels pagos na instalação).
 - Telemetria (`mobilia/telemetry.py`): `report.json` traz `tempos_s` com todas as subetapas da seção 4
   do `PLANO_V2.md` (`inicio_motor`, `carga_foto`, `analise.{geometria_carga, geometria_inferencia,
   segmentacao_carga, segmentacao_inferencia, sala, sol, oclusores, gravacao}`, `layout`, `ativos`,

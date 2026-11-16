@@ -81,18 +81,22 @@ def estimate_geometry(rgb8: np.ndarray, model_id: str = "Ruicheng/moge-2-vitl-no
                       fov_x_deg: float | None = None, timings: dict | None = None) -> GeometryResult:
     """Roda o MoGe-2 sobre a foto (resolução original) e libera a VRAM ao final.
 
-    ``timings`` (opcional) recebe ``carga`` (import + pesos + envio ao dispositivo) em segundos;
-    o resto da chamada é a inferência.
+    ``timings`` (opcional) recebe ``carga`` (import + pesos + envio ao dispositivo) e ``download``
+    (rede, só se os pesos ainda não estavam no cache) em segundos; o resto da chamada é a inferência.
     """
     import time
 
+    from .weights import ensure_local
+
     t0 = time.perf_counter()
+    dl = _ensure_weights(ensure_local, model_id)
     import torch
     from moge.model.v2 import MoGeModel
 
     model = MoGeModel.from_pretrained(model_id).to(device).eval()
     if timings is not None:
-        timings["carga"] = time.perf_counter() - t0
+        timings["download"] = dl
+        timings["carga"] = time.perf_counter() - t0 - dl
     try:
         img = torch.from_numpy(np.ascontiguousarray(rgb8)).to(device=device, dtype=torch.float32)
         img = img.permute(2, 0, 1) / 255.0
@@ -124,6 +128,15 @@ def estimate_geometry(rgb8: np.ndarray, model_id: str = "Ruicheng/moge-2-vitl-no
     depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
     mask &= depth > 0
     return GeometryResult(points, depth, normals, mask, intr, model_id)
+
+
+def _ensure_weights(ensure, model_id: str) -> float:
+    """Tempo de rede para completar o cache dos pesos; falhas ficam para o ``from_pretrained``
+    (que dá a mensagem de erro adequada)."""
+    try:
+        return float(ensure(model_id))
+    except Exception:
+        return 0.0
 
 
 def normals_from_points(points: np.ndarray, mask: np.ndarray) -> np.ndarray:

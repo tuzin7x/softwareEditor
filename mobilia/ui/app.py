@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from .. import APP_NAME, __version__, diagnostics, runtime
+from .. import APP_NAME, __version__, bootstrap, diagnostics, runtime
 from ..jobs import ROOM_TYPES, STAGES, JobRequest
 from . import theme
 from .runner import HardwareProbe, JobRunner, QueuedJob
@@ -265,11 +265,15 @@ class MainWindow(QMainWindow):
         self.pct = QLabel("0%"); self.pct.setStyleSheet("font-size: 28px; font-weight: 600;")
         self.msg = QLabel("Preparando…"); self.msg.setWordWrap(True)
         self.elapsed = QLabel(""); self.elapsed.setObjectName("muted")
+        # aviso "primeira execução — mais lenta" (estado da instalação, ver bootstrap.first_run_notice)
+        self.notice = QLabel(""); self.notice.setObjectName("notice"); self.notice.setWordWrap(True)
+        self.notice.hide()
         self.stages = StageList()
         self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("danger")
         self.btn_cancel.clicked.connect(self.cancel)
         lay.addWidget(s); lay.addWidget(self.pct); lay.addWidget(self.bar); lay.addWidget(self.msg)
-        lay.addWidget(self.elapsed); lay.addSpacing(8); lay.addWidget(self.stages); lay.addStretch(1)
+        lay.addWidget(self.elapsed); lay.addWidget(self.notice); lay.addSpacing(8); lay.addWidget(self.stages)
+        lay.addStretch(1)
         lay.addWidget(self.btn_cancel)
         return w
 
@@ -329,10 +333,20 @@ class MainWindow(QMainWindow):
                          work_dir=str(work))
         self.stages.reset(); self.bar.setValue(0); self.pct.setText("0%"); self.msg.setText("Iniciando o motor…")
         self.live.set_image(self.photo_path)
+        notice = self.first_run_notice()
+        self.notice.setText(notice or ""); self.notice.setVisible(bool(notice))
         self.left.setCurrentIndex(1); self.right.setCurrentIndex(1)
         self.started_at = time.monotonic(); self.timer.start(1000)
         self.runner.submit(req)
         self._update_ready()
+
+    @staticmethod
+    def first_run_notice() -> str | None:
+        """Texto do aviso de primeira execução (None nas execuções seguintes)."""
+        try:
+            return bootstrap.first_run_notice(bootstrap.load_state(runtime.runtime_paths().state_file))
+        except Exception:  # aviso é cosmético: nunca impede a geração
+            return None
 
     def cancel(self) -> None:
         self.btn_cancel.setEnabled(False)
