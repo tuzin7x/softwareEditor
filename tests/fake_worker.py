@@ -7,8 +7,9 @@ Modos:
   (report.json, frames.json, registros e uma placa derivada da foto);
 - ``blender --aquecimento <pasta>``: imita o aquecimento do instalador (``warmup_done``);
 - ``blender <scene.json>``: imita o worker do Blender (``mobilia.render.blender_worker``): emite
-  ``worker_ready``/``render_progress``/``render_done`` e grava EXRs (Combined + Shadow Catcher)
-  de um quadrado que entra em cena e para, com a telemetria por quadro do worker real.
+  ``worker_ready``/``render_progress``/``render_done`` e grava EXRs recortados no border
+  (Combined + Shadow Catcher) de um quadrado que entra em cena e para, com a telemetria por
+  quadro do worker real.
 """
 import json
 import subprocess
@@ -22,11 +23,12 @@ def _emit(**ev):
 
 
 def _write_exr(path: Path, rgba, shadow) -> None:
+    """Como o nó File Output do worker: só Combined + Shadow Catcher, RLE, recortado no border."""
     import OpenEXR
 
-    ch = {f"ViewLayer.Combined.{c}": rgba[..., i].copy() for i, c in enumerate("RGBA")}
-    ch.update({f"ViewLayer.Shadow Catcher.{c}": shadow[..., i].copy() for i, c in enumerate("RGB")})
-    header = {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage}
+    ch = {f"Combined.{c}": rgba[..., i].copy() for i, c in enumerate("RGBA")}
+    ch.update({f"Shadow Catcher.{c}": shadow[..., i].copy() for i, c in enumerate("RGB")})
+    header = {"compression": OpenEXR.RLE_COMPRESSION, "type": OpenEXR.scanlineimage}
     with OpenEXR.File(header, ch) as f:
         f.write(str(path))
 
@@ -83,13 +85,14 @@ def blender(spec_path: str) -> int:
         shadow = np.ones((H, W, 3), np.float32)
         shadow[H // 3 + side:H // 3 + side + 3, x:x + side] = 0.7
         name = f"f_{f:05d}.exr"
-        _write_exr(out / "frames" / name, rgba, shadow)
+        x0, y0, x1, y1 = border
+        _write_exr(out / "frames" / name, rgba[y0:y1, x0:x1], shadow[y0:y1, x0:x1])
         time.sleep(0.01)
         wall = time.perf_counter() - ti
         camada = "dinamico" if f < stop_at else "final"
         layer_s[camada] += wall
         area = (border[2] - border[0]) * (border[3] - border[1])
-        frames.append({"frame": f, "source": name, "border": border, "mode": "full"})
+        frames.append({"frame": f, "source": name, "border": border, "mode": "full", "crop": True})
         por_quadro.append({"quadro": f, "camada": camada, "itens": 1, "pecas_em_movimento": int(f < stop_at),
                            "area_px": area, "cobertura": round(area / (W * H), 4), "spp": 8, "amostras": 8,
                            "amostragem_s": round(wall * 0.6, 4), "denoise_s": round(wall * 0.2, 4),
@@ -105,6 +108,7 @@ def blender(spec_path: str) -> int:
                                               "sun_strength": 0.0, "color_ratio": [1.0, 1.0, 1.0],
                                               "rel_rms": 0.1, "pixels": 100, "pixels_total": 400},
             "device": "CPU", "width": W, "height": H, "removed_items": [],
+            "exr": {"recorte": True, "codec": "RLE"}, "passes": ["Combined", "Shadow Catcher"],
             "timings": {"total_s": round(time.perf_counter() - t0, 1), "rendered_frames": len(por_quadro)},
             "telemetria": {"dispositivo": "CPU", "optix": False, "gpus": [], "threads": 4, "blender": "dublê",
                            "denoiser": "OPENIMAGEDENOISE", "denoiser_dispositivo": "CPU",

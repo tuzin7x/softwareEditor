@@ -92,6 +92,14 @@ região e deixaram emendas sutis, então a qualidade venceu e o modo fica deslig
 - só os passes usados são gravados: um nó File Output no compositor grava Combined (RGBA) e Shadow
   Catcher; os passes "Noisy" que o denoise acrescenta ao resultado ficam fora do EXR (valores
   idênticos aos do `write_still`, que continua como plano B);
+- o EXR de cada quadro é recortado no *border* (`use_crop_to_border`) e comprimido com RLE (mais
+  rápido de gravar que ZIP; ver `render/border.py`). O border em pixels é decidido primeiro e o valor
+  normalizado entregue ao Blender aponta 1/4 de pixel para dentro de cada aresta, então o retângulo
+  anotado no `frames.json` é exatamente o que o Cycles renderiza (antes podia sobrar 1 px sem render,
+  a antiga "linha escura"). A composição cola o recorte num quadro inteiro (RGBA 0 e sombra neutra
+  fora dele): o resultado é byte a byte o do EXR de quadro inteiro (`crop_to_border: false`);
+- cada EXR é apagado logo depois do último quadro que o usa na composição. Para depurar ou usar o
+  `recompor`, `MOBILIA_MANTER_EXR=1` mantém os arquivos;
 - o mix transparente do fade só fica ligado enquanto a peça está em fade-in: depois o material volta
   ao original (sem BSDF transparente, os raios de sombra não precisam avaliar o material);
 - a cauda invisível do assentamento não é renderizada (ver a seção 6).
@@ -275,7 +283,8 @@ emissão da foto para os demais raios), para os móveis refletirem o ambiente re
   layout.json             itens, posições, ordem de montagem
   scene.json              especificação completa para o Blender
   calib_mask.png          pixels usados na calibração de luz
-  render/frames/*.exr     camadas 3D (Combined + Shadow Catcher) por quadro renderizado
+  render/frames/*.exr     camadas 3D (Combined + Shadow Catcher) por quadro renderizado, recortadas
+                          no border; apagadas depois da composição (MOBILIA_MANTER_EXR=1 mantém)
   render/frames.json      mapa quadro → render/border/reuso + calibração + telemetria do worker
   quadros/*.jpg           prévias de quadros compostos
   report.json             preservação, PSNR do encode, telemetria completa (tempos, GPU, render)

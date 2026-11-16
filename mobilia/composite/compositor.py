@@ -221,8 +221,9 @@ class LayerAccumulator:
         self.shadow[sl] = self.shadow[sl] * (1 - w4) + shadow[sl] * w4
 
 
-def load_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:
-    """Lê Combined (RGBA) e Shadow Catcher (RGB) de um EXR multi-part do Blender 5.
+def read_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:
+    """Lê Combined (RGBA) e Shadow Catcher (RGB) de um EXR multi-part do Blender 5, no tamanho
+    em que foi gravado (quadro inteiro ou só o recorte do border).
 
     Aceita o EXR do ``write_still`` ("ViewLayer.Combined.R", com os passes "Noisy ...") e o do
     nó File Output do worker ("Combined.R", só os dois passes usados)."""
@@ -240,7 +241,45 @@ def load_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:
     if sk:
         b = sk[0][:-2]
         shadow = np.stack([chs[b + ".R"], chs[b + ".G"], chs[b + ".B"]], -1)
-    return rgba, mask_unrendered(rgba, shadow)
+    return rgba, shadow
+
+
+def paste_crop(rgba: np.ndarray, shadow: np.ndarray | None, border: list[int] | None,
+               shape: tuple[int, int] | None) -> tuple[np.ndarray, np.ndarray | None]:
+    """Cola os passes de um EXR recortado (``use_crop_to_border``) num quadro inteiro ``shape``.
+
+    Fora do recorte fica exatamente o que o EXR de quadro inteiro traria depois de
+    ``mask_unrendered``: RGBA = 0 e sombra neutra (1). O recorte tem de ter o tamanho do
+    ``border`` (o worker alinha o border aos pixels que o Cycles renderiza, ver
+    ``render/border.py``); qualquer outro tamanho é erro, nunca um palpite de posição."""
+    h, w = rgba.shape[:2]
+    if shape is None or (h, w) == tuple(shape):
+        return rgba, shadow
+    H, W = int(shape[0]), int(shape[1])
+    if border is None:
+        raise ValueError(f"EXR {w}×{h} menor que o quadro {W}×{H} e sem border para posicioná-lo")
+    x0, y0, x1, y1 = [int(v) for v in border]
+    if (y1 - y0, x1 - x0) != (h, w) or x0 < 0 or y0 < 0 or x1 > W or y1 > H:
+        raise ValueError(f"EXR recortado {w}×{h} não bate com o border {list(border)} do quadro {W}×{H}")
+    full = np.zeros((H, W, 4), np.float32)
+    full[y0:y1, x0:x1] = rgba
+    sh = None
+    if shadow is not None:
+        sh = np.ones((H, W, 3), np.float32)
+        sh[y0:y1, x0:x1] = shadow
+    return full, sh
+
+
+def load_render_passes(exr_path: str, border: list[int] | None = None,
+                       shape: tuple[int, int] | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+    """Passes do quadro no tamanho do quadro inteiro ``shape`` (altura, largura).
+
+    EXR de quadro inteiro: lido como está. EXR recortado: colado em ``border`` (ver
+    ``paste_crop``). Nos dois casos o resultado é o mesmo, byte a byte. Sem ``shape``, devolve o
+    tamanho gravado (compatível com o uso antigo)."""
+    rgba, shadow = read_render_passes(exr_path)
+    # máscara antes de colar: fora do recorte a sombra já entra neutra, igual ao quadro inteiro
+    return paste_crop(rgba, mask_unrendered(rgba, shadow), border, shape)
 
 
 def mask_unrendered(rgba: np.ndarray, shadow: np.ndarray | None) -> np.ndarray | None:

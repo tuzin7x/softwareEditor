@@ -31,6 +31,12 @@ from .telemetry import (ENV_T_CLIQUE, ETAPAS, Stopwatch, VramMonitor, env_time, 
 ANALYSIS_LONG_EDGE = 1536
 # Lista JSON que substitui o comando do worker do Blender (depuração e testes automatizados).
 ENV_BLENDER_WORKER = "MOBILIA_BLENDER_WORKER"
+# "1" mantém os EXR dos quadros depois da composição (depuração e comando ``recompor``)
+ENV_MANTER_EXR = "MOBILIA_MANTER_EXR"
+
+
+def keep_exr() -> bool:
+    return os.environ.get(ENV_MANTER_EXR, "").strip().lower() in ("1", "true", "sim", "yes")
 
 
 def _quality(req: JobRequest, prof) -> dict:
@@ -254,7 +260,9 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         _blender_stages(sw, render_meta.get("telemetria") or {}, proc)
 
         # ---------------------------------------------------------------- composição + vídeo
-        comp = compose_video(work, plate8, render_meta, Path(req.output_path), q["fps"], req.seed, em)
+        # cada EXR é apagado assim que o último quadro que o usa é composto (PT4)
+        comp = compose_video(work, plate8, render_meta, Path(req.output_path), q["fps"], req.seed, em,
+                             delete_exr=not keep_exr())
         sw.add("composicao", comp["tempos"]["composicao"])
         sw.add("codificacao", comp["tempos"]["codificacao"])
         sw.add("verificacao", comp["verify_seconds"])
@@ -405,6 +413,9 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
             "quadros": quadros,
             "tempos": render_meta.get("timings"),
             "itens_removidos": render_meta.get("removed_items") or [],
+            # saída por quadro: passes gravados, EXR recortado no border e codec (PT4)
+            "passes": tele.get("passes", render_meta.get("passes")),
+            "exr": render_meta.get("exr") or tele.get("exr"),
         },
         "composicao": comp["composicao"],
         "preservacao": comp["preservacao"],
@@ -416,12 +427,15 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
 
 
 def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: Path, fps: int,
-                  seed: int, em: ProgressEmitter, codec: str = "libx264") -> dict:
+                  seed: int, em: ProgressEmitter, codec: str = "libx264", delete_exr: bool = False) -> dict:
     """Compõe os passes renderizados sobre a foto, grava o MP4 e verifica o resultado.
 
     Usa só o que está em ``work/render`` (EXRs + frames.json): pode ser repetido sem
-    renderizar de novo (comando ``recompor``). Mede por quadro a leitura dos EXR, a composição
-    e o envio ao codificador (``composicao.por_quadro``).
+    renderizar de novo (comando ``recompor``) enquanto os EXR existirem. Com ``delete_exr``, cada
+    EXR é apagado logo depois do último quadro que o usa. Os EXR podem ser recortados no border
+    (``use_crop_to_border``): ``load_render_passes`` cola o recorte no quadro inteiro.
+    Mede por quadro a leitura dos EXR, a composição e o envio ao codificador
+    (``composicao.por_quadro``).
     """
     from .composite.compositor import Compositor, LayerAccumulator, load_render_passes
     from .video.encoder import EncodeSettings, VideoWriter, decode_frames, psnr
@@ -429,6 +443,15 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
     t = time.perf_counter()
     em.stage("composicao", 0.0, "Compondo sobre a foto original")
     H, W = plate8.shape[:2]
+    frames_dir = work / "render" / "frames"
+    # último quadro que usa cada EXR (quadros reaproveitados apontam para o EXR anterior)
+    last_use = {fr["source"]: i for i, fr in enumerate(render_meta["frames"]) if fr.get("source")}
+    missing = [s for s in last_use if not (frames_dir / s).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} EXR de quadro não existem mais em {frames_dir} (ex.: {missing[0]}). "
+            f"Os EXR são apagados depois da composição; para recompor, gere de novo com "
+            f"{ENV_MANTER_EXR}=1.")
     comp = Compositor(plate8, seed=seed)
     out_path = Path(out_path)
     settings = EncodeSettings(codec=codec)
@@ -448,6 +471,7 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
     per_frame: list[dict] = []
     tot = {"leitura": 0.0, "composicao": 0.0, "codificacao": 0.0, "previas": 0.0}
     crops: list[int] = []
+    exr_info = {"apagados": 0, "bytes": 0}
     for i, fr in enumerate(frames):
         src = fr.get("source")
         t_read = t_comp = 0.0
@@ -458,7 +482,7 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
             t_comp = time.perf_counter() - tf
         else:
             if src != loaded_src and not fr.get("reused"):
-                rgba, sh = load_render_passes(work / "render" / "frames" / src)
+                rgba, sh = load_render_passes(frames_dir / src, fr.get("border"), (H, W))
                 acc.update(rgba, sh, fr.get("border"), fr.get("mode", "full"))
                 loaded_src = src
             t_read = time.perf_counter() - tf
@@ -471,6 +495,14 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
             enc.close()
             raise RuntimeError(f"Violação da preservação de pixels no quadro {fr['frame']}")
         stats.append(st)
+        if delete_exr and src is not None and last_use.get(src) == i:
+            p_exr = frames_dir / src
+            try:
+                exr_info["bytes"] += p_exr.stat().st_size
+                p_exr.unlink()
+                exr_info["apagados"] += 1
+            except OSError as e:          # arquivo preso (antivírus): só deixa de liberar o disco
+                em.log(f"Não foi possível apagar {p_exr.name}: {e}", "warning")
         te = time.perf_counter()
         enc.write(out8)
         t_enc = time.perf_counter() - te
@@ -529,6 +561,9 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
             "recorte_medio_px": round(sum(crops) / len(crops)) if crops else 0,
             "cobertura_recorte_media": round(sum(crops) / len(crops) / (W * H), 4) if crops else 0.0,
             "paralela": False,
+            "exr_recortado": bool((render_meta.get("exr") or {}).get("recorte", False)),
+            "exr_apagados": exr_info["apagados"],
+            "exr_bytes_apagados": exr_info["bytes"],
             "leitura_s": round(tot["leitura"], 2),
             "composicao_s": round(tot["composicao"], 2),
             "previas_s": round(tot["previas"], 2),

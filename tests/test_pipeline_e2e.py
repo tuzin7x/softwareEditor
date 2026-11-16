@@ -145,6 +145,45 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     assert rep["foto"]["megapixels"] == pytest.approx(1920 * 1440 / 1e6, abs=1e-3)
     assert set(rep["calibracao_luz"]) >= {"rel_rms", "ganhos_canal", "fracao_mascara", "sol_ajustado"}
     assert any(e["event"] == "log" and "Blender" in e["message"] for e in events)
+    # PT4: EXR recortados no border, colados no quadro inteiro e apagados depois da composição
+    assert r["exr"] == {"recorte": True, "codec": "RLE"} and c["exr_recortado"] is True
+    assert c["exr_apagados"] == q["renderizados"] and c["exr_bytes_apagados"] > 0
+    assert not list((tmp_path / "job" / "render" / "frames").glob("*.exr"))
+    # sem os EXR, recompor falha com uma mensagem clara (e não com um quadro vazio)
+    with pytest.raises(FileNotFoundError, match=pipeline.ENV_MANTER_EXR):
+        pipeline.recompose(tmp_path / "job", tmp_path / "de_novo.mp4", ProgressEmitter(callback=events.append))
+
+
+def test_fast_pipeline_keeps_exr_on_request(tmp_path, monkeypatch):
+    """Com ``MOBILIA_MANTER_EXR=1`` os EXR ficam e ``recompor`` refaz o MP4 com os mesmos quadros."""
+    from mobilia import pipeline
+    from mobilia.jobs import JobRequest, ProgressEmitter
+    from mobilia.video.encoder import decode_frames
+
+    monkeypatch.setenv("MOBILIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(pipeline.ENV_BLENDER_WORKER, json.dumps([sys.executable, str(FAKE), "blender"]))
+    monkeypatch.setenv(pipeline.ENV_MANTER_EXR, "1")
+    _tiny_quality(monkeypatch, pipeline, long_edge=160, samples=8, fps=12)
+    _fake_analysis(monkeypatch, tmp_path)
+    out = tmp_path / "video.mp4"
+    req = JobRequest(str(FX / "photos/sala_vazia_stafford.jpg"), "sala", str(out), quality="previa",
+                     work_dir=str(tmp_path / "job"))
+    res = pipeline.run_job(req, ProgressEmitter())
+    rep = json.loads(Path(res.report_path).read_text(encoding="utf-8"))
+    assert rep["composicao"]["exr_apagados"] == 0
+    n = rep["render"]["quadros"]["renderizados"]
+    assert len(list((tmp_path / "job" / "render" / "frames").glob("*.exr"))) == n
+    again = tmp_path / "de_novo.mp4"
+    rep2 = pipeline.recompose(tmp_path / "job", again, ProgressEmitter())
+    assert rep2["preservacao"]["preservado_exato_todos"] is True
+    from PIL import Image
+
+    h, w = np.asarray(Image.open(tmp_path / "job" / "plate.png")).shape[:2]
+    total = rep["render"]["quadros"]["total"]
+    idx = [1, total // 2, total]
+    a = dict(decode_frames(out, w, h, idx))
+    b = dict(decode_frames(again, w, h, idx))
+    assert all(np.array_equal(a[i], b[i]) for i in idx)
 
 
 @pytest.mark.slow

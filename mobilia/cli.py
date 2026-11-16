@@ -211,7 +211,8 @@ def main(argv=None) -> int:
     aq.add_argument("--json", action="store_true")
     aq.add_argument("--sem-blender", action="store_true")
     aq.add_argument("--sem-modelos", action="store_true")
-    rc = sub.add_parser("recompor", help="refaz composição e MP4 de um trabalho já renderizado")
+    rc = sub.add_parser("recompor", help="refaz composição e MP4 de um trabalho já renderizado "
+                                       "(precisa dos EXR: gere o trabalho com MOBILIA_MANTER_EXR=1)")
     rc.add_argument("--work-dir", required=True)
     rc.add_argument("--out", default=None, help="MP4 de saída (padrão: o do pedido original)")
     a = p.parse_args(argv)

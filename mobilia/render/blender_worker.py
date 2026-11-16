@@ -12,7 +12,8 @@ Monta a cena 3D a partir da especificação gerada pelo pipeline:
   quadrados contra a foto (o ambiente renderizado sem móveis deve reproduzir a foto);
 - móveis (glTF Poly Haven ou procedurais) normalizados e animados peça a peça;
 - render quadro a quadro em EXR multicamada (Combined RGBA + Shadow Catcher), com
-  região de render (border) restrita aos móveis e reaproveitamento de quadros estáticos.
+  região de render (border) restrita aos móveis, EXR recortado nessa região e
+  reaproveitamento de quadros estáticos.
 
 Eventos JSON (uma linha por evento) vão para a saída padrão.
 """
@@ -31,6 +32,7 @@ import mathutils
 import numpy as np
 from bpy_extras.object_utils import world_to_camera_view
 
+from mobilia.render import border as bd
 from mobilia.render import choreography as ch
 from mobilia.render import layers as lay
 from mobilia.telemetry import RenderStatsCollector
@@ -221,7 +223,8 @@ def configure_render(sc, spec: dict) -> str:
     im = sc.render.image_settings
     im.media_type = "MULTI_LAYER_IMAGE"
     im.color_depth = "16"
-    im.exr_codec = "ZIP"
+    # o File Output dos quadros copia estes ajustes; a calibração usa os mesmos (write_still)
+    im.exr_codec = bd.exr_codec(r.get("exr_codec"))
     return dev
 
 
@@ -1325,8 +1328,10 @@ def main(spec_path: str) -> None:
     # --- render quadro a quadro
     W, H = spec["width"], spec["height"]
     margin = float(spec["render"].get("border_margin_m", 0.6))
+    # EXR recortado no border (só os pixels renderizados vão ao disco)
+    crop = bool(spec["render"].get("crop_to_border", True))
     meta = {"frames": [], "calibration": calib, "device": dev, "width": W, "height": H,
-            "removed_items": removed}
+            "removed_items": removed, "exr": {"recorte": crop, "codec": sc.render.image_settings.exr_codec}}
     last_sig, last_src, last_border = None, None, None
     # Render incremental (só a região das peças em movimento) é EXPERIMENTAL: em testes
     # reduziu a área renderizada em ~14%, mas o sombreamento suave de peças junto à parede
@@ -1384,11 +1389,15 @@ def main(spec_path: str) -> None:
             # nada em movimento mas a assinatura mudou (ex.: fim do motion blur): quadro limpo completo
             b = compute_border(sc, cam, items_rt, margin)
             mode = "full"
-        if b is None:
+        # retângulo em pixels (origem no topo-esquerdo) EXATAMENTE igual ao que o Cycles renderiza;
+        # com o recorte, o EXR tem só esse retângulo e a composição o cola no quadro inteiro
+        pb = bd.pixel_border(b, W, H) if b is not None else None
+        if pb is None:
             meta["frames"].append({"frame": f, "source": None, "border": None})
             continue
+        border_px, b = pb
         sc.render.use_border = True
-        sc.render.use_crop_to_border = False
+        sc.render.use_crop_to_border = crop
         sc.render.border_min_x, sc.render.border_min_y, sc.render.border_max_x, sc.render.border_max_y = b
         camada = frame_layer(items_rt, f, fps, dyn, final_sig)
         spp = int(spp_plan.get(f, spl[camada]))
@@ -1398,10 +1407,7 @@ def main(spec_path: str) -> None:
         name = f"f_{f:05d}.exr"
         t_prep = time.perf_counter() - t_it
         st = render_frame(sc, out_dir / "frames" / name, pass_out)
-        # retângulo em pixels (origem no topo-esquerdo), igual ao usado pelo Cycles
-        border_px = [int(math.floor(b[0] * W)), int(math.floor((1 - b[3]) * H)),
-                     int(math.ceil(b[2] * W)), int(math.ceil((1 - b[1]) * H))]
-        meta["frames"].append({"frame": f, "source": name, "border": border_px, "mode": mode})
+        meta["frames"].append({"frame": f, "source": name, "border": border_px, "mode": mode, "crop": crop})
         last_sig, last_src, last_border = sig, name, border_px
         done += 1
         area = max(0, border_px[2] - border_px[0]) * max(0, border_px[3] - border_px[1])
@@ -1439,6 +1445,7 @@ def main(spec_path: str) -> None:
         "samples_config": int(spec["render"]["samples"]),
         "samples_camadas": spl,
         "passes": meta["passes"],
+        "exr": meta["exr"],
     }
     (out_dir / "frames.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     emit(event="render_done", rendered=done, meta=str(out_dir / "frames.json"))

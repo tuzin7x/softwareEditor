@@ -17,6 +17,7 @@ from ..layout import catalog
 from ..layout.model import Layout
 from ..photo import srgb_to_linear
 from . import choreography as ch
+from .border import EXR_CODEC
 from .layers import ADAPTIVE_MIN, ADAPTIVE_THRESHOLD, RAMP_FRAMES, clamp_layers
 
 
@@ -282,7 +283,9 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                    "adaptive_threshold": ADAPTIVE_THRESHOLD, "adaptive_min_samples": dict(ADAPTIVE_MIN),
                    "sample_ramp_frames": RAMP_FRAMES, "device": device, "denoise": True,
                    "motion_blur": motion_blur, "shutter": 0.5, "seed": seed, "threads": threads,
-                   "out_dir": str(work_dir / "render"), "border_margin_m": 0.6, "calib_width": 240},
+                   "out_dir": str(work_dir / "render"), "border_margin_m": 0.6, "calib_width": 240,
+                   # EXR de cada quadro: só o retângulo renderizado, compressão rápida (render/border.py)
+                   "crop_to_border": True, "exr_codec": EXR_CODEC},
     }
     (work_dir / "scene.json").write_text(json.dumps(spec, ensure_ascii=False, indent=1), encoding="utf-8")
     return spec
