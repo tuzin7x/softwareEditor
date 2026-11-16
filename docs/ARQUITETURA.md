@@ -1,4 +1,4 @@
-# Arquitetura do Mobília Studio
+# Arquitetura do 7xAi
 
 > Documento vivo. Decisões tomadas e **validadas com testes reais** neste repositório.
 > A pesquisa comparativa de tecnologias está em [`PESQUISA_TECNOLOGIAS.md`](PESQUISA_TECNOLOGIAS.md).
