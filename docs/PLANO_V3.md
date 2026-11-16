@@ -1,0 +1,388 @@
+# 7xAi V3: plano de implementação
+
+Data: 16/11/2026. Este plano junta 3 pesquisas (`r_staging`, `r_removal`, `r_catalog`), 3 protótipos em CPU (`p_staging`, `p_removal`, `p_cutout`) e 2 críticas (`critic_realism`, `critic_feasibility`), todos na pasta `scratchpad/v3/`. Nada no repositório foi alterado.
+
+Comparativo visual do melhor quadro de cada abordagem: `scratchpad/v3/comparativo.jpg`.
+
+> **Aviso:** a sandbox não tem GPU. Os tempos na RTX 5070 Laptop 8 GB são **estimativas [E]**. Os tempos de CPU foram **medidos [M]**. As licenças marcadas **[V]** foram conferidas pela API do Hugging Face ou pelo arquivo LICENSE do GitHub.
+
+---
+
+## 1. Decisão e por quê
+
+### 1.1 Decisão
+
+1. **O motor principal da V3 deixa de ser o render 3D e passa a ser composição 2D com camadas feitas de pixels de foto real.** Um único motor de camadas atende os dois modos:
+   - **Modo B, "foto mobiliada"** (o pedido atual do usuário, implementado **primeiro**): o software tira os móveis por trás. O vídeo começa na sala vazia, os móveis **da própria foto** voltam um a um com animação, e o vídeo termina **exatamente** na foto original.
+   - **Modo A, "sala vazia → mobiliada"** (depois): um modelo de difusão com licença comercial (SDXL/RealVisXL + ControlNet de profundidade) **pinta** os móveis dentro da foto, guiado pelo layout automático atual. O mesmo motor de camadas do modo B separa e anima essas peças. A foto vazia real do cliente serve de fundo, então nesse modo não há inpainting de sala vazia.
+2. **A ideia de "PNG de móveis reais tirados da internet" fica descartada como motor.** O catálogo só serve como referência de estilo (fotos CC0 ou do próprio usuário), nunca colado na imagem.
+3. **O motor v2 (Blender Cycles + Poly Haven CC0) fica como fallback determinístico** e como fonte do passe de profundidade (Z) do modo A. Não é apagado.
+
+### 1.2 Evidências
+
+| Abordagem | Nota do crítico (1–10) | Evidência | Por que sim ou não |
+|---|---|---|---|
+| v2 atual, render 3D | rejeitado pelo usuário | `comparativo.jpg`, painel 1 | "Parece 3D." |
+| PNG recortado, layout automático (p_cutout A) | **2** | `p_cutout/out/comp_A/composite_1440.jpg` | Erro de azimute de 50–85° entre a foto da peça e a parede. |
+| PNG recortado, melhor caso (p_cutout B) | **4,5** | `p_cutout/zoom_100pct.jpg` | "Adesivo": luz de cada peça diferente, halos, lixo da foto de origem (cesto, caneca, livro), elevação de câmera errada. A simulação de homografia (`r_catalog/sim/viewpoint_error.py`) mostra que um recorte só aguenta ±3–4° de ângulo. Seriam 180–360 fotos por peça. |
+| Híbrido PNG + SD1.5 (H55) | **5,5** | `p_cutout/out/comp_H55/composite_1440.jpg` | Mais fotográfico, mas muda o produto (SSIM 0,27–0,60) e continua preso à baixa resolução e à elevação das fontes. |
+| Licença do catálogo PNG | — | `r_catalog/RELATORIO.md` | Unsplash, Pexels e Pixabay proíbem embutir as fotos como biblioteca [M]. 3D-FUTURE, ABO e IKEA são não comerciais. O CC0 moderno praticamente não existe: no Commons só há fotos históricas, e os resultados CC0 do Openverse são ilustrações ou peças de museu. |
+| SDXL sobre o render CG (H1) | **2,5** | `p_staging/final_H1_full.jpg` | Mantém o visual CG. |
+| SDXL + depth no lugar (R2) | **4,5** | `p_staging/final_R2_full.jpg`, `critic_realism/r2_grid.jpg` | É o caminho certo para o modo A: escala e perspectiva corretas e aparência de foto em miniatura. Ainda tem móveis moles (upscale de 1,875×), objetos derretidos e, na animação, partes ocultas expostas (luminária sem base, poltrona sem metade). Só 1 de 13 gerações saiu boa. |
+| **Modo B: esvaziar e devolver (p_removal)** | **5** (o protótipo se deu 6) | `p_removal/out/antes_vazio_depois.jpg`, `p_removal/out/cmp_all.jpg`, `p_removal/out/video_final/video.mp4` | **Os móveis ficam 9/10**, porque são pixels reais. O último quadro é `array_equal` à foto (verificado também pelo crítico, após decodificar o MKV sem perdas). O ponto fraco é o 1º quadro, a sala vazia, que tem nota 3. |
+
+Conclusão: o modo B **já resolve a demanda 1 (nada de 3D) e a demanda 2** com a arquitetura certa. Todo o esforço de qualidade vai para a **sala vazia** e para a **coreografia**. O modo A reaproveita o mesmo motor. Por isso o modo B vem primeiro.
+
+### 1.3 Mudança de regra do produto
+
+A "regra absoluta" da `docs/ARQUITETURA.md` §1 ("não usa difusão nem inpainting sobre a foto") **precisa ser reescrita**:
+
+> Fora da máscara de remoção ou de inserção, todo quadro mestre é byte a byte a foto. No modo B, o quadro final é a foto exata (na resolução do vídeo). No modo A, o quadro inicial é a foto exata. Pixels gerados só existem dentro das máscaras, e o `report.json` informa a área e a porcentagem deles.
+
+A "exatidão" vale nos quadros mestres e na resolução do vídeo. O `load_photo` reduz fotos acima de 1920 px, e o MP4 H.264 yuv420p tem perda por natureza. A UI e o marketing devem dizer exatamente isso.
+
+---
+
+## 2. Modo A: "sala vazia → mobiliada" com móveis de aparência real
+
+**Entrada:** foto da sala vazia e tipo de ambiente (como hoje). **Saída:** o vídeo começa na foto exata e as peças entram até a sala mobiliada.
+
+### 2.1 Pipeline
+
+1. **Análise (existente):** MoGe-2, OneFormer e `build_room_model`.
+2. **Layout (existente):** `layout/solver.py` escolhe as peças e as posições (pegadas, alturas, rotações).
+3. **Passe Z do layout:** profundidade dos modelos CC0 com forma real (Poly Haven), renderizada pelo Blender (só Z, sem Cycles completo: `bpy`/EEVEE ou um rasterizador próprio). **Não** usar caixas: as caixas geraram armários em forma de caixa literal (p_staging, variantes A–C).
+4. **Geração:** RealVisXL V5.0 Lightning (ou SDXL base 1.0 + SDXL-Lightning como alternativa de licença limpa), mais ControlNet depth (small ou Union), máscara = pegadas dilatadas e sombras, prompts fixos por tipo de ambiente com embeddings pré-calculados, 6–8 passos.
+   - Gerar a 1024×768 e fazer um **2º passe hires em tiles** só nas regiões dos móveis (~1,5–2 MP, força 0,3–0,4). Isso ataca o defeito nº 1 do R2 (móveis moles).
+   - **2–3 sementes com nota automática:** área gerada fora das pegadas planejadas, instâncias detectadas pelo OneFormer por classe esperada, e penalidade para objetos pequenos "derretidos". Fica a melhor.
+   - Sem acessórios de mesa pequenos no prompt nem na máscara: eles derretem.
+5. **Recolocação na foto:** só dentro da máscara final (móveis + sombras). Fora dela, os pixels são byte a byte os da foto (o R2 manteve 69,5% da foto idêntica).
+6. **Camadas:** o motor do modo B (§3), com a foto vazia real como placa. As peças são separadas por OneFormer panoptic + SAM 2.1. As sombras são a razão `mobiliada / vazia ≤ 1`.
+7. **Partes ocultas:** as partes escondidas de uma peça gerada (pé da luminária atrás do sofá, base da poltrona) **não existem**. Duas saídas:
+   - a ordem de entrada e a coreografia do modo B (§3.4);
+   - completar a parte oculta com inpainting SDXL por objeto, só para peças que caem de cima.
+8. **Animação e codificação:** como no modo B, mas o primeiro quadro é a foto vazia e o último é a composição mobiliada.
+
+### 2.2 Qualidade esperada e o que falta
+
+- Hoje (R2): 4,5/10. Metas da V3: hires pass, seleção de sementes, sem acessórios pequenos e oclusão resolvida. Alvo: ≥ 7/10 numa sala típica.
+- Mudar o produto (o sofá sair diferente do planejado) **não é defeito** no modo A: o cliente vende o imóvel, não o sofá. O layout só garante escala e posição.
+- Fallback: se nenhuma semente passar na nota mínima, usar o motor v2 (Cycles) e avisar no relatório.
+
+---
+
+## 3. Modo B: "foto mobiliada: o software esvazia por trás, o vídeo começa vazio e os móveis reais aparecem até ficar igual à foto"
+
+**Entrada:** foto com móveis e tipo de ambiente. O modo é **detectado sozinho** pelas instâncias de móveis do OneFormer (número e área), com chave manual de override. **Saída:** MP4 cujo 1º quadro é a sala vazia (a remoção nunca aparece) e cujo último quadro mestre é a foto original byte a byte.
+
+### 3.1 Segmentação por peça
+
+- OneFormer ADE20K **panoptic** (`label_ids_to_fuse` vazio), unido aos componentes **semânticos** que o panoptic perde. No teste, o panoptic não achou a mesa de jantar e fundiu 2 tapetes.
+- SAM 2.1 base+ por caixa para refinar. Se o IoU contra o OneFormer for menor que 0,6, fica a máscara do OneFormer. Manter só o maior componente conexo, cortar alpha < 0,05 fora da máscara dilatada e fundir fragmentos pela regra do fecho convexo (perna separada pela cadeira).
+- Classificação: peças **móveis** (sofá, cadeira, mesa, cama, tapete, luminária, planta, quadro) vs **fixas**. Fixas ficam: painéis e armários embutidos, cortina, luminária de parede, eletrodomésticos embutidos. O ADE20K não distingue embutido de solto, então é preciso uma regra geométrica: encostado na parede, do piso ao teto ou largura de parede inteira significa fixo.
+- Bordas finas (opcional): BiRefNet (MIT) no recorte de cada peça. **Não usar ViTMatte** (treinado no Composition-1k, risco jurídico) nem RMBG-2.0 (não comercial).
+- Objetos pequenos (controle remoto, caixas de som, objetos sobre a mesa) que o OneFormer não detecta **ficam no fundo**. Opcional V3.1: Grounding-DINO tiny (Apache-2.0).
+
+### 3.2 Sala vazia (o gargalo de qualidade)
+
+Ordem que o protótipo validou: C > B > A > D (`p_removal/out/cmp_all.jpg`).
+
+1. **Máscara de remoção = peças + anel de 1,2% da diagonal + sombra e reflexo.** Primeira passada de LaMa. Depois, só ficam na máscara os candidatos (faixa espelhada abaixo dos pés, até 45% da altura) em que a foto difere da placa e que estão ligados à peça. Segunda passada.
+2. **LaMa por plano** com o `RoomModel`: cada pixel mascarado é classificado por ray-cast na caixa **vazia** como piso, parede *i* ou "outro" (vista por portas).
+   - Piso: retificado para vista de cima, LaMa com contexto só de piso, grão reinjetado.
+   - Paredes: retificadas de frente, com o rodapé reto.
+   - **A máscara inteira entra em cada vista retificada.** Bug encontrado no protótipo: com só os pixels do próprio plano, o LaMa reconstrói a cadeira a partir dos pedaços dela que caem no plano vizinho.
+3. **Harmonização por plano (novo, exigido pela crítica):** casar média, desvio e histograma de cor do piso preenchido com o anel original, por plano retificado, mais Poisson blending na borda da máscara. Ataca as "ilhas" de tom no piso.
+4. **Refino SDXL opcional e restrito:**
+   - só no **piso** e nos vãos, força 0,3–0,5, ControlNet com a profundidade da **caixa vazia** (é o que mantém as quinas);
+   - paredes ficam no LaMa por plano, ou força ≤ 0,3;
+   - **janelas, vistas externas e portas são regiões protegidas**: nunca SDXL ali. O protótipo transformou a sacada em ladrilhos e inventou uma porta e uma tomada. Em anúncio imobiliário isso é risco (CDC, art. 37).
+5. **2–3 sementes com nota automática:**
+   - visibilidade da costura: diferença de estatística de cor e textura entre o interior e o anel;
+   - **descarte** de semente em que o OneFormer detecta objeto novo (porta, móvel ou tomada onde antes havia parede);
+   - se nenhuma passar, usar a placa só com LaMa por plano (B).
+6. **Copiar de volta** a foto byte a byte fora da máscara. Isso garante que a placa só difere da foto dentro dela.
+7. **Piso polido:** aceitar que o reflexo é removido, não reconstruído.
+
+### 3.3 Camadas
+
+- Para cada peça: RGBA com **cor pré-multiplicada `C = foto − (1−A)·fundo_abaixo`**, calculada na ordem de pintura. Com isso, a pilha completa reproduz a foto por construção, até o arredondamento. Isso substitui a dissolução longa e evita os "fantasmas" de cor.
+- **Efeito (sombra e reflexo) = razão `foto / placa`, limitada a ≤ 1**, só **perto da peça e onde a foto é mais escura que a placa**.
+- **O resto da diferença foto − camadas é corrigido na própria placa, não revelado no vídeo.** A crítica mediu que 7,1% da imagem fora de qualquer móvel "se curava" durante o vídeo (carpete virando terrazzo), um morph visível. **Invariante novo:** fora do alpha dilatado da peça e da região de efeito dela, a placa de cada quadro não muda.
+- A dissolução final cai para no máximo 4 quadros, só para o arredondamento, seguida de hold com a foto exata.
+
+### 3.4 Coreografia (sem revelar partes que não existem)
+
+Regras validadas no p_removal: nenhum pixel inexistente apareceu.
+
+- **Ordem de pintura:** de trás para frente, pelos pares de oclusão (profundidade do MoGe na borda comum) mais regras de apoio (vaso na mesa, travesseiro na cama, tapete no fundo de tudo).
+- **Ordem de entrada:** o tapete primeiro (**desenrola no lugar**). Depois, as peças da **frente para trás**, e os apoios antes do que está apoiado. Quando uma peça de trás entra, quem a cobre já está lá.
+- **Peça ocluída:** "sobe por trás" do oclusor, com amplitude limitada para a borda cortada ficar sempre dentro dele. Se a amplitude possível for < 5% da altura, usar **escala 0,94→1 no ponto de contato**, com opacidade 100%.
+- **Peça que toca a borda da foto:** desliza a partir dessa borda. Nunca cai.
+- **Peça isolada e inteira:** queda curta (≤ 25% da altura do quadro) com quique (curvas de `render/choreography.py`).
+- **Nada de fade de opacidade** (a crítica chamou de "fantasma"). Opacidade 100% desde o 1º quadro visível.
+- **Sombra de contato cresce** conforme a peça se aproxima do chão (opacidade proporcional à altura). O reflexo acompanha o deslocamento.
+- **Duração:** 1º quadro vazio na tela ≤ 0,5 s (o tapete ou a primeira peça já começam a entrar), total de 7–10 s e hold final ≥ 1 s com a foto exata.
+
+### 3.5 Verificações automáticas (`composite/verify.py` reescrito)
+
+1. O quadro 0 é `array_equal` à placa vazia.
+2. O último quadro mestre é `array_equal` à foto original (na resolução do vídeo).
+3. Em todo quadro, fora de (máscara de remoção ∪ caixa da peça em movimento), o quadro é `array_equal` à foto.
+4. A placa é `array_equal` à foto fora da máscara de remoção.
+5. Nenhum pixel com "alpha oculto" (parte da peça coberta por outra na foto) fica visível sem o oclusor na frente.
+6. Pixels fora de qualquer alpha e de qualquer efeito não mudam entre quadros consecutivos (anti-morph).
+7. O `report.json` registra a área gerada (%), o número de peças, as peças deixadas no fundo, a semente escolhida e a nota.
+
+---
+
+## 4. Código atual: o que é reaproveitado, substituído ou mantido como fallback
+
+| Componente (`mobilia/`) | V3 |
+|---|---|
+| `analysis/geometry.py` (MoGe-2), `analysis/room.py` (`build_room_model`) | **Reaproveitado sem mudança.** Dá as linhas parede/piso para o LaMa por plano e a profundidade da caixa vazia para o ControlNet. |
+| `analysis/segmentation.py` (OneFormer) | **Estendido:** modo panoptic + união com a semântica + detecção automática do modo. |
+| `analysis/weights.py`, `cli prefetch`, `bootstrap.py`, `warmup.py` | **Estendidos:** novos pesos, SHA-256 e leitura completa dos `.safetensors` no warm-up (para a varredura do Defender não cair no tempo do vídeo). |
+| `hardware.py`, `diagnostics.py` | **Estendidos:** VRAM livre (`torch.cuda.mem_get_info`), detecção do *sysmem fallback* e RAM do sistema ≥ 16 GB para SDXL. |
+| `layout/` (solver, regras, slots, catálogo) | **Modo A:** reaproveitado inteiro. **Modo B:** não usado. |
+| `layout/entrances.py`, `layout/narrative.py` | **Reescritos para camadas 2D** (borda → desliza, oclusão → sobe por trás, ordem por profundidade). As ideias ficam. |
+| `render/choreography.py` (easing, mola, marcos) | **Reaproveitado.** |
+| `render/blender_worker.py`, `render/scene_spec.py`, `render/layers.py`, `render/calibration.py`, `assets/polyhaven.py` | **Fallback** (motor v2 completo) e, no modo A, **só o passe Z**. Não remover antes do modo A estar pronto. |
+| `render/budget.py` | **Reescrita parcial:** nova ordem de corte (sementes → hires → refino SDXL → resolução). A sonda passa a ser a 1ª chamada SDXL. |
+| `composite/compositor.py` (`placa·S·(1−A)+C`, cópia bit a bit), `LayerAccumulator`, `blend_frames` | **Reaproveitado.** Placa = sala vazia (B) ou foto vazia (A), `S` = razão foto/placa. |
+| `composite/stream.py` | **Portar para torch na GPU, por caixa de camada.** É o maior risco de tempo do modo B: 15–45 s em numpy a 1920 px [E], 33,7 s medidos [M] a 1280×846 na CPU. |
+| `composite/verify.py` | **Reescrito** (§3.5). |
+| `composite/contact.py`, `composite/grade.py` | `contact.py` vira o gerador da sombra de contato crescente. `grade.py` fica para o modo A (casar a cor da peça gerada). |
+| `video/encoder.py` (NVENC/x264, BT.709) | **Reaproveitado.** Opcional: exportar também um MKV sem perdas para auditoria. |
+| `pipeline.py`, `jobs.py`, `ui/` | **Ajuste pequeno:** ramo modo A/B, override manual e texto "o fim é idêntico à foto na resolução do vídeo". |
+| **Novos módulos** | `mobilia/removal/` (instâncias, máscaras de efeito, placa por plano, harmonização, sementes), `mobilia/gen/` (SDXL + ControlNet + embeddings pré-calculados), `mobilia/layers2d/` (RGBA pré-multiplicado, efeitos, oclusão, coreografia 2D). |
+| `docs/ARQUITETURA.md` §1, EULA | **Reescritos** (§1.3 e §5.4). |
+
+---
+
+## 5. Modelos, licenças, VRAM, downloads e tempo
+
+### 5.1 Lista fechada de modelos
+
+Tudo foi conferido [V] e **nada é gated**.
+
+| Função | Modelo | Licença | Download | VRAM pico [E] | Modo |
+|---|---|---|---|---|---|
+| Geometria (já existe) | `Ruicheng/moge-2-vitl-normal` | MIT | 1,32 GB | ~2 GB | A, B |
+| Segmentação (já existe) | `shi-labs/oneformer_ade20k_swin_large` | MIT | 0,88 GB | ~2–3 GB | A, B |
+| Máscara por peça | `facebook/sam2.1-hiera-base-plus` | Apache-2.0 | 0,32 GB | < 1 GB | A, B |
+| Sala vazia | big-lama (TorchScript, `advimman/lama`) | Apache-2.0 | 0,21 GB | ~1–2 GB | B |
+| Gerador SDXL (**um único UNet**) | `SG161222/RealVisXL_V5.0_Lightning` **ou** `stabilityai/stable-diffusion-xl-base-1.0` + `ByteDance/SDXL-Lightning` (licença limpa) | OpenRAIL++ | 5,14 GB (+0,39 da LoRA) | **~6,7–7,2 GB** | A, B (refino) |
+| VAE | `madebyollin/sdxl-vae-fp16-fix` | MIT | 0,33 GB | 0,17 GB | A, B |
+| ControlNet depth | `diffusers/controlnet-depth-sdxl-1.0-small` (ou `xinsir/controlnet-union-sdxl-1.0`, Apache-2.0, 1,25 GB após conversão fp16 num espelho) | OpenRAIL++ / Apache | 0,32 GB | 0,3 GB | A, B |
+| Text encoders | **não vão para o cliente**: embeddings pré-calculados no build para os prompts fixos | OpenRAIL++ | ~MB | 0 | A, B |
+| Bordas (opcional) | `ZhengPeng7/BiRefNet` | MIT | 0,44 GB | ~1 GB | A, B |
+| Objetos pequenos (V3.1) | `IDEA-Research/grounding-dino-tiny` | Apache-2.0 | 0,69 GB | ~1 GB | B |
+
+**Proibidos (não comerciais) [V]:** tudo derivado do FLUX.1-dev (Fill, Kontext, Redux, OmniEraser, Insert Anything, UNO, In-Context-LoRA, Hyper-FLUX), FLUX.2-klein-9B, SDXL-Turbo, DMD2, pix2gestalt, LBM relighting, IC-Light V2, RMBG-2.0, MAT, MatAnyone, ObjectClear, SV3D, Stable Zero123 e Depth-Anything-V2-Large.
+
+**Excluídos por outro motivo:**
+- SD 3.5 e SF3D: comercial só abaixo de US$ 1 M de receita, e são gated.
+- FLUX.1-schnell e SAM3: gated, o download anônimo falha no cliente.
+- Qwen-Image-Edit-2509: 57,7 GB.
+- FLUX.2-klein-4B: ~16 GB em bf16; fica como candidato V3.1 com quantização.
+- Hyper-SD, BrushNet e Harmonizer: licença duvidosa.
+- ViTMatte: dataset de treino de pesquisa.
+- AnyDoor e Zero123++: sem licença.
+- TRELLIS: depende de nvdiffrast, não comercial.
+
+**Obrigações:**
+- OpenRAIL++: incluir as restrições de uso (Attachment A) no EULA, enviar a cópia da licença com os pesos e marcar os pesos modificados (por exemplo, LoRA fundida).
+- MIT e Apache: incluir os textos das licenças.
+- O ADE20K e o Places2 (treino do OneFormer e do LaMa) são datasets de pesquisa. O risco residual é baixo e o produto atual já o carrega.
+
+### 5.2 Downloads e pacote
+
+| Pacote | Adicional sobre a v2 |
+|---|---|
+| Modo B só LaMa (SAM 2.1 + big-lama [+ BiRefNet]) | **+0,5–1,0 GB** |
+| + SDXL (refino B e modo A): UNet 5,14 + VAE 0,33 + ControlNet 0,32 + embeddings | **+5,8 GB** |
+| Total do motor V3 em `%LOCALAPPDATA%` (com o v2 e o Poly Haven) | **≈ 12–14 GB** |
+
+- O PyTorch continua o do repositório: `torch==2.15.0+cu132` (`requirements/runtime-cuda.txt`), que já suporta Blackwell sm_120. A recomendação de "fixar 2.7/cu128" está **superada**. Não rebaixar.
+- Novas dependências: `diffusers` e `peft`, pure-Python, Apache-2.0. Usar **só `from_pretrained`** de pastas diffusers (o `from_single_file` do diffusers 0.35 quebra com transformers 5.x). Fixar as versões depois do teste no Windows. Sem xformers e sem `torch.compile`.
+- O `Sam2Model` já existe no transformers instalado. O big-lama roda por `torch.jit`.
+- Hospedar um **espelho próprio** dos pesos com SHA-256 (hashes já registrados em `p_staging/models_sha256.txt` e `r_removal/RELATORIO.md`). Download no 1º uso, empacotamento com PyInstaller onedir.
+
+### 5.3 VRAM (8 GB)
+
+- Mantém-se a regra atual "um modelo na GPU por vez": MoGe → OneFormer → SAM2 → LaMa → SDXL, liberando VRAM entre etapas.
+- O SDXL é a única etapa apertada (6,7–7,2 GB). Por isso:
+  - text encoders fora do runtime;
+  - VAE em tiles;
+  - medir a VRAM livre antes de carregar e, abaixo de ~7 GB, usar `enable_model_cpu_offload`;
+  - abaixo de ~5 GB, **pular o refino SDXL** (modo B) ou usar o fallback v2 (modo A).
+- **O sysmem fallback do driver NVIDIA no Windows** não dá OOM: deixa o SDXL de 5 a 20 vezes mais lento em silêncio. O diagnóstico precisa detectar isso (tempo por passo da sonda) e registrar no `report.json`.
+- RAM do sistema: SDXL com offload precisa de ≥ 16 GB.
+
+### 5.4 Tempo por etapa na RTX 5070 Laptop 8 GB [E], cache quente
+
+**Modo B**
+
+| Etapa | CPU medido [M] | GPU estimado [E] |
+|---|---|---|
+| Preparo + MoGe-2 + OneFormer (panoptic + semântica) | 18 s + 13,9 s | 3–6 s |
+| SAM 2.1 (~18 caixas) | 2,8 s | 0,5–1,5 s |
+| LaMa por plano, 2 passadas (~12 chamadas) | 15–33 s por passada | 2–5 s |
+| Harmonização + seleção de sementes (numpy/torch) | — | 1–3 s |
+| Carga SDXL (quente / frio) | 15 s | 3–6 s / 10–25 s |
+| Refino SDXL, 2–3 sementes × 6 passos efetivos, ~0,7 MP | 96 s (1 semente) | 4–12 s |
+| Camadas + efeitos | 1,2 s | < 1 s |
+| Composição de ~240 quadros + NVENC | 33,7 s (1280×846) | 4–10 s em torch/GPU (15–45 s se ficar em numpy) |
+| **Total** | — | **≈ 30–75 s** (sem SDXL: 25–60 s) ✔ ≤ 120 s |
+
+**Modo A**
+
+| Etapa | GPU estimado [E] |
+|---|---|
+| Análise + layout (já existe) | 10–15 s |
+| Passe Z do layout | 2–6 s |
+| Carga SDXL | 3–25 s |
+| 3 sementes a 0,75 MP + nota | 6–14 s |
+| Passe hires nos móveis | 5–15 s |
+| OneFormer + SAM 2.1 + camadas | 2–4 s |
+| Composição + codificação | 5–10 s (GPU) |
+| **Total** | **≈ 40–100 s** ✔ |
+
+Os custos únicos (primeiro download, primeira carga fria) continuam fora da conta, como no PLANO_V2 §1.
+
+---
+
+## 6. Pacotes de trabalho (em ordem de execução)
+
+Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]**. Em CI e na sandbox, rodam com stubs.
+
+### PT-V3-0: Base, licenças e fixtures
+- Reescrever a "regra absoluta" (ARQUITETURA §1) e criar `docs/LICENCAS_V3.md` e o rascunho do EULA (OpenRAIL++ Attachment A + MIT/Apache).
+- Conseguir **2 fotos mobiliadas com licença comercial** (Commons CC0/PD, conferindo a página de origem): a de Nice (difícil) e **uma típica de anúncio** (piso fosco, sofá + mesa de centro). Registrar a URL e a licença em `tests/fixtures/rooms/*/SOURCE.md`.
+- Gerar fixtures cacheadas (seg.npz, room.json, geometry) para os testes rodarem sem modelos.
+- **Aceite:** `docs/LICENCAS_V3.md` lista cada modelo com a licença e o link conferidos. A suíte atual continua verde. As fixtures carregam em < 1 s.
+
+### PT-V3-1: Pesos, bootstrap e diagnóstico
+- `analysis/weights.py`: SAM 2.1, big-lama, UNet SDXL, VAE, ControlNet e embeddings pré-calculados, com SHA-256 e espelho configurável.
+- Script de build que pré-calcula os embeddings dos prompts fixos por tipo de ambiente.
+- `hardware.py`: VRAM livre, RAM e sonda de sysmem fallback. Perfis "B sem SDXL", "B com SDXL" e "A".
+- Warm-up que lê os `.safetensors` inteiros uma vez.
+- **Aceite:** um download corrompido (hash errado) é rejeitado e baixado de novo. Um modelo gated ou ausente gera uma mensagem clara. O teste unitário dos perfis cobre 4, 6, 8 e 12 GB simulados. Nenhum text encoder no pacote do cliente.
+
+### PT-V3-2: Instâncias de móveis (modo B)
+- `removal/instances.py`: OneFormer panoptic ∪ semântica, SAM 2.1 por caixa (fallback se IoU < 0,6), maior componente conexo, fusão de fragmentos, regra móvel vs fixo e detecção automática do modo (A ou B).
+- **Aceite:** na foto de Nice, ≥ 16 das 18 peças do protótipo detectadas, com a mesa de jantar presente e os 2 tapetes separados. Na foto Stafford vazia, o modo detectado é A. Na foto típica, sofá e mesa de centro detectados com IoU ≥ 0,85 contra uma máscara anotada à mão. Tempo [GPU] ≤ 3 s.
+
+### PT-V3-3: Máscara de efeitos e sala vazia por plano (LaMa)
+- `removal/plate.py`: 2 passadas, faixa espelhada de sombra/reflexo, ray-cast na caixa vazia, vistas retificadas com **a máscara inteira**, harmonização por plano (histograma + Poisson), regiões protegidas (janelas e portas: LaMa no espaço da imagem com contexto local) e cópia de volta byte a byte.
+- **Aceite:**
+  - `array_equal(placa[~mask], foto[~mask])`;
+  - a linha parede/piso projetada fica a ≤ 3 px da borda detectada do rodapé na placa (no protótipo, falhava com LaMa puro);
+  - diferença de média de cor (Lab) entre o piso preenchido e o anel ≤ 3 ΔE em cada plano;
+  - o OneFormer roda na placa e **não encontra nenhuma instância de móvel** com área > 0,5% da imagem;
+  - [GPU] ≤ 5 s.
+
+### PT-V3-4: Refino SDXL da sala vazia (opcional, perfil "B com SDXL")
+- `gen/sdxl.py`: UNet único + ControlNet depth da caixa vazia + Lightning, força 0,3–0,5 só no piso e nos vãos, janelas e portas protegidas, 2–3 sementes e nota (costura + objetos novos pelo OneFormer). Fallback para a placa LaMa.
+- **Aceite:**
+  - o mesmo teste do PT-V3-3, mais "nenhuma porta, janela ou tomada nova" (instâncias novas do OneFormer = 0);
+  - os pixels de janela são `array_equal` à placa LaMa;
+  - com o SDXL desligado o pipeline continua funcionando;
+  - [GPU] carga + 3 sementes ≤ 20 s quente, VRAM pico ≤ 7,2 GB e sem sysmem fallback registrado.
+
+### PT-V3-5: Camadas 2D e anti-morph
+- `layers2d/layers.py`: ordem de pintura, RGBA pré-multiplicado `C = foto − (1−A)·fundo`, efeito = razão limitada só perto da peça e mais escuro que a placa, e correção do resíduo restante **na placa**.
+- **Aceite:**
+  - pilha completa vs foto: máximo ≤ 2 níveis (só arredondamento; era p99 = 10, máximo 40);
+  - pixels fora de alpha ∪ efeito que mudam entre o 1º e o último quadro = **0%** (era 7,1%);
+  - [GPU] < 1 s.
+
+### PT-V3-6: Coreografia 2D sem partes ocultas
+- `layers2d/choreo.py`: tapete desenrola; entrada da frente para trás com os apoios primeiro; ocluída sobe por trás (amplitude limitada) ou escala no lugar; borda → desliza; isolada → queda ≤ 25% + quique; sem fade; sombra de contato crescente; 1º quadro vazio ≤ 0,5 s.
+- **Aceite:**
+  - teste automático "pixel oculto visível" = 0 em todos os quadros (Nice e típica);
+  - nenhum quadro com opacidade de peça entre 0,05 e 0,95;
+  - peças tocando a borda nunca têm deslocamento vertical vindo de cima;
+  - duração entre 7 e 10 s.
+
+### PT-V3-7: Composição em GPU, verificação e codificação
+- Portar `composite/stream.py` para torch (por caixa de camada), reescrever o `verify.py` (§3.5) e o `budget.py` (nova ordem de corte), mais um MKV sem perdas opcional para auditoria.
+- **Aceite:**
+  - o quadro 0 é `array_equal` à placa e o último é `array_equal` à foto (também após decodificar o MKV);
+  - invariante fora da máscara ∪ caixa móvel verificado em 100% dos quadros;
+  - mesma saída em CPU e GPU (diferença ≤ 1 nível);
+  - [GPU] 240 quadros a 1920×1440 + NVENC ≤ 10 s.
+
+### PT-V3-8: Integração do modo B (pipeline + UI)
+- Ramo em `pipeline.py`/`jobs.py`, override manual na UI, textos ("o fim é idêntico à foto na resolução do vídeo"; aviso "imagem ilustrativa" opcional) e `report.json` com a área gerada, as peças, a semente e as notas.
+- **Aceite:**
+  - e2e com fixtures, na CPU, gera o MP4 e passa todas as verificações;
+  - a UI só pede o tipo de ambiente;
+  - **[GPU] total ≤ 120 s quente nas 2 fotos, medido na RTX 5070 Laptop do usuário**;
+  - avaliação visual: a sala vazia sem invenções e a nota do crítico ≥ 7 na foto típica.
+
+### PT-V3-9: Modo A com o motor novo
+- Passe Z do layout (Blender só Z), `gen/sdxl.py` em modo inserção (máscara = pegadas + sombras), 3 sementes + nota, hires pass nos móveis, recolocação por máscara, camadas com a foto vazia como placa, completamento SDXL da parte oculta só para peças que caem e fallback v2.
+- **Aceite:**
+  - o 1º quadro é `array_equal` à foto vazia;
+  - fora da máscara de inserção, todo quadro é `array_equal` à foto;
+  - a nota da semente escolhida ≥ limiar e nenhuma classe esperada faltando;
+  - "pixel oculto visível" = 0;
+  - [GPU] ≤ 120 s;
+  - avaliação visual: nota ≥ 7 na Stafford (contra 4,5 do R2).
+
+### PT-V3-10: Empacotamento, EULA e benchmark final
+- PyInstaller onedir com as novas dependências fixadas, EULA com as restrições OpenRAIL++ e os textos MIT/Apache, CI com torch cu132 e testes com stubs.
+- Benchmark na máquina do usuário (§7.2).
+- **Aceite:**
+  - instalação limpa no Windows: o primeiro uso baixa os pesos e confere o SHA-256;
+  - os 2 modos rodam na RTX 5070 Laptop dentro de 120 s quente;
+  - o relatório de benchmark é anexado em `docs/`.
+
+**Ordem e dependências:** 0 → 1 → 2 → 3 → 5 → 6 → 7 → 8 (o **modo B entregável sem SDXL** já sai aqui) → 4 (refino SDXL) → 9 (modo A) → 10.
+
+---
+
+## 7. Riscos abertos e o que validar na GPU do usuário
+
+### 7.1 Riscos
+
+1. **Qualidade da sala vazia:** é o 1º quadro, o que o espectador vê primeiro. Hoje está em 3/10 na foto difícil. Pisos polidos ou estampados e peças grandes encostadas na parede são os piores casos. Mitigações: §3.2, regiões protegidas e seleção de sementes. Pode ser preciso aceitar "imagem ilustrativa".
+2. **Invenções do SDXL** (porta, tomada, vista de janela): risco comercial e jurídico (CDC, art. 37). Mitigação: SDXL só no piso, regiões protegidas e descarte automático de sementes com objetos novos.
+3. **Partes ocultas:** sem completamento amodal comercial (pix2gestalt é NC). Depende das regras de coreografia. No modo A, o completamento é por SDXL e pode alucinar.
+4. **Embutido vs solto:** o ADE20K não distingue. Painéis, prateleiras e armários podem ser removidos ou mantidos errado.
+5. **Objetos pequenos** ficam "colados" na sala vazia (controle remoto em cima de um sofá que sumiu). A detecção aberta custa tempo e VRAM.
+6. **Modo A:** sensibilidade alta a semente e prompt (1 de 13 bom), objetos derretidos e móveis moles. Depende do hires pass e da nota automática.
+7. **Tempo:** a composição de ~240 quadros em numpy estoura o orçamento. Precisa ir para a GPU.
+8. **VRAM e driver:** o sysmem fallback no Windows deixa tudo lento em silêncio. Com 8 GB de RAM do sistema não dá para usar SDXL com offload.
+9. **Licenças:**
+   - RealVisXL tem procedência de treino desconhecida (alternativa: SDXL base + Lightning);
+   - OpenRAIL++ exige repassar as restrições;
+   - nenhum derivado do FLUX.1-dev pode entrar por bibliotecas ou workflows;
+   - os datasets de treino do OneFormer e do LaMa são de pesquisa (risco baixo, já existente).
+10. **Exatidão:** "igual à foto" vale nos quadros mestres e na resolução do vídeo. O MP4 tem perda e fotos > 1920 px são reduzidas.
+11. **Fotos de teste:** a de Nice (CC0 pelo Commons, não reconferida por causa de HTTP 429), a do rawpixel (CC0 pelo Openverse) e a Stafford (CC BY-SA 3.0) servem **só para teste interno**. Falta uma foto típica de anúncio com licença comercial.
+12. **Avaliação:** as notas vêm de um juiz olhando quadros, não de um estudo com usuários.
+
+### 7.2 O que medir na RTX 5070 Laptop 8 GB do usuário (antes de vender)
+
+1. SDXL (UNet único) + ControlNet depth + Lightning a 0,75 MP e 1,5 MP, com e sem `enable_model_cpu_offload`: tempo por passo, VRAM pico e presença de sysmem fallback.
+2. Carga fria vs quente do UNet (inclui a varredura do Defender) e o efeito do warm-up.
+3. MoGe-2 + OneFormer panoptic + SAM 2.1 + LaMa por plano: tempo real por etapa.
+4. Composição torch de 240 quadros a 1920×1440 + NVENC.
+5. Tempo total do clique ao MP4, frio e quente, nos modos A e B, em 3 fotos.
+6. Comparação visual da sala vazia na foto típica: LaMa por plano vs LaMa + SDXL só no piso vs SDXL-inpainting 0.1 (UNet de 9 canais, ainda não testado de verdade).
+7. RAM do sistema usada no pico, com offload.
+8. Candidato V3.1: FLUX.2-klein-4B (Apache-2.0) quantizado com offload, só se couber em 120 s.
+
+---
+
+## Anexos (evidência)
+
+- Comparativo: `scratchpad/v3/comparativo.jpg`.
+- Modo B: `p_removal/out/antes_vazio_depois.jpg`, `p_removal/out/cmp_all.jpg`, `p_removal/out/video_final/video.mp4`, `p_removal/out/video_final/video_log.json`.
+- Crítica: `critic_realism/rem_grid.jpg`, `critic_realism/rem_residuo.png`, `critic_realism/r2_grid.jpg`.
+- Modo A: `p_staging/final_R2_full.jpg`, `p_staging/video_staging_R2.mp4`, `p_cutout/folha_comparacao.jpg`.
+- Licenças: `critic_feasibility/RELATORIO.md` §1, `r_staging/RELATORIO.md`, `r_removal/RELATORIO.md`, `r_catalog/RELATORIO.md`.
+- Hashes dos pesos: `p_staging/models_sha256.txt`, `r_removal/RELATORIO.md` (big-lama).
