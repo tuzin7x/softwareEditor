@@ -132,6 +132,35 @@ Regras validadas no p_removal: nenhum pixel inexistente apareceu.
 
 ---
 
+### 3.6 Planejados e louças também saem: "cenário cru" (decisão do usuário, 16/11/2026)
+
+O usuário pediu que cozinhas e banheiros também comecem crus. Por isso, no modo B, saem **os móveis soltos e também os fixos**:
+armários planejados (de baixo e aéreos), ilha, bancada, coifa, geladeira, fornos e micro-ondas embutidos, louças sanitárias (vaso,
+pia, cuba), gabinete, espelho com moldura e box. Ficam: portas, janelas, nichos embutidos na parede, tomadas e interruptores que já
+aparecem na foto, teto e luminárias de teto.
+
+**Como a sala crua é montada** (o modelo nunca inventa objetos; ele só continua as superfícies):
+- **Por plano.** Cada parede, piso e teto vem da geometria (MoGe-2 + OneFormer + `build_room_model`). O preenchimento é feito na vista
+  retificada daquele plano, copiando cor e textura **da parte visível do mesmo plano** ("pega o ambiente em volta e copia").
+- **Parede quase toda escondida** (cozinha planejada de ponta a ponta): pintura lisa na cor média das paredes visíveis, com o
+  gradiente de luz medido nas áreas visíveis. É o "cru" mais crível; reboco ou pintura lisa não tem detalhe para errar.
+- **Revestimento com padrão** (azulejo, porcelanato, 3D): detectar a grade na vista retificada e repetir as placas visíveis
+  (síntese periódica), mantendo rejunte alinhado. Sem placas visíveis para copiar, usar a cor lisa.
+- **Luz que vem do móvel** (LED sob o aéreo, nicho iluminado, brilho no backsplash, reflexo no piso brilhante): sai junto com o móvel.
+  É estimada como camada aditiva/de razão perto da fonte, removida da placa e devolvida na camada de efeito do móvel quando ele entra.
+- Nada de pontos hidráulicos, tomadas ou janelas novas: superfície lisa onde não houver informação.
+
+**Coreografia dos fixos (antes dos soltos):** base dos armários e ilha sobem do chão ou deslizam da parede; a bancada desce e
+pousa sobre a base; aéreos descem do teto; eletros deslizam para os nichos; louças sobem do piso; coifa desce; depois entram os
+móveis soltos e a decoração. As regras de §3.4 (sem pedaço oculto visível, sem fade) valem igual.
+
+**Portão de qualidade:** se a nota da placa crua for ruim (costura, tom, objeto reconhecido pelo OneFormer na placa) ou a área
+inventada passar do limite para aquela foto, o software refaz **mantendo os fixos** (só os soltos saem) e registra o motivo no
+`report.json`. Nunca entregar uma placa ruim em silêncio.
+
+**Teste de aceite:** as fotos de cozinha planejada (paisagem e retrato) e de banheiro do conjunto de teste do usuário: placa crua sem
+objetos inventados, linhas parede/piso retas, revestimento contínuo, último quadro idêntico à foto.
+
 ## 4. Código atual: o que é reaproveitado, substituído ou mantido como fallback
 
 | Componente (`mobilia/`) | V3 |
