@@ -12,8 +12,9 @@ Construção (unidades de desenho, y para baixo, linha de base em y = CAP):
 
 Tamanhos ópticos do ícone (cada um desenhado para a sua grade, não só reduzido):
   * L  (>= 64 px): "7xAi" com a fresta no x;
-  * M  (32-63 px): "7xAi" mais encorpado, ocupando mais o quadro;
-  * S  (< 32 px):  monograma "7x" alinhado à grade de 16 px.
+  * M  (40-63 px): "7xAi" mais encorpado, ocupando mais o quadro (48 px = ícone da Área de Trabalho);
+  * S  (< 40 px):  monograma "7x" alinhado à grade de 16 px ("7xAi" inteiro não fica legível em 32 px);
+    em 16 px ele é desenhado pixel a pixel.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ IVORY = "#F4EFE7"
 BRASS_HI = "#EAD5A8"
 BRASS = "#CDAE76"
 BRASS_LO = "#A8854F"
-TILE_TOP = "#2B2B30"
+TILE_TOP = "#323238"   # um pouco mais claro: a borda da placa se destaca em papéis de parede escuros
 TILE_BOTTOM = "#111113"
 
 
@@ -134,12 +135,12 @@ PIXELS_16_7 = ["..#####.........",   # linha 4
                "...##...........",
                "...##...........",
                "...##..........."]   # linha 11
-PIXELS_16_X = ["........#....#..",   # linha 6
-               "........##..##..",
+PIXELS_16_X = ["........##..##..",   # linha 6 (x de traço duplo: lê como "x" e não como "H")
                ".........####...",
+               "..........##....",
+               "..........##....",
                ".........####...",
-               "........##..##..",
-               "........#....#.."]   # linha 11
+               "........##..##.."]   # linha 11
 
 
 def _pixel_path(rows: list[str], top: int) -> QPainterPath:
@@ -157,8 +158,8 @@ def _pixel_path(rows: list[str], top: int) -> QPainterPath:
                 i += 1
     return path.simplified()
 
-# Estilos da marca. HEADER: cabeçalho da janela (fino, espaçado).
-HEADER = dict(weight=14.0, cut=3.0, track=6.0)
+# Estilos da marca. HEADER: cabeçalho da janela (mesmo peso encorpado do ícone, com a junta no x).
+HEADER = dict(weight=20.0, cut=4.0, track=3.0)
 
 
 # ----------------------------------------------------------------------------------------- pintura
@@ -208,7 +209,7 @@ def wordmark_pixmap(height: int, dpr: float = 2.0, **style) -> QPixmap:
 
 
 def optical_class(size: float) -> str:
-    return "L" if size >= 64 else ("M" if size >= 32 else "S")
+    return "L" if size >= 64 else ("M" if size >= 40 else "S")
 
 
 def _icon_layout(size: float):
@@ -240,8 +241,8 @@ def _tile(p: QPainter, size: float, radius: float, hairline: float = 0.0) -> Non
     if hairline > 0:
         lw = hairline
         edge = QLinearGradient(r.topLeft(), r.bottomLeft())
-        e0 = QColor(BRASS_HI); e0.setAlphaF(0.60)
-        e1 = QColor(BRASS); e1.setAlphaF(0.16)
+        e0 = QColor(BRASS_HI); e0.setAlphaF(0.80)
+        e1 = QColor(BRASS); e1.setAlphaF(0.34)
         edge.setColorAt(0.0, e0); edge.setColorAt(1.0, e1)
         p.setPen(QPen(QBrush(edge), lw)); p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(r.adjusted(lw / 2, lw / 2, -lw / 2, -lw / 2), radius - lw / 2, radius - lw / 2)
@@ -259,7 +260,7 @@ def paint_icon(p: QPainter, size: float) -> None:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(IVORY))
         p.drawPath(seven)
-        p.setBrush(QBrush(brass_gradient(6, 12, bright=True)))
+        p.setBrush(QColor(BRASS_HI))        # sólido e claro: o x não some contra a placa em 16-32 px
         p.drawPath(ex)
         p.restore()
         return
@@ -276,7 +277,7 @@ def paint_icon(p: QPainter, size: float) -> None:
 
 def _small_hairline(size: float) -> float:
     """Filete de ~1 px real (em unidades da grade de 16)."""
-    return 0.0 if size < 20 else 16.0 / size
+    return 16.0 / size
 
 
 def small_parts(size: float) -> tuple[QPainterPath, QPainterPath]:
@@ -331,7 +332,7 @@ def _svg_defs(size: float, brass_y0: float, brass_y1: float, bright: bool = Fals
       <stop offset="0" stop-color="{BRASS_HI}" stop-opacity="0.10"/><stop offset="1" stop-color="{BRASS_HI}" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="edge" x1="0" y1="0" x2="0" y2="{size:g}" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{BRASS_HI}" stop-opacity="0.60"/><stop offset="1" stop-color="{BRASS}" stop-opacity="0.16"/>
+      <stop offset="0" stop-color="{BRASS_HI}" stop-opacity="0.80"/><stop offset="1" stop-color="{BRASS}" stop-opacity="0.34"/>
     </linearGradient>
     <linearGradient id="brass" x1="0" y1="{brass_y0:.2f}" x2="0" y2="{brass_y1:.2f}" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="{BRASS_HI}"/>{mid}
@@ -342,12 +343,12 @@ def _svg_defs(size: float, brass_y0: float, brass_y1: float, bright: bool = Fals
 def icon_svg(optical: str = "L") -> str:
     """SVG do ícone (só caminhos, sem fonte).
 
-    L: mestre 256 px (>= 64 px); M: 48 px (32-63 px); S: 24 px (20-31 px); P: 16 px (pixel a pixel)."""
+    L: mestre 256 px (>= 64 px); M: 48 px (40-63 px); S: 24 px (20-39 px); P: 16 px (pixel a pixel)."""
     if optical in ("S", "P"):
         px = 24 if optical == "S" else 16
         seven, ex = small_parts(px)
         body = (f'<path fill="{IVORY}" d="{_d(seven)}"/>\n  '
-                f'<path fill="url(#brass)" d="{_d(ex)}"/>')
+                f'<path fill="{BRASS_HI}" d="{_d(ex)}"/>')
         return _svg_doc(16, _svg_defs(16, 6, 12, bright=True), _svg_tile(16, 3.6, _small_hairline(px)), body,
                         f"7xAi ({px} px)", px)
     size = 256 if optical == "L" else 48

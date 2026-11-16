@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>7xAi</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#323238"/><stop offset="1" stop-color="#111113"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="76.8" cy="-25.6" r="243.2" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EAD5A8" stop-opacity="0.10"/><stop offset="1" stop-color="#EAD5A8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EAD5A8" stop-opacity="0.80"/><stop offset="1" stop-color="#CDAE76" stop-opacity="0.34"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="112.32" x2="0" y2="167.20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EAD5A8"/><stop offset="0.55" stop-color="#CDAE76"/><stop offset="1" stop-color="#A8854F"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="57.6" fill="url(#tile)"/>
+  <rect width="256" height="256" rx="57.6" fill="url(#sheen)"/>
+  <rect x="1" y="1" width="254" height="254" rx="56.6" fill="none" stroke="url(#edge)" stroke-width="2"/>
+  <path fill="#F4EFE7" fill-rule="evenodd" d="M38.40 88.80 L85.43 88.80 L61.92 167.20 L46.99 167.20 L66.04 103.70 L38.40 103.70ZM159.14 88.80 L174.78 88.80 L195.49 167.20 L180.70 167.20 L176.47 151.19 L157.44 151.19 L153.22 167.20 L138.43 167.20ZM173.25 138.97 L166.96 115.18 L160.67 138.97ZM202.71 112.32 L217.60 112.32 L217.60 167.20 L202.71 167.20ZM202.71 88.80 L217.60 88.80 L217.60 103.70 L202.71 103.70Z"/>
+  <path fill="url(#brass)" fill-rule="evenodd" d="M87.79 112.32 L103.61 112.32 L135.29 167.20 L119.47 167.20ZM119.47 112.32 L135.29 112.32 L121.71 135.84 L113.80 122.14ZM109.28 157.38 L103.61 167.20 L87.79 167.20 L101.36 143.68Z"/>
+</svg>

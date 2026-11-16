@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="24" height="24">
+  <title>7xAi (24 px)</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#323238"/><stop offset="1" stop-color="#111113"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="4.8" cy="-1.6" r="15.2" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EAD5A8" stop-opacity="0.10"/><stop offset="1" stop-color="#EAD5A8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EAD5A8" stop-opacity="0.80"/><stop offset="1" stop-color="#CDAE76" stop-opacity="0.34"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="6.00" x2="0" y2="12.00" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EAD5A8"/><stop offset="1" stop-color="#CDAE76"/>
+    </linearGradient>
+  </defs>
+  <rect width="16" height="16" rx="3.6" fill="url(#tile)"/>
+  <rect width="16" height="16" rx="3.6" fill="url(#sheen)"/>
+  <rect x="0.333333" y="0.333333" width="15.3333" height="15.3333" rx="3.26667" fill="none" stroke="url(#edge)" stroke-width="0.666667"/>
+  <path fill="#F4EFE7" d="M2.50 4.00 L8.50 4.00 L6.10 12.00 L4.00 12.00 L6.15 6.00 L2.50 6.00Z"/>
+  <path fill="#EAD5A8" d="M8.50 6.00 L10.40 6.00 L11.05 7.22 L11.70 6.00 L13.60 6.00 L12.00 9.00 L13.60 12.00 L11.70 12.00 L11.05 10.78 L10.40 12.00 L8.50 12.00 L10.10 9.00Z"/>
+</svg>
