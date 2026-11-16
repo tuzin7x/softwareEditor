@@ -84,7 +84,8 @@ def _clear_window_rects(room: RoomModel, seg: SegmentationResult, rays: np.ndarr
 
 def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_dice: float = 0.5,
                diag: dict | None = None) -> SunEstimate | None:
-    """``diag`` (opcional) recebe os números do diagnóstico (manchas, Dice, precisão...)."""
+    """``diag`` (opcional) recebe os números do diagnóstico (manchas, Dice, precisão...) e, em
+    ``patch_mask``, a máscara booleana das manchas de sol aceitas (tamanho da foto)."""
     diag = diag if diag is not None else {}
     from shapely.geometry import MultiPoint, Polygon
     from shapely.ops import unary_union
@@ -112,6 +113,7 @@ def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_d
     rays = intr.rays() @ M[:3, :3].T
     cam = M[:3, 3]
     patches, ratios = [], []
+    kept = np.zeros((H, W), bool)
     for k in range(1, n + 1):
         comp = lab == k
         if comp.mean() < 0.001:
@@ -123,8 +125,11 @@ def detect_sun(room: RoomModel, seg: SegmentationResult, rgb8: np.ndarray, min_d
         if hull.area < 0.02:
             continue
         patches.append(hull)
+        kept |= comp
         ratios.append(float(np.median(lum[comp]) / max(1e-4, np.median(base[comp]))))
     diag["patches"] = len(patches)
+    # máscara das manchas (pixels da foto): a calibração da luz ajusta o sol só nelas (PT8)
+    diag["patch_mask"] = kept
     if not patches:
         return None
     P = unary_union(patches)

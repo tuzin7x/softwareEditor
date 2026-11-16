@@ -133,7 +133,18 @@ def surface_stats(photo8: np.ndarray, seg: SegmentationResult) -> dict:
     return {"albedo_mean": means, "albedo_scale": k, "illuminant": np.clip(illum, 0.6, 1.6).tolist()}
 
 
+# pixels quase saturados da foto: só limite inferior na calibração (o valor real é ≥ o recortado)
+SATURATED_LUM = 0.97
+SATURATED_CHANNEL = 250 / 255
+
+
 def calibration_mask(photo8: np.ndarray, seg: SegmentationResult, out_path: Path) -> Path:
+    """Máscara de calibração da luz (PNG de 3 níveis, ver ``render/calibration.py``):
+
+    - 255: piso/parede/teto (com erosão nas bordas), usado no ajuste por mínimos quadrados;
+    - 128: o mesmo, mas quase saturado (luminância ≥ 0,97 ou um canal ≥ 250): entra como limite
+      inferior (a sala renderizada tem de ser pelo menos tão clara), em vez de ser descartado;
+    - 0: fora (outros objetos, bordas, pixels quase pretos)."""
     from ..analysis.segmentation import GROUP_IDS
 
     groups = seg.groups
@@ -141,9 +152,24 @@ def calibration_mask(photo8: np.ndarray, seg: SegmentationResult, out_path: Path
         groups = np.asarray(Image.fromarray(groups).resize((photo8.shape[1], photo8.shape[0]), Image.NEAREST))
     m = np.isin(groups, [GROUP_IDS["floor"], GROUP_IDS["wall"], GROUP_IDS["ceiling"]])
     m = ndimage.binary_erosion(m, iterations=max(2, photo8.shape[1] // 200))
-    lum = (photo8.astype(np.float32) / 255.0) @ np.array([0.2126, 0.7152, 0.0722], np.float32)
-    m &= (lum < 0.97) & (lum > 0.02)          # exclui pixels estourados/pretos
-    Image.fromarray((m * 255).astype(np.uint8)).save(out_path)
+    rgb = photo8.astype(np.float32) / 255.0
+    lum = rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    m &= lum > 0.02                           # exclui pixels quase pretos (ruído, sem informação)
+    sat = (lum >= SATURATED_LUM) | (rgb.max(-1) >= SATURATED_CHANNEL)
+    out = np.where(m & ~sat, 255, np.where(m & sat, 128, 0)).astype(np.uint8)
+    Image.fromarray(out).save(out_path)
+    return out_path
+
+
+def sun_patch_mask(mask: np.ndarray | None, shape: tuple[int, int], out_path: Path) -> Path | None:
+    """Grava as manchas de sol da foto (``sunlight.detect_sun``) no tamanho da placa: a calibração
+    ajusta a força do sol só nelas."""
+    if mask is None or not np.asarray(mask).any():
+        return None
+    m = np.asarray(mask, bool)
+    if m.shape != tuple(shape):
+        m = np.asarray(Image.fromarray(m.astype(np.uint8) * 255).resize((shape[1], shape[0]), Image.NEAREST)) > 127
+    Image.fromarray(m.astype(np.uint8) * 255).save(out_path)
     return out_path
 
 
@@ -217,11 +243,13 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                      texture_res: str = "1k",
                      hold_start: float = 0.8, hold_end: float = 2.5, motion_blur: bool = True,
                      seed: int = 7, calibrate: bool = True, threads: int = 0, sun: dict | None = None,
-                     occluders: tuple | None = None) -> dict:
+                     occluders: tuple | None = None, sun_mask: np.ndarray | None = None,
+                     photo_emission: bool = True) -> dict:
     H, W = plate8.shape[:2]
     intr = room.intr().scaled(W, H)
     stats = surface_stats(plate8, seg)
     mask_path = calibration_mask(plate8, seg, work_dir / "calib_mask.png")
+    sun_mask_path = sun_patch_mask(sun_mask, (H, W), work_dir / "calib_sun_mask.png") if sun else None
     x0, y0 = room.grid_origin
     ny, nx = room.grid_shape
     extent = [x0, y0, x0 + nx * room.grid_cell, y0 + ny * room.grid_cell]
@@ -271,10 +299,14 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
         "albedo_scale": stats["albedo_scale"],
         "albedo_mean": stats["albedo_mean"],
         "illuminant": stats["illuminant"],
+        # ``photo_emission``: a sala-proxy emite a própria foto para os raios que não são da câmera
+        # (luz rebatida real nos móveis); a calibração ajusta as luzes com ela como termo fixo
         "lighting": {"calibrate": calibrate, "calib_mask_path": str(mask_path),
+                     "photo_emission": bool(photo_emission),
                      "window_color": stats["illuminant"], "world_color": stats["illuminant"],
                      "sun": ({"direction": sun["direction"], "angle_deg": 0.6,
-                              "color": [float(c) for c in np.clip(np.asarray(stats["illuminant"]) * [1.04, 1.0, 0.94], 0.5, 1.6)]}
+                              "color": [float(c) for c in np.clip(np.asarray(stats["illuminant"]) * [1.04, 1.0, 0.94], 0.5, 1.6)],
+                              "mask_path": str(sun_mask_path) if sun_mask_path else None}
                              if sun else None)},
         "items": scheduled,
         # ``samples`` = quadro final; ``samples_layers`` por camada (ver render/layers.py)

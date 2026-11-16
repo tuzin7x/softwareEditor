@@ -237,3 +237,90 @@ def test_plate_is_read_only_for_the_compositor(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="read-only|somente leitura"):
         pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7, ProgressEmitter())
     assert np.array_equal(plate8, before) and not (tmp_path / "v.mp4").exists()
+
+
+def _calibration():
+    """Calibração com o ajuste do CG (PT8): mapa de ganho, curva de tom e joelho."""
+    yy, xx = np.mgrid[0:4, 0:6]
+    grid = np.stack([0.86 + 0.3 * xx / 5, 1.15 - 0.25 * yy / 3, np.full((4, 6), 0.95)], -1)
+    return {"rel_rms": 0.12, "ajuste_cg": {
+        "versao": 1, "joelho": 0.8,
+        "ganho": {"modo": "mapa", "limites": [0.85, 1.2], "grade": grid.tolist(), "forma": [4, 6, 3]},
+        "curva_tom": {"ok": True, "x_log2": [-4.0, -2.0, -1.0], "y_log2": [-4.1, -2.2, -0.9]}}}
+
+
+def test_stream_applies_calibration_like_recompose(tmp_path, capture):
+    """PT8: o ajuste do CG chega pelo evento da calibração (``set_calibration``, antes dos quadros)
+    no fluxo e pelo ``frames.json`` no ``recompor``: os quadros saem byte a byte iguais. Só os
+    pixels do CG mudam em relação ao quadro sem ajuste; a placa continua exata."""
+    from mobilia.composite.compositor import Compositor, FrameStats, load_layers
+    from mobilia.composite.grade import CGGrade
+    from mobilia.composite.stream import StreamComposer
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _job(tmp_path)
+    frames = meta["frames"]
+    calib = _calibration()
+    # fluxo: a calibração chega antes do primeiro quadro, como o evento do worker
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "a.mp4", 12, 7, ProgressEmitter(), streaming=True,
+                        n_frames=len(frames), workers=2)
+    sc.set_calibration(calib)
+    for fr in frames:
+        sc.push(dict(fr))
+    res = sc.finish({**meta, "calibration": calib})
+    streamed = list(capture["frames"])
+    assert res["composicao"]["ajuste_cg"] == {"aplicado": True, "mapa_ganho": "mapa", "curva_tom": True,
+                                              "joelho": 0.8}
+    assert res["preservacao"]["preservado_exato_todos"] is True
+    # recompor: a mesma calibração lida do frames.json
+    capture["frames"].clear()
+    StreamComposer(tmp_path, plate8, tmp_path / "b.mp4", 12, 7, ProgressEmitter(), n_frames=len(frames),
+                   calibration=calib).finish({**meta, "calibration": calib})
+    assert capture["frames"] == streamed
+    # sem calibração (trabalho antigo): o quadro de antes; com ela, só o CG muda
+    capture["frames"].clear()
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "c.mp4", 12, 7, ProgressEmitter(), n_frames=len(frames))
+    res0 = sc.finish(meta)
+    assert res0["composicao"]["ajuste_cg"] == {"aplicado": False}
+    assert capture["frames"][0] == streamed[0]                     # quadro só-foto
+    assert capture["frames"][1] != streamed[1]
+    comp = Compositor(plate8, seed=7)
+    rgba, sh, origin = load_layers(tmp_path / "render" / "frames" / "f_00002.exr", frames[1]["border"], (H, W),
+                                   max(16, int(0.04 * float(np.hypot(W, H)))))
+    a, _ = comp.composite(2, rgba, sh, None, origin=origin)
+    b, st = comp.composite(2, rgba, sh, None, origin=origin, grade=CGGrade.from_calibration(calib, (H, W)))
+    assert _md5(b) == streamed[1] and st.preserved_exact
+    full = np.zeros((H, W), bool)
+    full[origin[1]:origin[1] + rgba.shape[0], origin[0]:origin[0] + rgba.shape[1]] = rgba[..., 3] > 1 / 1024
+    from scipy import ndimage
+
+    far = ~ndimage.binary_dilation(full, iterations=4)
+    assert np.array_equal(a[far], b[far]) and not np.array_equal(a[full], b[full])
+    assert FrameStats(1).preserved_exact
+
+
+def test_stream_calibration_from_frames_json_or_mismatch(tmp_path, capture):
+    """Worker sem o evento ``calibration``: vale a do ``frames.json`` (nenhum quadro de móvel foi
+    composto antes). Se quadros já foram compostos com outra calibração, é erro (nunca um MP4 com
+    dois ajustes diferentes)."""
+    from mobilia.composite.stream import StreamComposer
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _job(tmp_path)
+    frames = meta["frames"]
+    calib = _calibration()
+    StreamComposer(tmp_path, plate8, tmp_path / "a.mp4", 12, 7, ProgressEmitter(), n_frames=len(frames),
+                   calibration=calib).finish({**meta, "calibration": calib})
+    ref = list(capture["frames"])
+    capture["frames"].clear()
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "b.mp4", 12, 7, ProgressEmitter(), streaming=True,
+                        n_frames=len(frames))
+    sc.push(dict(frames[0]))                                       # só a foto antes do fim
+    sc.finish({**meta, "calibration": calib})
+    assert capture["frames"] == ref
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "c.mp4", 12, 7, ProgressEmitter(), streaming=True)
+    for fr in frames[:3]:
+        sc.push(dict(fr))
+    with pytest.raises(RuntimeError, match="calibração"):
+        sc.finish({**meta, "calibration": calib})
+    sc.abort()

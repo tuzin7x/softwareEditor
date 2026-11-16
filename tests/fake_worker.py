@@ -70,7 +70,19 @@ def blender(spec_path: str) -> int:
     for key, s in (("kernels", 0.05), ("cena_montagem", 0.1), ("calibracao", 0.1)):
         time.sleep(s)
         tempos[key] = s
-    _emit(event="calibration", rel_rms=0.1)
+    # calibração com o ajuste do CG (PT8): mapa de ganho pequeno, sem curva de tom, joelho 0,8;
+    # o evento chega antes do primeiro quadro e é o mesmo que vai para o frames.json
+    calib = {"window_power_per_m2": 1.0, "ambient_strength": 0.3, "sun_strength": 0.0,
+             "color_ratio": [1.0, 1.0, 1.0], "rel_rms": 0.1, "rel_rms_ganho": 0.08, "pixels": 100,
+             "pixels_limite_inferior": 10, "pixels_total": 400, "emissao_foto": True, "emissao_fracao": 0.5,
+             "sol": {"ajustado_a_parte": False},
+             "ajuste_cg": {"versao": 1, "joelho": 0.8,
+                           "ganho": {"modo": "mapa", "limites": [0.85, 1.2], "fracao_mascara": 0.25,
+                                     "global": [1.0, 1.0, 1.0], "min": 0.9, "max": 1.1,
+                                     "grade": [[[0.9 + 0.2 * (i * 4 + j) / 11] * 3 for j in range(4)]
+                                               for i in range(3)], "forma": [3, 4, 3]},
+                           "curva_tom": {"ok": False, "motivo": "poucos pixels", "pixels": 100}}}
+    _emit(event="calibration", **calib)
     frames, por_quadro = [], []
     layer_s = {"final": 0.0, "marco": 0.0, "dinamico": 0.0}
     side = max(8, W // 6)
@@ -112,9 +124,7 @@ def blender(spec_path: str) -> int:
               estimated_total=stop_at - 4, seconds=round(wall, 3))
     tempos.update(render_final=layer_s["final"], render_marcos=0.0, render_dinamico=layer_s["dinamico"],
                   laco_outros=0.0)
-    meta = {"frames": frames, "calibration": {"window_power_per_m2": 1.0, "ambient_strength": 0.3,
-                                              "sun_strength": 0.0, "color_ratio": [1.0, 1.0, 1.0],
-                                              "rel_rms": 0.1, "pixels": 100, "pixels_total": 400},
+    meta = {"frames": frames, "calibration": calib,
             "device": "CPU", "width": W, "height": H, "removed_items": [],
             "exr": {"recorte": True, "codec": "RLE"}, "passes": ["Combined", "Shadow Catcher"],
             "timings": {"total_s": round(time.perf_counter() - t0, 1), "rendered_frames": len(por_quadro)},

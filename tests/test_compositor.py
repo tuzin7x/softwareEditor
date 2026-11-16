@@ -401,3 +401,146 @@ def test_verification_catches_crop_paste_bug():
     shifted[y0 + 1:min(H, y1 + 1), x0:x1] = sub[:min(H, y1 + 1) - y0 - 1]
     ok, n_bad, _ = outside_mask_equal(shifted, plate, mask)
     assert not ok and n_bad > 0
+
+
+# ---------------------------------------------------------------- PT8: ajuste do CG (grade.py)
+def _grade_calib(H, W, gain=None, curve=None, knee=0.8):
+    """``frames.json["calibration"]`` mínimo com o ajuste do CG."""
+    adj = {"versao": 1, "joelho": knee, "curva_tom": curve or {"ok": False, "motivo": "teste"},
+           "ganho": {"modo": "identidade"}}
+    if gain is not None:
+        adj["ganho"] = {"modo": "mapa", "limites": [0.85, 1.2], "grade": np.asarray(gain).tolist(),
+                        "forma": list(np.asarray(gain).shape)}
+    return {"ajuste_cg": adj}
+
+
+def test_gain_map_only_touches_cg():
+    """O mapa de ganho, a curva de tom e o joelho mudam SÓ a camada CG: fora dos pixels com alfa
+    o quadro é byte a byte o mesmo sem o ajuste (e a foto fora da influência); recortar não muda
+    nada; a verificação independente passa."""
+    from mobilia.composite.grade import CGGrade
+    from mobilia.composite.verify import MARGIN_PX, influence_mask, outside_mask_equal
+
+    H, W = 240, 320
+    rng = np.random.default_rng(5)
+    plate = rng.integers(0, 256, size=(H, W, 3), dtype=np.uint8)
+    plate[150:] = (170, 150, 130)
+    yy, xx = np.mgrid[0:6, 0:8]
+    gain = np.stack([0.86 + 0.33 * xx / 7, 1.18 - 0.3 * yy / 5, np.full((6, 8), 1.05)], -1)
+    curve = {"ok": True, "x_log2": [-4.0, -2.0, -1.0], "y_log2": [-4.2, -1.8, -0.9]}
+    grade = CGGrade.from_calibration(_grade_calib(H, W, gain, curve), (H, W))
+    assert grade.gain.shape == (H, W, 3) and not grade.gain.flags.writeable
+    comp = Compositor(plate)
+    for kind in ("meio", "canto", "dois", "borda_dir"):
+        rgba, shadow = _scene(H, W, kind, seed=8)
+        rgba[..., :3] *= 2.5                                   # altas luzes acima do joelho
+        a, sa = comp.composite(1, rgba, shadow, None)
+        b, sb = comp.composite(1, rgba, shadow, None, grade=grade)
+        cg = rgba[..., 3] > comp.s.alpha_eps
+        assert not np.array_equal(a[cg], b[cg])                 # o CG mudou...
+        # ... e nada fora dele (sombra e foto idênticas; o desfoque de nitidez espalha o CG 1–2 px)
+        far = ~ndimage_dilate(cg, 4)
+        assert np.array_equal(a[far], b[far]), kind
+        assert sb.shadow_pixels == sa.shadow_pixels and sb.preserved_exact
+        mask = influence_mask(rgba[..., 3], (0, 0), (H, W), comp.influence_px + MARGIN_PX)
+        assert outside_mask_equal(b, plate, mask) == (True, 0, 0)
+        # recorte (camadas só no border) = quadro inteiro, byte a byte, com o ajuste
+        ref = comp._composite_region(type(sb)(1), rgba, shadow, None, [0, 0, W, H], grade)
+        assert np.array_equal(b, ref), kind
+    # joelho: nada passa de 1 e é contínuo; abaixo de 0,8 é a identidade
+    from mobilia.composite.grade import knee
+    x = np.linspace(0, 5, 501, dtype=np.float32)
+    y = knee(x)
+    assert np.all(np.diff(y) >= 0) and y.max() <= 1.0 and np.array_equal(y[x <= 0.8], x[x <= 0.8])
+    assert knee(np.float32([1.0]))[0] == pytest.approx(0.8 + 0.2 * np.tanh(1.0))
+    # trabalho antigo (sem ajuste_cg): nenhum ajuste, resultado de antes
+    assert CGGrade.from_calibration({"rel_rms": 0.2}, (H, W)) is None
+
+
+def ndimage_dilate(m, it):
+    from scipy import ndimage
+
+    return ndimage.binary_dilation(m, iterations=it)
+
+
+def test_gain_map_fallback_bright_room():
+    """Sala branca (quase tudo estourado): com pouca máscara o mapa vira ganho global; com
+    pouquíssima, identidade. Mapa normal: suave, limitado e com o ganho global onde a máscara é rala."""
+    from mobilia.composite.grade import GAIN_LIMITS, gain_grid, gain_map, upsample_grid
+
+    h, w = 60, 80
+    yy, xx = np.mgrid[0:h, 0:w]
+    pred = np.full((h, w, 3), 0.4, np.float32)
+    photo = (pred * np.stack([1.0 + 0.25 * xx / w, np.ones((h, w)), 0.9 * np.ones((h, w))], -1)).astype(np.float32)
+    full = np.ones((h, w), bool)
+    G, info = gain_map(photo, pred, full)
+    assert info["modo"] == "mapa" and info["fracao_mascara"] == 1.0
+    assert G.min() >= GAIN_LIMITS[0] and G.max() <= GAIN_LIMITS[1]
+    assert G[..., 0][:, -1].mean() > G[..., 0][:, 0].mean() + 0.1          # segue o gradiente da foto
+    assert np.allclose(G[..., 2], 0.9, atol=0.02) and np.allclose(G[..., 1], 1.0, atol=0.02)
+    # grade 8× menor e de volta: o mapa de baixa frequência sobrevive
+    back = upsample_grid(gain_grid(G), (h, w))
+    assert np.abs(back - G).max() < 0.02
+    # sala branca: só 3% do quadro com pixels não estourados -> ganho global
+    few = np.zeros((h, w), bool)
+    few[:12, :12] = True
+    G2, info2 = gain_map(photo, pred, few)
+    assert info2["modo"] == "global" and info2["fracao_mascara"] == pytest.approx(144 / (h * w), abs=1e-4)
+    assert np.allclose(G2, G2[0, 0]) and G2[0, 0, 1] == pytest.approx(1.0, abs=1e-3)
+    # sala branca em que o quadro ainda tem máscara, mas quase toda a superfície está estourada
+    # (sobram cantos e rodapés): ganho global também
+    lots = np.zeros((h, w), bool)
+    lots[:, :16] = True                                              # 20% do quadro
+    G4, info4 = gain_map(photo, pred, lots, lower=~lots)
+    assert info4["modo"] == "global" and info4["fracao_superficies"] == pytest.approx(0.2)
+    assert gain_map(photo, pred, lots, lower=lots & (yy < 5))[1]["modo"] == "mapa"
+    # quase nada: identidade
+    G3, info3 = gain_map(photo, pred, few & (xx < 3) & (yy < 3))
+    assert info3["modo"] == "identidade" and np.all(G3 == 1.0)
+    # no compositor: modo global é um ganho constante, sem mapa
+    from mobilia.composite.grade import CGGrade, grade_data
+
+    data = grade_data(photo, pred, few)
+    g = CGGrade.from_calibration({"ajuste_cg": data}, (120, 160))
+    assert g.gain is None and g.gain_const is not None and "grade" not in data["ganho"]
+
+
+def test_tone_curve_identity_on_bad_fit():
+    """Curva de tom: identidade com dados sem relação (resíduo/dispersão altos) ou poucos pixels;
+    recupera uma resposta monotônica real; nunca achata o contraste nem desvia demais."""
+    from mobilia.composite.grade import TONE_MAX_DEV, TONE_MIN_SLOPE, eval_log2, fit_tone_curve
+
+    rng = np.random.default_rng(3)
+    x = np.exp2(rng.uniform(-4, 0, 20000))
+    # foto sem relação com a predição
+    bad = fit_tone_curve(x, np.exp2(rng.uniform(-4, 0, 20000)))
+    assert bad["ok"] is False
+    # poucos pixels
+    assert fit_tone_curve(x[:100], x[:100])["ok"] is False
+    # identidade com ruído: não vale a pena aplicar
+    same = fit_tone_curve(x, x * np.exp2(rng.normal(0, 0.1, x.size)))
+    assert same["ok"] is False
+    # resposta real (compressão das altas luzes + textura no y): a curva é aceita e a recupera
+    lx = np.log2(x)
+    ty = lx - 0.08 * np.clip(lx + 2, 0, None) ** 2 + 0.05
+    good = fit_tone_curve(x, np.exp2(ty + rng.normal(0, 0.15, x.size)))
+    assert good["ok"] is True, good
+    probe = np.linspace(-3.5, -0.5, 30)
+    want = probe - 0.08 * np.clip(probe + 2, 0, None) ** 2 + 0.05
+    assert np.abs(eval_log2(probe, good) - want).max() < 0.08
+    # monotônica, inclinação mínima, desvio limitado, e volta à identidade fora da faixa dos dados
+    xs = np.linspace(-12, 4, 2000)
+    ys = eval_log2(xs, good)
+    assert np.all(np.diff(ys) > 0)
+    assert np.all(np.diff(ys) / np.diff(xs) >= TONE_MIN_SLOPE - 1e-6)
+    assert np.abs(ys - xs).max() <= TONE_MAX_DEV + 1e-9
+    assert eval_log2(np.array([-12.0, 4.0]), good) == pytest.approx([-12.0, 4.0])
+    # no CG: aplicada na cor sem pré-multiplicação (o alfa não muda o resultado da cor)
+    from mobilia.composite.grade import CGGrade
+
+    g = CGGrade(curve={"x_log2": good["x_log2"], "y_log2": good["y_log2"]}, knee_at=None)
+    C = np.full((2, 2, 3), 0.3, np.float32)
+    A = np.array([[1.0, 0.5], [0.25, 0.0]], np.float32)
+    out = g.apply(C * A[..., None], A, [0, 0, 2, 2])
+    unp = out[A > 0] / A[A > 0][:, None]
+    assert np.allclose(unp, unp[0], atol=1e-6) and out[1, 1].sum() == 0

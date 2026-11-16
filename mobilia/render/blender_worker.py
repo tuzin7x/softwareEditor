@@ -8,8 +8,10 @@ Monta a cena 3D a partir da especificação gerada pelo pipeline:
 - "proxy" da sala (piso, paredes com recortes nas janelas, teto) como SHADOW CATCHER,
   com albedo projetado da própria foto (coordenada Window) para que a luz rebatida
   nos móveis tenha a cor real do ambiente;
-- luzes de área nas janelas + luz ambiente, com intensidades CALIBRADAS por mínimos
-  quadrados contra a foto (o ambiente renderizado sem móveis deve reproduzir a foto);
+- para os raios que NÃO são da câmera a sala-proxy emite a própria foto (luz rebatida real nos
+  móveis); para a câmera ela continua um catcher difuso (``proxy_material``);
+- luzes de área nas janelas + luz ambiente + sol, com intensidades e cor CALIBRADAS contra a foto
+  (a sala renderizada sem móveis deve reproduzir a foto; ver ``render/calibration.py``);
 - móveis (glTF Poly Haven ou procedurais) normalizados e animados peça a peça;
 - render quadro a quadro em EXR multicamada (Combined RGBA + Shadow Catcher), com
   região de render (border) restrita aos móveis, EXR recortado nessa região e
@@ -33,13 +35,14 @@ import numpy as np
 from bpy_extras.object_utils import world_to_camera_view
 
 from mobilia.render import border as bd
+from mobilia.render import calibration as cal
 from mobilia.render import choreography as ch
 from mobilia.render import layers as lay
 from mobilia.telemetry import RenderStatsCollector
 
 FADE_PROP = "mobilia_fade"
-# fração máxima da luz explicada pela "sala não fotografada" (resto vem das janelas)
-AMBIENT_MAX_SHARE = 0.5
+PHOTO_EMISSION_NODE = "photo_emission"
+ROOF_NAME = "proxy_telhado"
 
 
 def emit(**ev) -> None:
@@ -261,11 +264,21 @@ def _node(nt, kind, loc=(0, 0)):
 
 
 def proxy_material(name: str, photo_img, albedo_scale: float, mean_lin: list[float],
-                   illuminant: list[float] | None = None):
-    """Difuso com albedo = foto projetada pela câmera (coordenada Window) × escala.
+                   illuminant: list[float] | None = None, emission: bool = True):
+    """Material da sala-proxy, misturado por "Is Camera Ray" (``emission``):
 
-    Fora do enquadramento (atrás/ao lado da câmera) usa a cor média da superfície.
-    O material NÃO é emissivo (catchers emissivos diluem a própria sombra — validado).
+    - raio da câmera: difuso. Para a câmera o material NÃO é emissivo (catchers emissivos diluem
+      a própria sombra — validado), então o passe de sombra continua o mesmo. O albedo é a cor
+      mediana da superfície × escala (ver o comentário abaixo); sem ``emission``, a foto projetada
+      pela câmera (coordenada Window) × escala, como antes;
+    - qualquer outro raio (rebatido nos móveis, reflexos, raios de sombra): ``Emission`` da própria
+      foto linear, força 1. O móvel recebe a luz real refletida pela sala, com a cor e a
+      distribuição da foto. A força é o termo fixo da calibração (``set_photo_emission``).
+
+    Fora do enquadramento (atrás/ao lado da câmera) usa a cor média da superfície. A emissão não
+    entra na árvore de luzes (``emission_sampling = 'NONE'``): a malha de oclusores tem centenas
+    de milhares de triângulos e só é achada pelos raios rebatidos, o que basta para uma sala
+    que emite em volta toda.
     """
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
@@ -285,7 +298,14 @@ def proxy_material(name: str, photo_img, albedo_scale: float, mean_lin: list[flo
     nt.links.new(tex.outputs["Alpha"], sock["Factor_Float"])
     nt.links.new(mean.outputs[0], sock["A_Color"])
     nt.links.new(tex.outputs["Color"], sock["B_Color"])
-    out_color = [s for s in mix.outputs if s.identifier == "Result_Color"][0]
+    photo_color = [s for s in mix.outputs if s.identifier == "Result_Color"][0]
+    # Com a emissão da foto, o difuso só é visto por raios da câmera: no passe de sombra o albedo
+    # se cancela (razão com e sem móveis no mesmo ponto), então ele só pesa nos renders da
+    # calibração. Lá ele é UNIFORME por superfície (cor mediana): com a foto como albedo, a luz já
+    # "pintada" na foto (manchas de sol, claridade perto da janela) entraria duas vezes e a razão
+    # foto/render viraria 1/(irradiância do modelo), sem informação sobre a luz real.
+    # Sem emissão (modo antigo) o albedo é a própria foto, que dá a cor da luz rebatida nos móveis.
+    out_color = mean.outputs[0] if emission else photo_color
     # A cor da foto já inclui a luz rebatida várias vezes nas paredes; usar a cor
     # saturada como albedo exageraria o "sangramento" de cor em uma sala fechada.
     hsv = _node(nt, "ShaderNodeHueSaturation", (-300, 120))
@@ -305,9 +325,37 @@ def proxy_material(name: str, photo_img, albedo_scale: float, mean_lin: list[flo
     scale.inputs["Scale"].default_value = float(albedo_scale)
     bsdf = _node(nt, "ShaderNodeBsdfDiffuse", (40, 0))
     nt.links.new(scale.outputs["Vector"], bsdf.inputs["Color"])
-    out = _node(nt, "ShaderNodeOutputMaterial", (260, 0))
-    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    out = _node(nt, "ShaderNodeOutputMaterial", (460, 0))
+    if not emission:
+        nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+        return mat
+    em = _node(nt, "ShaderNodeEmission", (40, -220))
+    em.name = PHOTO_EMISSION_NODE
+    nt.links.new(photo_color, em.inputs["Color"])
+    em.inputs["Strength"].default_value = 1.0
+    lp = _node(nt, "ShaderNodeLightPath", (40, 260))
+    sel = _node(nt, "ShaderNodeMixShader", (260, 0))
+    # Fac = 1 (raio da câmera) -> 2º shader (difuso); demais raios -> 1º shader (emissão da foto)
+    nt.links.new(lp.outputs["Is Camera Ray"], sel.inputs["Fac"])
+    nt.links.new(em.outputs["Emission"], sel.inputs[1])
+    nt.links.new(bsdf.outputs["BSDF"], sel.inputs[2])
+    nt.links.new(sel.outputs["Shader"], out.inputs["Surface"])
+    try:
+        mat.cycles.emission_sampling = "NONE"
+    except (AttributeError, TypeError):
+        pass
+    mat["mobilia_photo_emission"] = True
     return mat
+
+
+def set_photo_emission(strength: float) -> None:
+    """Força da emissão da foto em todos os materiais da sala-proxy (0 nos renders da calibração
+    que medem uma luz por vez; 1 no resto)."""
+    for m in bpy.data.materials:
+        if m.get("mobilia_photo_emission") and m.node_tree is not None:
+            n = m.node_tree.nodes.get(PHOTO_EMISSION_NODE)
+            if n is not None:
+                n.inputs["Strength"].default_value = float(strength)
 
 
 def _mesh_object(name: str, verts, faces, mat) -> bpy.types.Object:
@@ -358,19 +406,20 @@ def build_room(sc, spec: dict, photo_img) -> list:
     pad = 6.0
     objs = []
     illum = spec.get("illuminant")
-    m_floor = proxy_material("proxy_floor", photo_img, k, means.get("floor", [0.3, 0.3, 0.3]), illum)
+    emission = photo_emission_on(spec)
+    m_floor = proxy_material("proxy_floor", photo_img, k, means.get("floor", [0.3, 0.3, 0.3]), illum, emission)
     floor = _mesh_object("proxy_floor", [(xmin - pad, ymin - pad, 0), (xmax + pad, ymin - pad, 0),
                                          (xmax + pad, ymax + pad, 0), (xmin - pad, ymax + pad, 0)],
                          [(0, 1, 2, 3)], m_floor)
     objs.append(floor)
     ch_h = float(room["ceiling_height"])
-    m_ceil = proxy_material("proxy_ceiling", photo_img, k, means.get("ceiling", [0.6, 0.6, 0.6]), illum)
+    m_ceil = proxy_material("proxy_ceiling", photo_img, k, means.get("ceiling", [0.6, 0.6, 0.6]), illum, emission)
     ceil = _mesh_object("proxy_ceiling", [(xmin - pad, ymin - pad, ch_h), (xmin - pad, ymax + pad, ch_h),
                                           (xmax + pad, ymax + pad, ch_h), (xmax + pad, ymin - pad, ch_h)],
                         [(0, 1, 2, 3)], m_ceil)
     ceil.visible_shadow = False        # o teto estendido além da sala não pode tapar o sol da janela
     objs.append(ceil)
-    m_wall = proxy_material("proxy_wall", photo_img, k, means.get("wall", [0.6, 0.6, 0.6]), illum)
+    m_wall = proxy_material("proxy_wall", photo_img, k, means.get("wall", [0.6, 0.6, 0.6]), illum, emission)
     for w in room["walls"]:
         p0, p1 = np.asarray(w["p0"]), np.asarray(w["p1"])
         L = float(np.linalg.norm(p1 - p0))
@@ -387,11 +436,44 @@ def build_room(sc, spec: dict, photo_img) -> list:
                 poly.flip()
         objs.append(ob)
     objs += closure_walls(spec, ch_h, means.get("wall", [0.6, 0.6, 0.6]), k)
-    objs += build_occluders(spec, photo_img, k, means, illum)
+    objs += build_occluders(spec, photo_img, k, means, illum, emission)
+    roof = build_roof(spec, ch_h)
+    if roof is not None:
+        objs.append(roof)
     return objs
 
 
-def build_occluders(spec: dict, photo_img, k: float, means: dict, illum) -> list:
+def photo_emission_on(spec: dict) -> bool:
+    return bool((spec.get("lighting") or {}).get("photo_emission", True))
+
+
+def build_roof(spec: dict, height: float):
+    """Telhado só de sombra acima do teto (``calibration.roof_polygons``): o sol entra só pelas
+    janelas, nunca por cima das paredes. É catcher (não muda o passe de sombra) e invisível para
+    a câmera e para os raios rebatidos."""
+    try:
+        rings = cal.roof_polygons(spec["room"])
+    except Exception as e:  # geometria degenerada: sem telhado (comportamento antigo)
+        emit(event="log", level="warning", message=f"Sem telhado de sombra: {e}")
+        return None
+    if not rings:
+        return None
+    verts, faces = [], []
+    z = float(height) + 0.002
+    for ring in rings:
+        base = len(verts)
+        verts += [(x, y, z) for x, y in ring]
+        faces.append(tuple(range(base, base + len(ring))))
+    mat = bpy.data.materials.new("proxy_roof")
+    ob = _mesh_object(ROOF_NAME, verts, faces, mat)
+    for attr in ("visible_camera", "visible_diffuse", "visible_glossy", "visible_transmission",
+                 "visible_volume_scatter"):
+        setattr(ob, attr, False)
+    ob.visible_shadow = True
+    return ob
+
+
+def build_occluders(spec: dict, photo_img, k: float, means: dict, illum, emission: bool = True) -> list:
     """Objetos que já existem na foto (bancadas, armários, porta aberta) como catchers:
     ocultam móveis atrás deles e recebem as sombras dos móveis na frente."""
     path = spec.get("occluders")
@@ -407,7 +489,7 @@ def build_occluders(spec: dict, photo_img, k: float, means: dict, illum) -> list
     n = np.cross(v1 - v0, v2 - v0)
     flip = (n * (cam - v0)).sum(1) < 0
     faces[flip] = faces[flip][:, [0, 2, 1]]
-    mat = proxy_material("proxy_occluders", photo_img, k, means.get("wall", [0.5, 0.5, 0.5]), illum)
+    mat = proxy_material("proxy_occluders", photo_img, k, means.get("wall", [0.5, 0.5, 0.5]), illum, emission)
     ob = _mesh_object("proxy_occluders", verts.tolist(), faces.tolist(), mat)
     return [ob]
 
@@ -442,6 +524,39 @@ def closure_walls(spec: dict, height: float, wall_mean: list[float], k: float) -
         ob.visible_shadow = False      # o sol atravessa: a parede real com janela é a ajustada
         out.append(ob)
     return out
+
+
+def build_sun_blockers(spec: dict) -> tuple[list, list[dict]]:
+    """"Persianas" só de sombra nas partes das janelas por onde o sol da foto não entra
+    (``calibration.sun_apertures`` a partir das manchas de sol da foto). Sem elas o sol do render
+    atravessa a abertura inteira e ilumina piso (e móveis) onde a foto não tem sol. São catchers
+    (não mudam o passe de sombra), no plano da parede, um pouco para fora, invisíveis para a câmera e
+    para os raios rebatidos: só bloqueiam o sol (a luz de área da janela fica 3 cm para dentro).
+    Ficam 3 mm atrás do plano da parede-proxy e passam das bordas da abertura (``blocker_rects``):
+    nenhuma "lâmina" de sol escapa pelo vão entre a parede e a persiana."""
+    from PIL import Image
+
+    sun = (spec.get("lighting") or {}).get("sun") or {}
+    path = sun.get("mask_path")
+    if not sun.get("direction") or not path or not Path(path).exists():
+        return [], []
+    patch = np.asarray(Image.open(path).convert("L")) > 127
+    aps = cal.sun_apertures(spec, patch)
+    objs = []
+    for ap in aps:
+        o = spec["room"]["openings"][ap["janela"]]
+        P0, dw, n = cal.window_frame(spec["room"], o)
+        for k, (a0, a1, b0, b1) in enumerate(cal.blocker_rects(ap)):
+            verts = [tuple(P0 + dw * s_ + np.array([0.0, 0.0, z]) - n * 0.004)
+                     for s_, z in ((a0, b0), (a1, b0), (a1, b1), (a0, b1))]
+            ob = _mesh_object(f"proxy_persiana_{ap['janela']}_{k}", verts, [(0, 1, 2, 3)],
+                              bpy.data.materials.get("proxy_roof") or bpy.data.materials.new("proxy_roof"))
+            for attr in ("visible_camera", "visible_diffuse", "visible_glossy", "visible_transmission",
+                         "visible_volume_scatter"):
+                setattr(ob, attr, False)
+            ob.visible_shadow = True
+            objs.append(ob)
+    return objs, aps
 
 
 def set_catchers(objs, on: bool) -> None:
@@ -500,7 +615,25 @@ def build_lights(sc, spec: dict) -> dict:
     world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
     bg.inputs["Color"].default_value = (*lt.get("world_color", [1.0, 1.0, 1.0]), 1.0)
-    return {"windows": windows, "world_bg": bg, "sun": sun}
+    # cores-base (iluminante da foto): a calibração multiplica pelo ganho de cor por canal
+    base = {"windows": [tuple(ob.data.color) for ob, _ in windows],
+            "sun": tuple(sun.data.color) if sun is not None else None,
+            "closure": tuple(spec.get("illuminant") or [1.0, 1.0, 1.0])}
+    return {"windows": windows, "world_bg": bg, "sun": sun, "base_colors": base}
+
+
+def apply_light_colors(lights: dict, gains) -> None:
+    """Cor das luzes = cor-base × ganho por canal da calibração (janelas, sol e ambiente)."""
+    g = [float(v) for v in gains]
+    base = lights.get("base_colors") or {}
+    for (ob, _), c in zip(lights["windows"], base.get("windows") or []):
+        ob.data.color = tuple(ci * gi for ci, gi in zip(c, g))
+    if lights.get("sun") is not None and base.get("sun") is not None:
+        lights["sun"].data.color = tuple(ci * gi for ci, gi in zip(base["sun"], g))
+    mat = bpy.data.materials.get("proxy_closure")
+    if mat is not None and base.get("closure") is not None:
+        b = mat.node_tree.nodes.get("Principled BSDF")
+        b.inputs["Emission Color"].default_value = (*[ci * gi for ci, gi in zip(base["closure"], g)], 1.0)
 
 
 def set_light_strengths(lights: dict, window_power_per_m2: float, ambient_strength: float,
@@ -536,9 +669,18 @@ def _combined(chs: dict) -> np.ndarray:
 
 
 def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> dict:
-    """Ajusta potência das janelas e do ambiente para que a sala renderizada SEM móveis
-    reproduza a luminância da foto (mínimos quadrados não negativos, 2 parâmetros)."""
+    """Ajusta as luzes para que a sala renderizada SEM móveis reproduza a foto (PT8).
+
+    Renders rápidos (``calib_width``) da sala vazia, um por fonte: a emissão da foto (termo fixo,
+    força 1), as janelas, o ambiente (paredes não fotografadas) e o sol. ``calibration.fit_lights``
+    decide as forças (pixels estourados como limite inferior, sol ajustado à parte nas manchas de
+    sol da foto, limite do ambiente pela claridade da sala) e o ganho de cor por canal, que é
+    aplicado nas luzes aqui. A predição da sala vazia com a luz final (``calib_pred.npy``) serve
+    para o ajuste fino do CG no compositor: mapa de ganho residual e curva de tom
+    (``composite/grade.py``, gravados em ``ajuste_cg``)."""
     from PIL import Image
+
+    from mobilia.composite import grade as gr
 
     t0 = time.time()
     W = spec["width"]
@@ -549,84 +691,47 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
     sc.cycles.samples = 48
     sc.render.use_motion_blur = False
     set_catchers(room_objs, False)
-    renders = []
+    emission = photo_emission_on(spec)
+    renders: dict[str, np.ndarray] = {}
     stats: list[dict] = []
-    cases = ["windows", "ambient"] + (["sun"] if lights.get("sun") is not None else [])
+    cases = (["emissao"] if emission else []) + ["windows", "ambient"] \
+        + (["sun"] if lights.get("sun") is not None else [])
     for case in cases:
         set_light_strengths(lights, 1.0 if case == "windows" else 0.0, 1.0 if case == "ambient" else 0.0,
                             1.0 if case == "sun" else 0.0)
+        set_photo_emission(1.0 if case == "emissao" else 0.0)
         p = str(out_dir / f"calib_{case}.exr")
         sc.render.filepath = p
         sc.frame_set(1)
         stats.append(timed_render(sc, write_still=True))
-        renders.append(_combined(read_exr(p))[..., :3])
-    h, w = renders[0].shape[:2]
+        renders[case] = _combined(read_exr(p))[..., :3]
+    set_photo_emission(1.0 if emission else 0.0)
+    h, w = renders["windows"].shape[:2]
     photo = np.asarray(Image.open(spec["photo_path"]).convert("RGB").resize((w, h), Image.BILINEAR),
                        dtype=np.float32) / 255.0
-    photo = np.where(photo <= 0.04045, photo / 12.92, ((photo + 0.055) / 1.055) ** 2.4)
-    mask = np.asarray(Image.open(spec["lighting"]["calib_mask_path"]).convert("L").resize((w, h), Image.NEAREST)) > 127
-    lum = np.array([0.2126, 0.7152, 0.0722], np.float32)
-    A = np.stack([(r @ lum)[mask] for r in renders], 1)
-    b = (photo @ lum)[mask]
-    sol = _nnls(A, b)
-    tot = A @ sol
-    amb_share = float((A[:, 1] * sol[1]).sum() / max(1e-9, tot.sum()))
-    if amb_share > AMBIENT_MAX_SHARE and A[:, 0].any():
-        # refaz com o ambiente limitado (luz da parte não fotografada não pode dominar)
-        amb = AMBIENT_MAX_SHARE * float(b.mean()) / max(1e-9, float(A[:, 1].mean()))
-        others = [j for j in range(A.shape[1]) if j != 1]
-        sub = _nnls(A[:, others], b - A[:, 1] * amb)
-        sol = np.zeros(A.shape[1])
-        sol[1] = amb
-        sol[others] = sub
-    pred = A @ sol
-    rel_rms = float(np.sqrt(np.mean((pred - b) ** 2)) / max(1e-6, np.mean(b)))
-    # balanço de cor: razão por canal entre foto e predição (aplicada às luzes)
-    full = sum(sol[j] * renders[j] for j in range(len(renders)))
-    ratio = photo[mask].sum(0) / np.maximum(full[mask].sum(0), 1e-6)
-    ratio = ratio / max(1e-6, float(ratio @ lum))
-    ratio = np.clip(ratio, 0.85, 1.15)
+    photo = np.where(photo <= 0.04045, photo / 12.92, ((photo + 0.055) / 1.055) ** 2.4).astype(np.float32)
+    lt = spec["lighting"]
+    m8 = np.asarray(Image.open(lt["calib_mask_path"]).convert("L").resize((w, h), Image.NEAREST))
+    normal, lower = cal.masks_from_png(m8)
+    sun_patch = None
+    sun_mask_path = (lt.get("sun") or {}).get("mask_path")
+    if sun_mask_path and Path(sun_mask_path).exists():
+        sun_patch = np.asarray(Image.open(sun_mask_path).convert("L").resize((w, h), Image.NEAREST)) > 127
+    fit = cal.fit_lights({k: v for k, v in renders.items() if k != "emissao"}, photo, normal, lower,
+                         emit=renders.get("emissao"), sun_patch=sun_patch)
+    apply_light_colors(lights, fit["color_ratio"])
+    pred = fit.pop("pred")
+    np.save(out_dir / "calib_pred.npy", pred)
+    grade, G = gr.grade_data(photo, pred, normal, lower, return_map=True)
     sc.render.resolution_percentage, sc.cycles.samples, sc.render.use_motion_blur = old
-    res = {"window_power_per_m2": float(sol[0]), "ambient_strength": float(sol[1]),
-           "sun_strength": float(sol[2]) if len(sol) > 2 else 0.0,
-           "color_ratio": ratio.tolist(), "rel_rms": rel_rms, "pixels": int(mask.sum()),
-           "pixels_total": int(mask.size), "width": int(w), "height": int(h),
+    # erro da luz depois do mapa de ganho: o que o CG de fato recebe
+    fit["rel_rms_ganho"] = cal.lowpass_rel_rms((G * pred) @ cal.LUM, photo @ cal.LUM, normal)
+    res = {**fit, "emissao_foto": emission, "cor_aplicada": True,
+           "pixels": int(normal.sum()), "pixels_limite_inferior": int(lower.sum()),
+           "pixels_total": int(normal.size), "width": int(w), "height": int(h),
+           "predicao": "calib_pred.npy", "ajuste_cg": grade,
            "seconds": round(time.time() - t0, 1), "renders": stats}
     return res
-
-
-def _nnls(A: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Mínimos quadrados não negativos (scipy), com fallback fechado para 2 incógnitas."""
-    try:
-        from scipy.optimize import nnls
-
-        x, _ = nnls(A.astype(np.float64), b.astype(np.float64))
-        return x
-    except Exception:
-        if A.shape[1] == 2:
-            return _nnls2(A, b)
-        raise
-
-
-def _nnls2(A: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Mínimos quadrados não negativos para 2 incógnitas (solução fechada por casos)."""
-    best, best_err = np.zeros(2), np.inf
-    cands = []
-    try:
-        cands.append(np.linalg.lstsq(A, b, rcond=None)[0])
-    except np.linalg.LinAlgError:
-        pass
-    for j in range(2):
-        a = A[:, j]
-        x = np.zeros(2)
-        x[j] = max(0.0, float(a @ b) / max(1e-9, float(a @ a)))
-        cands.append(x)
-    for x in cands:
-        if np.all(x >= 0):
-            err = float(np.sum((A @ x - b) ** 2))
-            if err < best_err:
-                best, best_err = x, err
-    return best
 
 
 # ============================================================================ itens
@@ -1274,6 +1379,8 @@ def main(spec_path: str) -> None:
     photo_img.colorspace_settings.name = "sRGB"
     room_objs = build_room(sc, spec, photo_img)
     lights = build_lights(sc, spec)
+    blockers, sun_aps = build_sun_blockers(spec)
+    room_objs += blockers
     tempos["cena_montagem"] = time.perf_counter() - t
     lt = spec["lighting"]
     calib = None
@@ -1281,13 +1388,17 @@ def main(spec_path: str) -> None:
     if lt.get("calibrate", True):
         emit(event="log", level="info", message="Calibrando a luz pela foto...")
         calib = calibrate(sc, spec, room_objs, lights, out_dir)
+        if sun_aps:
+            calib.setdefault("sol", {})["aberturas"] = sun_aps
         wp, ws, sun_s = calib["window_power_per_m2"], calib["ambient_strength"], calib["sun_strength"]
-        # a cor da luz vem do iluminante estimado da foto; a razão por canal é só diagnóstico
+        # cor das luzes = iluminante da foto × ganho por canal (já aplicado na calibração); o
+        # evento leva também o ajuste do CG (mapa de ganho, curva de tom) para a composição em fluxo
         emit(event="calibration", **calib)
     else:
         wp, ws = float(lt.get("window_power_per_m2", 10.0)), float(lt.get("ambient_strength", 0.3))
         sun_s = float((lt.get("sun") or {}).get("strength", 0.0))
     set_light_strengths(lights, wp, ws, sun_s)
+    set_photo_emission(1.0 if photo_emission_on(spec) else 0.0)
     set_catchers(room_objs, True)
     tempos["calibracao"] = time.perf_counter() - t
 
@@ -1470,7 +1581,7 @@ WARMUP_KINDS = ("OPTIX", "CUDA")
 
 def _warm_material(name: str, kind: str, img=None):
     """Materiais com os mesmos nós/recursos dos trabalhos: Principled com textura e relevo,
-    vidro, cortina (translúcido + transparente) e proxy difuso com textura."""
+    vidro e cortina (translúcido + transparente). A sala-proxy usa o ``proxy_material`` real."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nt = mat.node_tree
@@ -1484,15 +1595,6 @@ def _warm_material(name: str, kind: str, img=None):
         nt.links.new(tr.outputs[0], mix.inputs[1])
         nt.links.new(tp.outputs[0], mix.inputs[2])
         nt.links.new(mix.outputs[0], out.inputs["Surface"])
-        return mat
-    if kind == "proxy":
-        d = _node(nt, "ShaderNodeBsdfDiffuse", (200, 0))
-        tc = _node(nt, "ShaderNodeTexCoord", (-400, 0))
-        tex = _node(nt, "ShaderNodeTexImage", (-200, 0))
-        tex.image = img
-        nt.links.new(tc.outputs["Window"], tex.inputs["Vector"])
-        nt.links.new(tex.outputs["Color"], d.inputs["Color"])
-        nt.links.new(d.outputs[0], out.inputs["Surface"])
         return mat
     bsdf = _node(nt, "ShaderNodeBsdfPrincipled", (100, 0))
     nt.links.new(bsdf.outputs[0], out.inputs["Surface"])
@@ -1515,8 +1617,9 @@ def _warm_material(name: str, kind: str, img=None):
 
 def build_warmup_scene(sc) -> None:
     """Cena mínima com os recursos que mudam o conjunto de kernels do Cycles/OptiX nos trabalhos:
-    shadow catcher, filme transparente, desfoque de movimento (objeto animado), vidro,
-    transparência, texturas de imagem, relevo, luz de área, sol e mundo."""
+    shadow catcher (com a emissão da foto por "Is Camera Ray"), filme transparente, desfoque de
+    movimento (objeto animado), vidro, transparência, texturas de imagem, relevo, luz de área, sol
+    e mundo."""
     img = bpy.data.images.new("aquecimento", 8, 8)
     img.pixels.foreach_set(np.tile(np.array([0.6, 0.5, 0.4, 1.0], np.float32), 64))
     cam_d = bpy.data.cameras.new("cam")
@@ -1527,8 +1630,9 @@ def build_warmup_scene(sc) -> None:
     sc.camera = cam
 
     mesh = _mesh_object
+    # sala-proxy igual à dos trabalhos: catcher difuso para a câmera, emissão da foto nos outros raios
     floor = mesh("piso", [(-3, -3, 0), (3, -3, 0), (3, 3, 0), (-3, 3, 0)], [(0, 1, 2, 3)],
-                 _warm_material("piso", "proxy", img))
+                 proxy_material("piso", img, 1.0, [0.5, 0.5, 0.5]))
     floor.is_shadow_catcher = True
     cube_v = [(x, y, z) for x in (-0.3, 0.3) for y in (-0.3, 0.3) for z in (0.0, 0.6)]
     cube_f = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]

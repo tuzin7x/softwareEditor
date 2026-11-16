@@ -14,6 +14,9 @@ RECORTE (PT5): a conta só é feita no retângulo dos pixels com móvel ampliado
 influência e pelos raios dos dois desfoques gaussianos (``Compositor.crop_pad``). Fora dele o
 resultado de quadro inteiro já seria a foto (sombra com peso 0 e alfa 0), e dentro dele cada
 valor intermediário é o mesmo do quadro inteiro: o resultado é idêntico byte a byte (testado).
+
+AJUSTE DO CG (PT8, ``grade.py``): mapa de ganho residual, curva de tom e joelho das altas luzes
+multiplicam só C onde A > 0, antes do casamento de nitidez. A placa e a sombra não mudam.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ import numpy as np
 from scipy import ndimage
 
 from ..photo import linear_to_srgb, srgb_to_linear
+from .grade import CGGrade
 
 
 # desfoque do fator de sombra contra ruído de pixel isolado (raio do núcleo: 3 px)
@@ -163,13 +167,14 @@ class Compositor:
         return box
 
     def composite(self, frame: int, rgba: np.ndarray | None, shadow: np.ndarray | None,
-                  border: list[int] | None, origin: tuple[int, int] | None = None
-                  ) -> tuple[np.ndarray, FrameStats]:
+                  border: list[int] | None, origin: tuple[int, int] | None = None,
+                  grade: CGGrade | None = None) -> tuple[np.ndarray, FrameStats]:
         """Compõe um quadro. ``rgba``/``shadow`` são passes do Cycles (float, h×w×4 / h×w×3).
 
         Sem ``origin`` as camadas são do quadro inteiro. Com ``origin`` = (x, y) elas cobrem só um
         retângulo do quadro (p. ex. o border do render) e fora dele valem RGBA 0 e sombra 1. A
-        conta é feita só em ``composition_box``; o resto do quadro é cópia da foto."""
+        conta é feita só em ``composition_box``; o resto do quadro é cópia da foto. ``grade``: o
+        ajuste do CG da calibração (só a camada CG muda)."""
         st = FrameStats(frame)
         if rgba is None:
             return self.photo8.copy(), st
@@ -191,18 +196,19 @@ class Compositor:
             if shadow is not None:
                 sh = np.ones((y1 - y0, x1 - x0, shadow.shape[2]), shadow.dtype)
                 sh[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0] = shadow[iy0 - oy:iy1 - oy, ix0 - ox:ix1 - ox]
-        sub = self._composite_region(st, rg, sh, border, box)
+        sub = self._composite_region(st, rg, sh, border, box, grade)
         out8 = self.photo8.copy()
         out8[y0:y1, x0:x1] = sub
         st.box = list(box)
         return out8, st
 
     def _composite_region(self, st: FrameStats, rgba: np.ndarray, shadow: np.ndarray | None,
-                          border: list[int] | None, box: list[int]) -> np.ndarray:
+                          border: list[int] | None, box: list[int], grade: CGGrade | None = None) -> np.ndarray:
         """A conta da composição no retângulo ``box`` do quadro (camadas já recortadas nele).
 
         Mesmas operações, na mesma ordem, do quadro inteiro; ``diag`` (raio de influência e
-        rampa) continua sendo o do quadro inteiro."""
+        rampa) continua sendo o do quadro inteiro. O ajuste do CG (``grade``) é por pixel e lê o
+        mapa de ganho na posição absoluta do quadro: recortar não muda nada."""
         X0, Y0, X1, Y1 = box
         sl = (slice(Y0, Y1), slice(X0, X1))
         photo8, photo_lin = self.photo8[sl], self.photo_lin[sl]
@@ -221,6 +227,9 @@ class Compositor:
         keep = A > self.s.alpha_eps if valid is None else valid & (A > self.s.alpha_eps)
         A = np.where(keep, np.clip(A, 0, 1), 0.0).astype(np.float32, copy=False)
         C = np.where(A[..., None] > 0, np.maximum(C, 0), 0.0).astype(np.float32, copy=False)
+        if grade is not None:
+            # luz/cor do CG casadas com a foto (mapa de ganho, curva de tom, joelho): só onde A > 0
+            C = grade.apply(C, A, box)
         if valid is not None:
             S = np.where(valid, S, 1.0)
 

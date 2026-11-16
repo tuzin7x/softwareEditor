@@ -204,7 +204,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             if len(occ[1]):
                 em.log(f"Objetos existentes na foto viram oclusores 3D ({len(occ[1])} triângulos)")
             with sw.measure("analise.sol"):
-                sun = detect_sun(room, seg, rgb)
+                sun_diag: dict = {}
+                sun = detect_sun(room, seg, rgb, diag=sun_diag)
                 if sun is not None:
                     (an_dir / "sol.json").write_text(json.dumps(sun.to_dict(), indent=1), encoding="utf-8")
                     em.log(f"Sol direto detectado: elevação {sun.elevation_deg:.0f}°, {sun.patches} mancha(s) "
@@ -244,7 +245,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
                                 device=prof.render_device,
                                 texture_res=q["texture_res"], hold_start=hold_start, hold_end=hold_end,
                                 motion_blur=q["motion_blur"], seed=req.seed,
-                                sun=sun.to_dict() if sun is not None else None, occluders=occ)
+                                sun=sun.to_dict() if sun is not None else None, occluders=occ,
+                                sun_mask=sun_diag.get("patch_mask") if sun is not None else None)
         em.stage("assets", 1.0, f"{len(spec['items'])} modelos prontos")
         dl = min(float(net["s"]), time.perf_counter() - t)
         sw.add("download", dl)
@@ -267,7 +269,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         try:
             with vram.track("render"):
                 render_meta, proc = _run_render_worker(work / "scene.json", em, with_times=True,
-                                                       on_frame=composer.push)
+                                                       on_frame=composer.push,
+                                                       on_calibration=composer.set_calibration)
             _blender_stages(sw, render_meta.get("telemetria") or {}, proc)
             # ------------------------------------------------------------ cauda da composição + vídeo
             # cada EXR é apagado assim que o último quadro que o usa vai para o codificador (PT4)
@@ -368,15 +371,7 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
         "so_foto": sum(1 for f in frames if f.get("source") is None)}
     calib = render_meta.get("calibration")
     gpu = hw.best_gpu
-    calib_view = None
-    if calib:
-        calib_view = {**{k: v for k, v in calib.items() if k != "renders"},
-                      "ganhos_canal": calib.get("color_ratio"),
-                      "fracao_mascara": (round(calib["pixels"] / calib["pixels_total"], 4)
-                                         if calib.get("pixels_total") else None),
-                      "sol_ajustado": bool(calib.get("sun_strength", 0.0) > 0.0),
-                      "curva_tom_ok": None,
-                      "renders": calib.get("renders")}
+    calib_view = calibration_report(calib)
     return {
         "versao": __version__,
         "data": stamp,
@@ -439,6 +434,33 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
     }
 
 
+def calibration_report(calib: dict | None) -> dict | None:
+    """``calibracao_luz`` do relatório: a calibração do worker sem a grade do mapa de ganho (fica
+    no ``frames.json``), com os resumos pedidos pela telemetria."""
+    if not calib:
+        return None
+    adj = calib.get("ajuste_cg") or {}
+    gain = {k: v for k, v in (adj.get("ganho") or {}).items() if k != "grade"}
+    curve = adj.get("curva_tom") or {}
+    sol = calib.get("sol") or {}
+    view = {k: v for k, v in calib.items() if k not in ("renders", "ajuste_cg")}
+    view.update({
+        "ganhos_canal": calib.get("color_ratio"),
+        "fracao_mascara": (round(calib["pixels"] / calib["pixels_total"], 4)
+                           if calib.get("pixels_total") else None),
+        "fracao_limite_inferior": (round(calib.get("pixels_limite_inferior", 0) / calib["pixels_total"], 4)
+                                   if calib.get("pixels_total") else None),
+        # sol ajustado à parte nas manchas da foto (PT8) e com força > 0
+        "sol_ajustado": bool(sol.get("ajustado_a_parte", True) and calib.get("sun_strength", 0.0) > 0.0),
+        "curva_tom_ok": bool(curve.get("ok")) if curve else None,
+        "mapa_ganho": gain or None,
+        "curva_tom": curve or None,
+        "joelho": adj.get("joelho"),
+        "renders": calib.get("renders"),
+    })
+    return view
+
+
 def stream_composer(work: Path, plate8: np.ndarray, spec: dict, out_path: Path, fps: int, seed: int,
                     em: ProgressEmitter, gpu: bool = False, delete_exr: bool = False):
     """Compositor em fluxo para o render que vai começar (``StreamComposer``): a placa é estimada
@@ -481,7 +503,8 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
             f"{ENV_MANTER_EXR}=1.")
     composer = StreamComposer(work, plate8, out_path, fps, seed, em, codec=codec, delete_exr=delete_exr,
                               workers=workers, sequential=any(fr.get("mode") == "incremental" for fr in frames),
-                              n_frames=len(frames), last_use=last_use)
+                              n_frames=len(frames), last_use=last_use,
+                              calibration=render_meta.get("calibration"))
     try:
         for fr in frames:
             composer.push(fr)
@@ -512,6 +535,23 @@ def recompose(work_dir: str | Path, out_path: str | Path | None, em: ProgressEmi
     return report
 
 
+def calibration_log(ev: dict) -> str:
+    """Linha do registro para o evento ``calibration`` do worker."""
+    msg = f"Luz calibrada pela foto (erro relativo {float(ev.get('rel_rms', 0.0)):.0%}"
+    if ev.get("rel_rms_ganho") is not None:
+        msg += f"; {float(ev['rel_rms_ganho']):.0%} com o mapa de ganho"
+    msg += ")"
+    if ev.get("emissao_foto"):
+        msg += f"; emissão da foto {float(ev.get('emissao_fracao', 0.0)):.0%} da luz"
+    if float(ev.get("sun_strength", 0.0) or 0.0) > 0:
+        msg += f"; sol {float(ev['sun_strength']):.2f} (ajustado nas manchas)"
+    adj = ev.get("ajuste_cg") or {}
+    if adj:
+        g = adj.get("ganho") or {}
+        msg += f"; ganho do CG: {g.get('modo', '?')}" + ("; curva de tom" if (adj.get("curva_tom") or {}).get("ok") else "")
+    return msg
+
+
 def blender_worker_prefix() -> list[str]:
     """Comando do worker do Blender sem argumentos (``MOBILIA_BLENDER_WORKER`` substitui)."""
     override = os.environ.get(ENV_BLENDER_WORKER)
@@ -538,14 +578,16 @@ def _blender_worker_command(spec_path: Path) -> list[str]:
     return blender_worker_prefix() + [str(spec_path)]
 
 
-def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = False, on_frame=None):
+def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = False, on_frame=None,
+                       on_calibration=None):
     """Roda o worker do Blender e devolve o ``frames.json``.
 
     Com ``with_times`` devolve também os instantes (``perf_counter`` deste processo) do
     lançamento, do evento ``worker_ready`` e do fim do processo, para a telemetria.
     ``on_frame(entrada)`` recebe cada quadro anunciado (evento ``frame_ready``, na ordem do vídeo,
     com o EXR já completo no disco). Se ele levantar um erro (composição falhou), o Blender é
-    encerrado na hora e o erro sobe.
+    encerrado na hora e o erro sobe. ``on_calibration(calibração)`` recebe a calibração da luz
+    (evento ``calibration``, sempre antes do primeiro quadro), com o ajuste do CG.
     """
     env = blender_worker_env()
     cmd = _blender_worker_command(spec_path)
@@ -565,7 +607,7 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
     th = threading.Thread(target=_drain_err, daemon=True)
     th.start()
     try:
-        meta_path = _read_worker_events(proc, em, times, on_frame)
+        meta_path = _read_worker_events(proc, em, times, on_frame, on_calibration)
     except BaseException:
         if proc.poll() is None:
             proc.kill()
@@ -580,7 +622,7 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
     return (meta, times) if with_times else meta
 
 
-def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame) -> str | None:
+def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame, on_calibration=None) -> str | None:
     """Lê os eventos JSON do worker até ele fechar a saída; devolve o caminho do ``frames.json``."""
     meta_path = None
     for line in proc.stdout:
@@ -607,7 +649,9 @@ def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame) -> str
             tot = max(1, ev.get("estimated_total", 1))
             em.stage("render", ev["done"] / tot, f"Renderizando quadro {ev['done']}/{tot} ({ev['seconds']:.1f} s/quadro)")
         elif kind == "calibration":
-            em.log(f"Luz calibrada pela foto (erro relativo {ev['rel_rms']:.0%})")
+            em.log(calibration_log(ev))
+            if on_calibration is not None:
+                on_calibration({k: v for k, v in ev.items() if k != "event"})
         elif kind == "log":
             em.log(ev.get("message", ""), ev.get("level", "info"))
         elif kind == "render_done":

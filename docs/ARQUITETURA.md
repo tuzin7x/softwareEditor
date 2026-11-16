@@ -43,10 +43,11 @@ foto.jpg ─┬─► [Preparo]   EXIF, placa imutável na resolução do vídeo
           │               otimização com regras de design de interiores e visibilidade na câmera
           ├─► [Assets]    Poly Haven (CC0, glTF, cache local) + procedurais (tapete, luminária, cama, livros...)
           ├─► [Render]    subprocesso Blender (bpy 5.x, Cycles OptiX/CUDA):
-          │               câmera casada, sala-proxy = shadow catcher, luz calibrada pela foto,
-          │               montagem animada peça a peça, EXR multicamada por quadro
+          │               câmera casada, sala-proxy = shadow catcher que emite a foto para os
+          │               raios rebatidos, luz calibrada pela foto (janelas, ambiente, sol nas
+          │               manchas), montagem animada peça a peça, EXR multicamada por quadro
           ├─► [Composição] saída = foto·S'·(1−A)+C ; cópia bit a bit fora dos móveis/sombras;
-          │               grão do sensor e nitidez casados só na camada 3D
+          │               ajuste de luz/cor, grão do sensor e nitidez casados só na camada 3D
           └─► [Vídeo]     FFmpeg (NVENC ou libx264 CRF 14 medium), BT.709, +faststart; verificação por seek
                           (composição e codificação correm em paralelo ao render, quadro a quadro)
 ```
@@ -132,31 +133,74 @@ documentados no histórico):
 
 | Fato | Consequência no projeto |
 |---|---|
-| Shadow catcher recebe sombras de luzes do Blender e do *world* | luzes reais da sala = luzes de área nas janelas + emissão das paredes não fotografadas |
-| Catcher **emissivo** dilui a própria sombra | o material da sala-proxy é **difuso, nunca emissivo** |
+| Shadow catcher recebe sombras de luzes do Blender e do *world* | luzes reais da sala = luzes de área nas janelas + emissão das paredes não fotografadas + sol |
+| Catcher **emissivo** dilui a própria sombra | para os raios da **câmera** a sala-proxy é **difusa, nunca emissiva**; a emissão da foto só vale para os outros raios (*Is Camera Ray*) |
 | Malha emissiva **não-catcher** é tratada como objeto CG (não gera sombra no catcher) | paredes de fechamento são catchers |
 | Catcher oculta objetos atrás dele | paredes-proxy fazem a oclusão correta (móvel atrás de quina some) |
 | Blender 5: EXR multicamada = multi-part (`media_type = 'MULTI_LAYER_IMAGE'`) | leitor próprio com `OpenEXR.File(..., separate_channels=True)` |
 | Câmera: `lens = fx·36/W`, `shift_x = −(cx−W/2)/max(W,H)`, `shift_y = (cy−H/2)/max(W,H)` | erro de projeção < 0,35 px no teste automatizado |
 
-**Sala-proxy:** piso, teto e paredes (com recortes nas janelas) como shadow catchers. O albedo é a
-**própria foto projetada pela câmera** (coordenada *Window*), dessaturada e dividida pela cor do
-iluminante. Assim a luz rebatida nos móveis tem a cor real do ambiente. As paredes não fotografadas
-(atrás da câmera) fecham a sala.
+**Sala-proxy (PT8):** piso, teto, paredes (com recortes nas janelas) e oclusores como shadow
+catchers, com um material misturado por *Light Path › Is Camera Ray*:
+- **raio da câmera:** difuso, como sempre (a regra validada "catcher emissivo dilui a própria
+  sombra" continua respeitada). No passe de sombra o albedo se cancela (razão com e sem móveis no
+  mesmo ponto), então ele só pesa nos renders da calibração. Ali ele é **uniforme por superfície**
+  (cor mediana do piso/parede/teto × escala, balanceada pelo iluminante): com a própria foto como
+  albedo, a luz já "pintada" na foto (manchas de sol, claridade perto da janela) entraria duas
+  vezes e a razão foto/render diria só 1/(irradiância do modelo) — era por isso que o ajuste
+  antigo zerava o sol;
+- **qualquer outro raio** (luz rebatida nos móveis, reflexos): `Emission` da própria foto linear
+  (coordenada *Window*), força 1. O móvel recebe a luz real que a sala reflete, com a cor e a
+  distribuição da foto. `emission_sampling = 'NONE'`: a malha de oclusores (centenas de milhares
+  de triângulos) não entra na árvore de luzes; a sala que emite em volta toda é achada pelos
+  raios rebatidos.
 
-**Luz calibrada pela foto:** dois renders rápidos (240 px) da sala **sem móveis**: um só com as janelas
-e outro só com o "ambiente" (paredes não fotografadas). Um ajuste por mínimos quadrados não negativos
-casa a luminância renderizada com a da foto em piso/parede/teto, e o ambiente fica limitado a 50% da
-luz. A cor da luz é a do iluminante da foto (teto ou paredes claras), então móveis brancos ficam com o
-mesmo "branco" da foto. Na foto de teste, o erro relativo do ajuste foi de 20–29%. É um modelo de luz
-simples, mas a exposição e o balanço de branco dos móveis ficam coerentes com a foto.
+Fora do enquadramento (atrás/ao lado da câmera) vale a cor média da superfície. As paredes não
+fotografadas fecham a sala. `lighting.photo_emission: false` no `scene.json` volta ao modo antigo
+(difuso com a foto como albedo, sem emissão).
+
+**Luz calibrada pela foto (PT8, `render/calibration.py`).** Renders rápidos (240 px) da sala
+**sem móveis**, uma fonte por vez: a emissão da foto (termo fixo), as janelas, o ambiente (paredes
+não fotografadas) e o sol. O modelo é `predição = E + Σ kᵢ·Rᵢ`, ajustado na luminância dos pixels
+de piso/parede/teto:
+- a máscara de calibração (`calib_mask.png`) tem 3 níveis: 255 = pixel usado no ajuste, 128 = quase
+  saturado (luminância ≥ 0,97 ou um canal ≥ 250), que entra como **limite inferior** (a predição tem
+  de ser pelo menos o valor recortado) em vez de ser descartado, e 0 = fora. Os limites nunca
+  pesam mais que os pixels normais no total (numa sala branca eles inflariam as luzes);
+- janelas + ambiente por mínimos quadrados não negativos fora da área do sol; o ambiente fica
+  limitado a uma parcela da luz que sobe de 50% em salas médias até 70% em salas claras;
+- o **sol é ajustado à parte**, só nas manchas de sol da foto (`sunlight.py`) que o sol do render
+  também ilumina: a força vem do excesso da mancha sobre a própria foto em volta dela (a foto "sem
+  sol" interpolada da vizinhança), não do resíduo do modelo. Pixels estourados da mancha exigem
+  que o sol estoure ao menos metade do miolo dela (mediana, nunca o pior pixel da borda);
+- a cor global por canal das luzes (antes só diagnóstico) é aplicada nas janelas, no sol e no
+  ambiente, sem mudar a luminância ajustada (limitada a ±15%);
+- a predição final da sala vazia vai para `render/calib_pred.npy` e dela saem o mapa de ganho e a
+  curva de tom do CG (seção 7).
+
+`rel_rms` é o erro da luz na escala da sala (resíduo de luminância depois de um desfoque de 4% do
+lado maior, sem a textura do albedo uniforme); `rel_rms_ganho` é o mesmo depois do mapa de ganho
+(o que o CG de fato recebe); `rel_rms_pixel` é o erro por pixel. Na sala de teste (CPU, 240 px):
+emissão da foto ≈ 50% da luz, sol 2,0 nas manchas (antes zerado), `rel_rms` 0,18 e `rel_rms_ganho`
+0,12. A transformação de vista continua Standard (AgX/Filmic quebraria a correspondência).
 
 **Sol direto (validado na foto de teste):** manchas de sol no piso são detectadas e a direção do sol é
 estimada por busca global (azimute × elevação). O critério é que as partes transparentes das janelas,
 projetadas no piso, expliquem as manchas (F0,5 entre projeção e manchas; precisão ≥ 60%). Na foto de
 teste, o resultado foi azimute ~139° e elevação ~51°, consistente em 1536 e 1920 px, com 95–99% da
-área das manchas explicada. A luz solar entra pelos recortes das janelas e sua intensidade é a 3ª
-base da calibração. Sem manchas confiáveis, o sol não é usado.
+área das manchas explicada. Sem manchas confiáveis, o sol não é usado. No render (PT8):
+- um **telhado só de sombra** (catcher invisível para a câmera e para os raios rebatidos) fecha a
+  sala por cima: o teto visível não projeta sombra (estendido além das paredes, ele taparia o sol
+  que sai pela janela) e, sem nada por cima, o sol entrava por cima das paredes e iluminava quase
+  todo o piso. A planta é o retângulo das paredes de fechamento menos as faixas atrás de cada
+  parede fotografada (vale para salas não convexas, como bay windows);
+- **aberturas de sol**: cada pixel de mancha é levado ao piso pelo raio da câmera e dali, na
+  direção do sol, até o plano da parede; os pontos que caem numa janela dão a parte dela por onde
+  o sol da foto entra (persianas, caixilhos e telas cortam o resto). O complemento vira "persianas"
+  só de sombra, um pouco atrás da parede, passando 5 cm das bordas (sem lâmina de sol rasante) e
+  sobrepostas nas emendas. Janelas voltadas para o sol sem mancha nenhuma e com a projeção na foto
+  ficam fechadas para o sol; sem evidência (projeção fora da foto), ficam abertas.
+  (`docs/poc/v2/pt8_sol_render_vs_foto.jpg`: sol do render antes e depois, sobre as manchas da foto.)
 
 **Objetos que já existem na foto** (armários, eletrodomésticos, porta aberta, colunas) viram uma malha
 de oclusão triangulada a partir da nuvem de pontos do MoGe-2, recuada 1,2% ao longo do raio. Ela também
@@ -234,6 +278,27 @@ renderiza os quadros seguintes: depois do último render sobra só a "cauda".
   e `encode` (`codificador`, `preset`, `verificacao_metodo: "seek"`). Em `tempos_s`, `composicao` e
   `codificacao` contam só a cauda depois do render (o resto ficou escondido atrás dele).
 
+**Ajuste da luz e da cor do CG (PT8, `composite/grade.py`).** Calculado uma vez na calibração e
+gravado em `frames.json["calibration"]["ajuste_cg"]` (o `recompor` usa o mesmo; na composição em
+fluxo ele chega no evento `calibration`, sempre antes do primeiro quadro). Multiplica **só C** onde
+A > 0, antes do casamento de nitidez; a placa e a sombra não mudam (testado byte a byte):
+- **mapa de ganho residual de baixa frequência, por canal**: `G = blur(m·foto/pred)/blur(m)`
+  (σ = 0,1 do lado maior), limitado a [0,85; 1,2], tendendo ao ganho global onde a máscara é rala.
+  Com pouca máscara (< 5% do quadro, ou < 25% das superfícies não estouradas: sala branca) vira um
+  ganho global; com quase nada, identidade. É gravado numa grade 8× menor que o render da
+  calibração (cabe no `frames.json`) e reamostrado para o quadro;
+- **curva de tom monotônica**: regressão isotônica de log₂(luminância prevista) para log₂(luminância
+  da foto) sobre medianas de faixas de quantis (2–98%), inclinação ≥ 0,3, desvio ≤ 0,35 stop,
+  voltando à identidade 1 stop fora da faixa dos dados. Aplicada na cor sem pré-multiplicação (C/A)
+  e pré-multiplicada de novo; identidade quando a dispersão é alta, o resíduo das medianas é alto
+  ou a correção é pequena (`curva_tom_ok` no relatório);
+- **joelho nas altas luzes**: compressão suave por canal acima de 0,8 linear (o CG não estoura onde
+  a foto "rola" as altas luzes).
+
+A/B na sala de teste a 640 px / 24 amostras em CPU (`docs/poc/v2/pt8_ab_sala_640.jpg`,
+`pt8_ab_detalhe.jpg`) e uma sala branca sintética com 78% das superfícies estouradas
+(`pt8_sala_clara_640.jpg`). Custo do ajuste: ~0,06–0,12 s por quadro com 1 MP de CG.
+
 **Casamento com a câmera:**
 
 - Grão do sensor: o ruído estimado nas regiões planas da foto é aplicado **só** sobre o CG, com um
@@ -307,8 +372,8 @@ contradições, os comportamentos medidos aqui:
 - catcher emissivo dilui a sombra;
 - luzes criadas via Python contam como luz "real" e o *world* também.
 
-Melhoria futura sugerida: material de catcher com `Light Path › Is Camera Ray` (difuso para a câmera,
-emissão da foto para os demais raios), para os móveis refletirem o ambiente real sem diluir sombras.
+A melhoria sugerida por essa pesquisa — material de catcher com `Light Path › Is Camera Ray`
+(difuso para a câmera, emissão da foto para os demais raios) — foi implementada no PT8 (seção 5).
 
 ## 10. Pastas de um trabalho
 
@@ -318,7 +383,10 @@ emissão da foto para os demais raios), para os móveis refletirem o ambiente re
   analise/                geometry.npz, segmentation.npz, room.json, grid.npy, analise_overlay.jpg
   layout.json             itens, posições, ordem de montagem
   scene.json              especificação completa para o Blender
-  calib_mask.png          pixels usados na calibração de luz
+  calib_mask.png          máscara da calibração de luz (255 = ajuste, 128 = limite inferior, 0 = fora)
+  calib_sun_mask.png      manchas de sol da foto (ajuste do sol e aberturas de sol das janelas)
+  render/calib_*.exr      renders da sala vazia da calibração (emissão, janelas, ambiente, sol)
+  render/calib_pred.npy   predição da sala vazia com a luz final (base do ajuste do CG)
   render/frames/*.exr     camadas 3D (Combined + Shadow Catcher) por quadro renderizado, recortadas
                           no border; apagadas depois da composição (MOBILIA_MANTER_EXR=1 mantém)
   render/frames.json      mapa quadro → render/border/reuso + calibração + telemetria do worker

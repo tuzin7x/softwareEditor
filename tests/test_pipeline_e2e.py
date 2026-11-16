@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 FX = Path(__file__).parent / "fixtures"
 FAKE = Path(__file__).parent / "fake_worker.py"
@@ -160,6 +161,19 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     assert set(rep["gpu"]["vram_pico_mb"]) >= {"analise", "render"}
     assert rep["foto"]["megapixels"] == pytest.approx(1920 * 1440 / 1e6, abs=1e-3)
     assert set(rep["calibracao_luz"]) >= {"rel_rms", "ganhos_canal", "fracao_mascara", "sol_ajustado"}
+    # PT8: o ajuste do CG chegou no evento da calibração (antes dos quadros) e foi aplicado
+    cl = rep["calibracao_luz"]
+    assert cl["curva_tom_ok"] is False and cl["mapa_ganho"]["modo"] == "mapa" and "grade" not in cl["mapa_ganho"]
+    assert cl["fracao_limite_inferior"] == pytest.approx(0.025)
+    assert c["ajuste_cg"] == {"aplicado": True, "mapa_ganho": "mapa", "curva_tom": False, "joelho": 0.8}
+    assert any(e["event"] == "log" and "ganho do CG: mapa" in e["message"] for e in events)
+    # a cena manda a máscara de calibração de 3 níveis e as manchas de sol da foto ao worker
+    spec = json.loads((tmp_path / "job" / "scene.json").read_text(encoding="utf-8"))
+    assert spec["lighting"]["photo_emission"] is True
+    m = np.asarray(Image.open(spec["lighting"]["calib_mask_path"]))
+    assert set(np.unique(m)) <= {0, 128, 255} and (m == 255).any()
+    if spec["lighting"].get("sun"):
+        assert Path(spec["lighting"]["sun"]["mask_path"]).exists()
     assert any(e["event"] == "log" and "Blender" in e["message"] for e in events)
     # PT4: EXR recortados no border, colados no quadro inteiro e apagados depois da composição
     assert r["exr"] == {"recorte": True, "codec": "RLE"} and c["exr_recortado"] is True

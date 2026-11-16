@@ -10,12 +10,16 @@ do Blender o anuncia (evento ``frame_ready``), enquanto a GPU ainda renderiza os
   do quadro passar, e apaga cada EXR depois do último quadro que o usa. Se um quadro falhar, o
   trabalho para ali e os EXR ainda não compostos ficam no disco para diagnóstico.
 - A placa (ruído, nitidez e grão da foto) é estimada logo no início, durante o render.
+- O ajuste do CG da calibração da luz (mapa de ganho, curva de tom, joelho: ``grade.py``) chega no
+  evento ``calibration`` do worker, antes do primeiro quadro (``set_calibration``); o ``recompor``
+  o lê do ``frames.json``. Cada quadro usa o ajuste vigente quando foi entregue.
 - No fim, a verificação do MP4 decodifica só o início, o meio e o fim, por *seek*.
 
 O mesmo caminho serve ao ``recompor`` (todos os quadros entregues de uma vez, sem render).
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -29,6 +33,7 @@ from PIL import Image
 
 from ..video.encoder import EncodeSettings, VideoWriter, psnr, seek_frames
 from .compositor import CompositeSettings, Compositor, FrameStats, LayerAccumulator, load_layers, load_render_passes
+from .grade import CGGrade
 from .verify import MARGIN_PX, TILE_PX, influence_mask, outside_mask_equal
 
 
@@ -47,6 +52,12 @@ def _key(entry: dict) -> tuple:
     b = entry.get("border")
     return (int(entry["frame"]), entry.get("source"), tuple(int(v) for v in b) if b else None,
             bool(entry.get("reused")))
+
+
+def _canon(obj) -> str:
+    """Forma canônica (JSON) para comparar o ajuste do CG do evento com o do ``frames.json``
+    (um NaN vira o mesmo texto dos dois lados)."""
+    return json.dumps(obj or None, sort_keys=True)
 
 
 def _area(box) -> int:
@@ -73,7 +84,7 @@ class StreamComposer:
     def __init__(self, work: str | Path, plate8: np.ndarray, out_path: str | Path, fps: int, seed: int, em,
                  *, codec: str = "libx264", delete_exr: bool = False, workers: int | None = None,
                  sequential: bool = False, n_frames: int | None = None, last_use: dict | None = None,
-                 streaming: bool = False):
+                 streaming: bool = False, calibration: dict | None = None):
         self.t0 = time.perf_counter()
         self.work = Path(work)
         self.frames_dir = self.work / "render" / "frames"
@@ -99,6 +110,10 @@ class StreamComposer:
         self._pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="compor")
         # estimativa da placa (ruído, nitidez, grão) já durante o render
         self._comp_fut = self._pool.submit(self._make_compositor, seed)
+        # ajuste do CG (PT8): sem calibração, nenhum (o CG sai como renderizado)
+        self._calib: dict | None = None
+        self._grade_fut: Future = Future()
+        self._grade_fut.set_result(None)
         self.settings = EncodeSettings(codec=codec)
         self._enc = VideoWriter(out_path, self.W, self.H, self.fps, self.settings,
                                 log_path=self.work / "encode.log")
@@ -133,9 +148,23 @@ class StreamComposer:
         self._exr = {"apagados": 0, "bytes": 0}
         self._writer = threading.Thread(target=self._write_loop, name="compor-escrita", daemon=True)
         self._writer.start()
+        if calibration is not None:
+            self.set_calibration(calibration)
         self.t_setup = time.perf_counter() - self.t0
 
     # ------------------------------------------------------------------ entrada
+    def set_calibration(self, calib: dict | None) -> None:
+        """Ajuste do CG da calibração da luz (``frames.json["calibration"]`` ou o evento
+        ``calibration`` do worker). Vale para os quadros entregues depois desta chamada; o mapa de
+        ganho no tamanho do quadro é montado numa thread."""
+        with self._cond:
+            self._calib = dict(calib) if calib else None
+            self._grade_fut = self._pool.submit(CGGrade.from_calibration, self._calib, (self.H, self.W))
+
+    @property
+    def calibration(self) -> dict | None:
+        return self._calib
+
     def push(self, entry: dict) -> None:
         """Entrega o próximo quadro do vídeo (entrada do ``frames.json``). Bloqueia quando há
         quadros demais compostos à espera do codificador (memória limitada)."""
@@ -158,7 +187,7 @@ class StreamComposer:
                     while self._inflight >= self._max_inflight and self._error is None:
                         self._cond.wait()
                     self._raise_if_failed()
-                    fut = self._pool.submit(self._compose_source, entry)
+                    fut = self._pool.submit(self._compose_source, entry, self._grade_fut)
                     self._cache[src] = fut
                     self._inflight += 1
                     item = _Item(pos, entry, "novo", src, fut)
@@ -173,9 +202,10 @@ class StreamComposer:
         self._t_plate = time.perf_counter() - t
         return comp
 
-    def _compose_source(self, entry: dict) -> dict:
+    def _compose_source(self, entry: dict, grade_fut: Future) -> dict:
         t0 = time.perf_counter()
         comp = self._comp_fut.result()
+        grade = grade_fut.result()
         t1 = time.perf_counter()
         path = self.frames_dir / entry["source"]
         border = entry.get("border")
@@ -183,12 +213,12 @@ class StreamComposer:
             rgba, sh = load_render_passes(path, border, (self.H, self.W))
             t2 = time.perf_counter()
             self._acc.update(rgba, sh, border, entry.get("mode", "full"))
-            out8, st = comp.composite(entry["frame"], self._acc.rgba, self._acc.shadow, None)
+            out8, st = comp.composite(entry["frame"], self._acc.rgba, self._acc.shadow, None, grade=grade)
             alpha, origin = self._acc.rgba[..., 3], (0, 0)
         else:
             rgba, sh, origin = load_layers(path, border, (self.H, self.W), self.shadow_feather)
             t2 = time.perf_counter()
-            out8, st = comp.composite(entry["frame"], rgba, sh, None, origin=origin)
+            out8, st = comp.composite(entry["frame"], rgba, sh, None, origin=origin, grade=grade)
             alpha = rgba[..., 3]
         t3 = time.perf_counter()
         # verificação independente: fora da máscara de influência, os bytes da foto
@@ -363,6 +393,11 @@ class StreamComposer:
                 pushed = list(self._pushed)
             if len(pushed) > len(frames) or any(_key(a) != _key(b) for a, b in zip(pushed, frames)):
                 raise RuntimeError("Os quadros anunciados pelo worker do Blender não batem com o frames.json.")
+            cal_meta = render_meta.get("calibration")
+            if cal_meta and _canon(cal_meta.get("ajuste_cg")) != _canon((self._calib or {}).get("ajuste_cg")):
+                if any(fr.get("source") for fr in pushed):
+                    raise RuntimeError("A calibração do frames.json não é a que o worker anunciou antes dos quadros.")
+                self.set_calibration(cal_meta)        # worker sem o evento: vale o arquivo
             for fr in frames[len(pushed):]:
                 self.push(fr)
         n = len(self._pushed)
@@ -412,6 +447,12 @@ class StreamComposer:
         self.em.stage("video", 1.0, "Vídeo pronto")
         return self._result(tail0, t_drained, t_close, t_done, verify_s, check)
 
+    def _grade_summary(self) -> dict:
+        g = self._grade_fut.result() if self._grade_fut.done() and self._grade_fut.exception() is None else None
+        if g is None:
+            return {"aplicado": False}
+        return {"aplicado": True, **g.describe()}
+
     def _result(self, tail0, t_drained, t_close, t_done, verify_s, check) -> dict:
         W, H = self.W, self.H
         per_frame = self.per_frame
@@ -460,6 +501,7 @@ class StreamComposer:
                 "previas_s": round(self._tot["previas"], 2),
                 "exr_apagados": self._exr["apagados"],
                 "exr_bytes_apagados": self._exr["bytes"],
+                "ajuste_cg": self._grade_summary(),
                 "por_quadro": per_frame,
             },
             "preservacao": {
