@@ -1,1 +1,1 @@
-"""Interface gráfica (PySide6) do Mobília Studio."""
+"""Interface gráfica (PySide6) do 7xAi."""

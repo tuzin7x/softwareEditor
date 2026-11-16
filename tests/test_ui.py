@@ -164,5 +164,5 @@ def test_setup_dialog_text_for_update(app):
     title, text = intro_text({"done": [s for s in bootstrap.STEPS if s != "aquecimento"]})
     assert title.startswith("Atualização") and "preparando a GPU" in text
     _, text = intro_text({"done": ["python", "pip"]})
-    assert "instalando PyTorch" in text and "copiando o motor do Mobília Studio" in text
+    assert "instalando PyTorch" in text and "copiando o motor do 7xAi" in text
     assert "baixando os modelos de IA" in text
