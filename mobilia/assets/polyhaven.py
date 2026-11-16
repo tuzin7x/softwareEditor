@@ -122,17 +122,30 @@ def prefetch_catalog(cache_dir: Path, resolutions: tuple[str, ...] = ("1k", "2k"
 TEXTURE_MAPS = {"Diffuse": "diff", "nor_gl": "nor", "Rough": "rough"}
 
 
-def ensure_texture(tex_id: str, cache_dir: Path, res: str = "1k") -> dict[str, Path]:
-    """Garante no cache os mapas JPG (difuso, normal OpenGL, rugosidade) de uma textura da Poly
-    Haven e devolve {"diff": caminho, "nor": caminho, "rough": caminho}."""
+def cached_texture(tex_id: str, cache_dir: Path, res: str = "1k") -> dict[str, Path] | None:
+    """Mapas da textura já completos no cache em ``res`` (sem rede); ``None`` se faltar algo."""
     base = Path(cache_dir) / "polyhaven" / "textures" / tex_id / res
     manifest = base / "manifest.json"
-    if manifest.exists():
+    if not manifest.exists():
+        return None
+    try:
         m = json.loads(manifest.read_text(encoding="utf-8"))
         paths = {k: base / rel for k, rel in m["maps"].items()}
-        if all(p.exists() for p in paths.values()):
-            return paths
-    files = _get_json(f"{API}/files/{tex_id}")
+    except (ValueError, KeyError, AttributeError):
+        return None
+    return paths if paths and all(p.exists() for p in paths.values()) else None
+
+
+def ensure_texture(tex_id: str, cache_dir: Path, res: str = "1k", retries: int = 4) -> dict[str, Path]:
+    """Garante no cache os mapas JPG (difuso, normal OpenGL, rugosidade) de uma textura da Poly
+    Haven e devolve {"diff": caminho, "nor": caminho, "rough": caminho}. ``retries`` = tentativas
+    de rede (o render usa 1: a textura é opcional e não pode custar ~15 s de espera offline)."""
+    base = Path(cache_dir) / "polyhaven" / "textures" / tex_id / res
+    manifest = base / "manifest.json"
+    paths = cached_texture(tex_id, cache_dir, res)
+    if paths is not None:
+        return paths
+    files = _get_json(f"{API}/files/{tex_id}", retries=retries)
     maps, urls = {}, {}
     for api_name, key in TEXTURE_MAPS.items():
         entry = files.get(api_name, {})
@@ -141,7 +154,7 @@ def ensure_texture(tex_id: str, cache_dir: Path, res: str = "1k") -> dict[str, P
             raise RuntimeError(f"Textura {tex_id} sem mapa {api_name} em JPG")
         info = entry[r]["jpg"]
         name = Path(info["url"]).name
-        _download(info["url"], base / name, info.get("md5"))
+        _download(info["url"], base / name, info.get("md5"), retries=retries)
         maps[key] = name
         urls[key] = info["url"]
     manifest.write_text(json.dumps({"id": tex_id, "res": res, "maps": maps, "origem": urls,

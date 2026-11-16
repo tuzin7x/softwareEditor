@@ -12,7 +12,7 @@ from scipy import ndimage
 
 from ..analysis.room import RoomModel
 from ..analysis.segmentation import SegmentationResult
-from ..assets.polyhaven import ensure_model, ensure_texture
+from ..assets.polyhaven import cached_texture, ensure_model, ensure_texture
 from ..layout import catalog
 from ..layout.model import Layout
 from ..photo import srgb_to_linear
@@ -124,12 +124,19 @@ def normalize_procedural_params(kind: str, params: dict) -> dict:
 
 
 def rug_texture_paths(tex_id: str, assets_dir: Path, texture_res: str = "1k") -> dict | None:
-    """Caminhos dos mapas da textura CC0 do tapete (do cache; baixa se faltar). ``None`` quando não
-    há como obtê-la (offline sem cache): o tapete volta ao desenho procedural."""
+    """Caminhos dos mapas da textura CC0 do tapete (do cache; baixa se faltar, com UMA tentativa de
+    rede). Sem rede, usa a textura em outra resolução já no cache (ex.: só 1k instalado e render em
+    2k). ``None`` quando não há como obtê-la: o tapete volta ao desenho procedural."""
+    tex_id = str(tex_id)
     try:
-        return {k: str(v) for k, v in ensure_texture(str(tex_id), assets_dir, texture_res).items()}
+        return {k: str(v) for k, v in ensure_texture(tex_id, assets_dir, texture_res, retries=1).items()}
     except Exception:
-        return None
+        pass
+    for res in ("1k", "2k", "4k"):
+        paths = cached_texture(tex_id, assets_dir, res) if res != texture_res else None
+        if paths:
+            return {k: str(v) for k, v in paths.items()}
+    return None
 
 
 def surface_stats(photo8: np.ndarray, seg: SegmentationResult) -> dict:

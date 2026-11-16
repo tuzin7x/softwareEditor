@@ -180,5 +180,34 @@ def test_rug_texture_paths_offline_falls_back(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ss, "ensure_texture", boom)
     assert ss.rug_texture_paths("poly_wool_herringbone", tmp_path) is None
-    monkeypatch.setattr(ss, "ensure_texture", lambda t, d, r: {"diff": tmp_path / "d.jpg", "nor": tmp_path / "n.jpg"})
+    monkeypatch.setattr(ss, "ensure_texture",
+                        lambda t, d, r, retries=4: {"diff": tmp_path / "d.jpg", "nor": tmp_path / "n.jpg"})
     assert ss.rug_texture_paths("x", tmp_path) == {"diff": str(tmp_path / "d.jpg"), "nor": str(tmp_path / "n.jpg")}
+
+
+def test_rug_texture_offline_uses_other_cached_res(tmp_path, monkeypatch):
+    """Render em 2k sem rede e só a 1k no cache: usa a 1k (não volta ao padrão vetorial) e tenta
+    a rede UMA vez só (cada nova tentativa custa segundos de espera no orçamento de 120 s)."""
+    import json
+
+    from mobilia.assets import polyhaven as ph
+    from mobilia.render import scene_spec as ss
+
+    base = tmp_path / "polyhaven" / "textures" / "lã" / "1k"
+    base.mkdir(parents=True)
+    for n in ("d.jpg", "n.jpg"):
+        (base / n).write_bytes(b"x")
+    (base / "manifest.json").write_text(json.dumps({"maps": {"diff": "d.jpg", "nor": "n.jpg"}}), encoding="utf-8")
+    calls = []
+
+    def no_net(url, retries=4):
+        calls.append(retries)
+        raise RuntimeError("sem rede")
+
+    monkeypatch.setattr(ph, "_get_json", no_net)
+    assert ss.rug_texture_paths("lã", tmp_path, "2k") == {"diff": str(base / "d.jpg"), "nor": str(base / "n.jpg")}
+    assert calls == [1]
+    assert ss.rug_texture_paths("lã", tmp_path, "1k")["diff"] == str(base / "d.jpg")   # cache: sem rede
+    assert calls == [1]
+    (base / "n.jpg").unlink()                       # cache incompleto: não serve
+    assert ss.rug_texture_paths("lã", tmp_path, "1k") is None

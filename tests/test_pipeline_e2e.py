@@ -79,7 +79,7 @@ def _fake_analysis(monkeypatch, tmp_path):
     monkeypatch.setattr(geometry, "estimate_geometry", fake_geometry)
     monkeypatch.setattr(segmentation, "segment", fake_segment)
     monkeypatch.setattr(room_mod, "build_room_model", lambda geo, seg, rgb: (room, {"grid": grid}))
-    def fake_ensure_texture(tex_id, cache_dir, res="1k"):     # textura CC0 do tapete: sem rede no teste
+    def fake_ensure_texture(tex_id, cache_dir, res="1k", retries=4):     # textura CC0 do tapete: sem rede no teste
         base = tmp_path / "assets" / "textures" / tex_id
         base.mkdir(parents=True, exist_ok=True)
         return {k: base / f"{k}.jpg" for k in ("diff", "nor", "rough")}
