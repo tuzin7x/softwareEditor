@@ -11,7 +11,8 @@ Observação: ``modern_coffee_table_01`` e ``wooden_display_shelves_01`` têm o 
 no glTF original; os valores abaixo já estão girados 90° para casar com o tamanho do catálogo,
 e por isso esses dois assets PRECISAM de ``yaw_fix=90`` no catálogo (sem ele o render gira o
 móvel 90° em relação à pegada do layout e a decoração fica metade no ar).
-O tampo de ``modern_coffee_table_02`` é ripado (frestas finas): tratado como tampo cheio.
+O tampo de ``modern_coffee_table_02`` é ripado (frestas de até ~9 cm, ~67% cheio): o layout o trata
+como tampo cheio; ``coverage`` < 1 faz a checagem de apoio do render contar as frestas internas.
 O topo de ``wooden_display_shelves_01`` é a prateleira de cima (z 1.542); os montantes das
 pontas sobem até 1.556 fora do retângulo útil.
 """

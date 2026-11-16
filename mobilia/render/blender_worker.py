@@ -715,11 +715,13 @@ def bake_animation(sc, items_rt: list[dict], fps: int, n_frames: int) -> None:
 
 
 # Rede de segurança da decoração "on_top": grade de raios sob a base do filho contra a malha do
-# apoio, na pose final. Pelo menos REST_MIN_HITS dos raios (× ``Support.coverage``, para tampos
-# ripados) precisam encontrar o tampo a até REST_TOL m da base; senão o item sai da cena.
+# apoio, na pose final. Pelo menos REST_MIN_HITS dos pontos precisam encontrar o tampo a até
+# REST_TOL m da base (em tampo ripado, ``Support.coverage`` < 1, a fresta entre ripas dentro do
+# polígono de apoio conta como apoio); senão o item sai da cena.
 REST_GRID = 5
 REST_TOL = 0.008
 REST_MIN_HITS = 0.9
+GAP_REACH = 0.1         # m: maior fresta de tampo ripado que ainda conta como apoio
 
 
 def _world_bvh(objs: list):
@@ -749,23 +751,68 @@ def _world_bvh(objs: list):
     return BVHTree.FromPolygons(np.concatenate(verts).tolist(), np.concatenate(tris).tolist())
 
 
-def rest_support_hits(bvh, item: dict, z_top: float, n: int = REST_GRID, tol: float = REST_TOL) -> float:
-    """Fração dos n×n raios (grade sob a base do item, recuada 10% das bordas) que encontram o
-    apoio a até ``tol`` da altura ``z_top`` (raios de cima para baixo, começando 3 cm acima)."""
+def _hull_2d(pts: np.ndarray) -> np.ndarray:
+    """Fecho convexo 2D (cadeia monótona), vértices em sentido anti-horário."""
+    P = sorted({(round(float(a), 6), round(float(b), 6)) for a, b in pts})
+    if len(P) < 3:
+        return np.asarray(P, np.float64).reshape(-1, 2)
+
+    def half(seq):
+        h = []
+        for q in seq:
+            while len(h) >= 2 and ((h[-1][0] - h[-2][0]) * (q[1] - h[-2][1])
+                                   - (h[-1][1] - h[-2][1]) * (q[0] - h[-2][0])) <= 0:
+                h.pop()
+            h.append(q)
+        return h
+
+    lo, hi = half(P), half(reversed(P))
+    return np.asarray(lo[:-1] + hi[:-1], np.float64)
+
+
+def _inside_hull(hull: np.ndarray, q: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Máscara dos pontos ``q`` (N×2) dentro do polígono convexo ``hull`` (anti-horário)."""
+    if len(hull) < 3:
+        return np.zeros(len(q), bool)
+    a, b = hull, np.roll(hull, -1, axis=0)
+    cross = ((b[:, 0] - a[:, 0])[None] * (q[:, 1:2] - a[:, 1][None])
+             - (b[:, 1] - a[:, 1])[None] * (q[:, 0:1] - a[:, 0][None]))
+    return np.all(cross >= -eps, axis=1)
+
+
+def rest_support_hits(bvh, item: dict, z_top: float, n: int = REST_GRID, tol: float = REST_TOL,
+                      gaps: bool = False) -> float:
+    """Fração dos n×n pontos (grade sob a base do item, recuada 10% das bordas) apoiados no tampo:
+    o raio de cima para baixo (começando 3 cm acima) encontra o apoio a até ``tol`` de ``z_top``.
+
+    ``gaps`` (tampo ripado/vazado): um ponto que cai numa fresta conta como apoiado se fica dentro
+    do fecho convexo dos acertos de uma grade mais densa (passo ~3 cm) que vai até ``GAP_REACH``
+    além da base. Assim a fresta entre ripas (até ~GAP_REACH) não derruba o item, mas a parte da
+    base que passa da borda externa do tampo continua sem apoio (não há acertos além dela)."""
     x, y, _ = (float(v) for v in item["position"])
     w, d = float(item["size"][0]), float(item["size"][1])
     yaw = math.radians(float(item.get("yaw_deg", 0.0)))
     c, s_ = math.cos(yaw), math.sin(yaw)
     down = mathutils.Vector((0.0, 0.0, -1.0))
-    ok = 0
+
+    def hit(fu: float, fv: float) -> bool:
+        if bvh is None:
+            return False
+        u, v = fu * w, fv * d
+        o = mathutils.Vector((x + c * u - s_ * v, y + s_ * u + c * v, z_top + 0.03))
+        loc = bvh.ray_cast(o, down, 0.03 + tol + 0.002)[0]
+        return loc is not None and abs(loc.z - z_top) <= tol
+
     fr = np.linspace(-0.4, 0.4, n)
-    for fu in fr:
-        for fv in fr:
-            u, v = fu * w, fv * d
-            o = mathutils.Vector((x + c * u - s_ * v, y + s_ * u + c * v, z_top + 0.03))
-            loc = bvh.ray_cast(o, down, 0.03 + tol + 0.002)[0] if bvh is not None else None
-            ok += loc is not None and abs(loc.z - z_top) <= tol
-    return ok / float(n * n)
+    grid = np.array([(fu, fv) for fu in fr for fv in fr], np.float64)
+    ok = np.array([hit(fu, fv) for fu, fv in grid], bool)
+    if gaps and not ok.all():
+        du = np.linspace(-0.5 - GAP_REACH / w, 0.5 + GAP_REACH / w, int(math.ceil((w + 2 * GAP_REACH) / 0.03)) + 1)
+        dv = np.linspace(-0.5 - GAP_REACH / d, 0.5 + GAP_REACH / d, int(math.ceil((d + 2 * GAP_REACH) / 0.03)) + 1)
+        pts = np.array([(fu * w, fv * d) for fu in du for fv in dv if hit(fu, fv)], np.float64)
+        if len(pts) >= 3:
+            ok |= _inside_hull(_hull_2d(pts), grid * [w, d])
+    return float(ok.mean())
 
 
 def _check_rest_support(items_rt: list[dict], sc=None, n_frames: int | None = None) -> list[dict]:
@@ -796,8 +843,8 @@ def _check_rest_support(items_rt: list[dict], sc=None, n_frames: int | None = No
         if par["id"] not in bvhs:
             bvhs[par["id"]] = _world_bvh(par_rt["parts"])
         z_top = float(it["position"][2])
-        frac = rest_support_hits(bvhs[par["id"]], it, z_top)
-        need = REST_MIN_HITS * float(sup.coverage)
+        frac = rest_support_hits(bvhs[par["id"]], it, z_top, gaps=float(sup.coverage) < 1.0)
+        need = REST_MIN_HITS
         if frac >= need:
             continue
         for o in list(rt["parts"]) + [rt["root"]]:

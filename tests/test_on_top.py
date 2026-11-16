@@ -11,6 +11,7 @@ teste lento confere o fixture e os tampos medidos contra as malhas reais em cach
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import os
@@ -331,3 +332,58 @@ def test_check_rest_support_removes_hanging_decor(yaw_fix):
         assert not any(n.startswith("books_0") for n in out["objects"]), out["objects"]
     else:
         assert out["removed"] == [], out
+
+
+_SLAT_SCRIPT = r'''
+import json
+import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+from mobilia.render import blender_worker as bw
+
+# tampo ripado sintético na altura medida da mesa ripada: ripas de 5 cm ao longo de Y, frestas de
+# 6 cm, a fresta do meio centrada em x = 0; o tampo vai de x = -0.61 a 0.63
+slats = []
+for k in range(-5, 6):
+    x0 = 0.03 + 0.11 * k
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(x0 + 0.025, 0.0, 0.359), scale=(0.05, 1.2, 0.02))
+    slats.append(bpy.context.active_object)
+table = {"id": "coffee_table_0", "role": "coffee_table", "asset_id": "ph:modern_coffee_table_02",
+         "size": [1.199, 1.199, 0.369], "position": [0.0, 0.0, 0.0], "yaw_deg": 0.0, "mount": "floor", "params": {}}
+items_rt = [{"item": table, "root": None, "parts": slats, "plans": {}}]
+for key, x, z in (("books_center", 0.0, 0.369), ("books_edge", 0.6, 0.369), ("books_float", -0.3, 0.40)):
+    size = [0.33, 0.26, 0.085]
+    it = {"id": key, "role": "books", "asset_id": "proc:book_stack", "size": size, "position": [x, 0.0, z],
+          "yaw_deg": 0.0, "mount": "on_top", "parent": "coffee_table_0",
+          "source": {"type": "procedural", "kind": "book_stack", "params": {"size": size}}}
+    r, ps = bw.build_procedural_item(it)
+    bw.place_root(r, it)
+    items_rt.append({"item": it, "root": r, "parts": ps, "plans": {}})
+bpy.context.view_layer.update()
+bvh = bw._world_bvh(slats)
+plain = bw.rest_support_hits(bvh, items_rt[1]["item"], 0.369)
+removed = bw._check_rest_support(items_rt)
+print("RESULT:" + json.dumps({"plain_center": plain, "removed": sorted(r["id"] for r in removed),
+                              "kept": [rt["item"]["id"] for rt in items_rt[1:]]}))
+'''
+
+
+@pytest.mark.skipif(importlib.util.find_spec("bpy") is None, reason="bpy não está instalado")
+def test_check_rest_support_slatted_top_bridges_gaps():
+    """Tampo ripado: a pilha no meio, com várias linhas da grade caindo nas frestas, está apoiada e
+    fica (a regra "fração de acertos × coverage" a removia); a que passa da borda externa e a que
+    flutua 3 cm acima do tampo saem."""
+    import subprocess
+    import sys
+    import textwrap
+
+    env = dict(os.environ)
+    repo = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run([sys.executable, "-c", textwrap.dedent(_SLAT_SCRIPT)],
+                          cwd=repo, env=env, capture_output=True, text=True, timeout=600)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT:")]
+    assert proc.returncode == 0 and lines, proc.stderr[-3000:]
+    out = json.loads(lines[-1][len("RESULT:"):])
+    assert out["plain_center"] < 0.9 * MEASURED["ph:modern_coffee_table_02"].coverage, out   # cenário discrimina
+    assert out["removed"] == ["books_edge", "books_float"], out
+    assert out["kept"] == ["books_center"], out

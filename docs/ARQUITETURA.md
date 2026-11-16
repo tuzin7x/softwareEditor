@@ -140,7 +140,8 @@ Cycles bloqueia a luz e a arte fica preta); peças com frente fora de −Y receb
 
 **Decoração sempre apoiada:** depois de gravar a animação, o worker confere na pose final cada item
 "on_top" sobre um tampo: uma grade 5 × 5 de raios sob a base do objeto tem de encontrar a malha do
-móvel de apoio a até 8 mm em ≥ 90% dos raios (proporcional à área cheia em tampos ripados). Se não
+móvel de apoio a até 8 mm em ≥ 90% dos raios (em tampos ripados, um ponto sobre a fresta conta se fica
+dentro do fecho convexo dos acertos do tampo ao redor; o que passa da borda externa não). Se não
 encontrar, o item sai da cena, com aviso no log e em `report.json` (`render.itens_removidos`). Sobre
 mesas de centro, escrivaninhas e racks os livros são uma pilha procedural de 2–3 livros deitados; a
 fileira de enciclopédias em pé fica só para estantes.
