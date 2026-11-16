@@ -13,9 +13,13 @@ Atualizado conforme os testes reais avançam.
 - **Todos os renders desta prova de conceito foram feitos em CPU**, com resolução e amostras reduzidas
   (960×720, 16–48 amostras). Numa RTX com OptiX, a mesma cena roda em 1920 px com 128 amostras. Os
   tempos citados para GPU são **estimativas**, não medições.
-- **O `.exe` não foi executado num Windows real com GPU NVIDIA** por mim. Ele é gerado pela CI do
-  GitHub (Windows) e tem um autoteste de interface. O primeiro teste completo com GPU precisa ser
-  feito na sua máquina.
+- **O `.exe` não foi executado num Windows real com GPU NVIDIA** por mim.
+  - O build do PyInstaller e o autoteste da interface foram validados em Linux.
+  - O workflow de build Windows está pronto, mas os jobs do GitHub Actions deste repositório
+    **não recebem runner**: falham em 3 s, sem logs. É preciso habilitar ou liberar o Actions na
+    conta (Settings › Actions, Billing).
+  - Alternativa: gerar localmente com `packaging\build_windows.ps1`.
+  - O primeiro teste completo com GPU precisa ser feito na sua máquina.
 
 ## 2. Análise da foto
 

@@ -1,4 +1,19 @@
-# RESUME — checkpoint de pausa controlada (2026-11-15, 23:35 UTC / 20:35 BRT)
+# RESUME — atualizado em 2026-11-16 ~02:45 UTC (retomada após a pausa controlada)
+
+## Atualização da retomada (16/11)
+- ✅ Passo 1: `surfaces.py` usa `support_surface` dos procedurais. Os 252 testes de layout e procedurais passaram.
+- ✅ Passo 2: revisão feita rodando as suítes (em vez de novos agentes, para economizar uso).
+- ✅ Passo 3: interface PySide6 (`mobilia/ui/`), instalador de primeiro uso (`mobilia/bootstrap.py`), `packaging/` (spec PyInstaller, Inno Setup, script de build), CI (`.github/workflows/`), `requirements/`, `pyproject.toml`.
+  - Testes de UI e de bootstrap passando (8).
+  - Build PyInstaller validado em Linux, com autoteste OK.
+  - **No GitHub Actions os jobs falham em 3 s sem runner** (runner_id 0, sem logs): problema de conta/cobrança/permissão do Actions, não do código. Verificar em Settings › Actions e em Billing.
+- ✅ Passo 4: `docs/PESQUISA_TECNOLOGIAS.md` escrito.
+- ⏳ Passo 5: PoC rodando de novo em `/tmp/claude-0/poc_sala2` (log `/tmp/claude-0/poc_sala2.log`). Se for interrompida, reexecute o comando do passo 5.
+- Passo 6: pendente (atualizar LIMITACOES e README com o resultado da PoC).
+
+---
+
+# (registro original do checkpoint de 2026-11-15, 23:35 UTC)
 
 Projeto: **Mobília Studio** (decoração virtual em vídeo a partir de uma foto, 100% local).
 Repositório: `tuzin7x/softwareEditor`, branch **`claude/sweet-bohr-4uzml2`** (tudo commitado e enviado).
