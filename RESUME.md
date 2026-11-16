@@ -8,7 +8,12 @@
   - Build PyInstaller validado em Linux, com autoteste OK.
   - **No GitHub Actions os jobs falham em 3 s sem runner** (runner_id 0, sem logs): problema de conta/cobrança/permissão do Actions, não do código. Verificar em Settings › Actions e em Billing.
 - ✅ Passo 4: `docs/PESQUISA_TECNOLOGIAS.md` escrito.
-- ⏳ Passo 5: PoC rodando de novo em `/tmp/claude-0/poc_sala2` (log `/tmp/claude-0/poc_sala2.log`). Se for interrompida, reexecute o comando do passo 5.
+- Passo 5, primeira rodada (`/tmp/claude-0/poc_sala2`): terminou com a foto 100% preservada e PSNR de 44 dB, mas a inspeção visual achou 3 defeitos. Todos foram corrigidos e testados (commit b37481a):
+  1. linha escura na parede: linha fora do border do Cycles lida como sombra 0;
+  2. degrau de tom no limite do border: agora há rampa suave, e o border ganhou margem vertical;
+  3. quadro cortado pela quina: o proxy da parede oblíqua estendia 0,35 m na frente da outra parede; a extensão agora é limitada.
+  - Novo comando `python -m mobilia.cli recompor --work-dir ...` refaz o MP4 a partir dos EXRs, sem renderizar de novo.
+- ⏳ Passo 5, segunda rodada: rodando em `/tmp/claude-0/poc_sala3` (log `/tmp/claude-0/poc_sala3.log`). Se for interrompida, reexecute o comando do passo 5 com `--work-dir /tmp/poc_sala3`.
 - Passo 6: pendente (atualizar LIMITACOES e README com o resultado da PoC).
 
 ---
