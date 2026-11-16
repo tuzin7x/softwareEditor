@@ -147,9 +147,10 @@ def test_workflow_uses_new_names():
 def test_icon_has_all_sizes_from_vector():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
-    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtWidgets import QApplication
 
-    _app = QGuiApplication.instance() or QGuiApplication([])  # noqa: F841
+    # QApplication (e não QGuiApplication): os testes da interface reaproveitam a mesma instância
+    _app = QApplication.instance() or QApplication([])  # noqa: F841
     sys.path.insert(0, str(ROOT / "scripts"))
     try:
         import make_icon
