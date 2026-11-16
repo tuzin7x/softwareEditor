@@ -1,4 +1,4 @@
-# RESUME — atualizado em 2026-11-16 ~02:45 UTC (retomada após a pausa controlada)
+# RESUME — atualizado em 2026-11-16 ~06:00 UTC (passos 1–6 concluídos)
 
 ## Atualização da retomada (16/11)
 - ✅ Passo 1: `surfaces.py` usa `support_surface` dos procedurais. Os 252 testes de layout e procedurais passaram.
@@ -13,8 +13,12 @@
   2. degrau de tom no limite do border: agora há rampa suave, e o border ganhou margem vertical;
   3. quadro cortado pela quina: o proxy da parede oblíqua estendia 0,35 m na frente da outra parede; a extensão agora é limitada.
   - Novo comando `python -m mobilia.cli recompor --work-dir ...` refaz o MP4 a partir dos EXRs, sem renderizar de novo.
-- ⏳ Passo 5, segunda rodada: rodando em `/tmp/claude-0/poc_sala3` (log `/tmp/claude-0/poc_sala3.log`). Se for interrompida, reexecute o comando do passo 5 com `--work-dir /tmp/poc_sala3`.
-- Passo 6: pendente (atualizar LIMITACOES e README com o resultado da PoC).
+- ✅ Passo 5, segunda rodada (`/tmp/claude-0/poc_sala3`): 251/251 quadros bit a bit fora dos objetos, PSNR de 43,2–44,3 dB, render de 6 768 s em CPU (176 de 251 quadros). Inspeção visual sem nenhum dos 3 defeitos. MP4, quadros-chave, folha de contato e `report.json` estão em `docs/poc/`.
+- ✅ Passo 6: `docs/LIMITACOES.md` (seções 6 e 7) e o README (seção "Prova de conceito") foram atualizados.
+
+### O que falta (fora do escopo já pedido)
+- Rodar o `.exe` num Windows com GPU NVIDIA. Depende de liberar o GitHub Actions na conta ou de gerar localmente com `packaging\build_windows.ps1`.
+- Melhorias listadas em `docs/LIMITACOES.md` e `docs/PESQUISA_TECNOLOGIAS.md` (distorção de lente, *holdout* por malha de profundidade, IDR único com teto de VBV etc.).
 
 ---
 

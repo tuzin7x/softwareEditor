@@ -41,6 +41,28 @@ Qualidade: `--quality previa|final|auto` (auto = final na GPU, prévia na CPU).
 
 Para conferir o hardware no Windows sem instalar nada, use `scripts/diagnostico_hardware.ps1`.
 
+## Prova de conceito (resultado real)
+
+Foto de teste de uma sala vazia (960×720), ambiente `sala`, tudo em **CPU** (sem GPU no ambiente de
+desenvolvimento): [`docs/poc/sala_stafford_poc.mp4`](docs/poc/sala_stafford_poc.mp4) (10,5 s, 251
+quadros), quadros-chave em [`docs/poc/quadros_sala/`](docs/poc/quadros_sala/), folha de contato em
+[`docs/poc/sala_stafford_folha_contato.jpg`](docs/poc/sala_stafford_folha_contato.jpg) e relatório
+completo em [`docs/poc/sala_stafford_report.json`](docs/poc/sala_stafford_report.json).
+
+- 13 peças escolhidas e posicionadas automaticamente (sofá, poltrona, mesa de centro, mesa lateral,
+  tapete, luminária de piso, planta, 2 quadros, almofadas, vaso, livros, tigela de madeira).
+- **Preservação:** 251/251 quadros bit a bit idênticos à foto fora dos móveis e das sombras; os 20
+  quadros iniciais, antes da primeira peça, são idênticos à foto inteira.
+- **Vídeo:** PSNR do MP4 decodificado entre 43,2 e 44,3 dB (H.264 CRF 14, 2 MB).
+- **Tempo (CPU, 4 threads):** análise 19 s (modelos já baixados), layout 4 s, render 6 768 s
+  (176 de 251 quadros renderizados; o resto é reaproveitado), composição + encode 47 s.
+
+Para refazer só o vídeo (por exemplo, depois de ajustar a composição) sem renderizar de novo:
+
+```bash
+python -m mobilia.cli recompor --work-dir <pasta_de_trabalho>
+```
+
 ## Testes
 
 ```bash

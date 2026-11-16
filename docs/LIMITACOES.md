@@ -11,7 +11,7 @@ Atualizado conforme os testes reais avançam.
     execução (`python -m mobilia.cli hardware`), e escolhe o perfil (ver `ARQUITETURA.md`, seção 3);
   - `scripts/diagnostico_hardware.ps1` gera um relatório no Windows sem instalar nada.
 - **Todos os renders desta prova de conceito foram feitos em CPU**, com resolução e amostras reduzidas
-  (960×720, 16–48 amostras). Numa RTX com OptiX, a mesma cena roda em 1920 px com 128 amostras. Os
+  (960×720, 16–48 amostras; 24 na PoC final). Numa RTX com OptiX, a mesma cena roda em 1920 px com 128 amostras. Os
   tempos citados para GPU são **estimativas**, não medições.
 - **O `.exe` não foi executado num Windows real com GPU NVIDIA** por mim.
   - O build do PyInstaller e o autoteste da interface foram validados em Linux.
@@ -42,7 +42,7 @@ Atualizado conforme os testes reais avançam.
 
 - O modelo de luz é **simplificado**: luzes de área nas janelas, luz ambiente da parte da sala que não
   aparece e **sol direto** quando há manchas de sol no piso. As intensidades são calibradas pela foto.
-  Na foto de teste, o erro relativo do ajuste fica em 20–29%. A exposição e o balanço de branco dos
+  Na foto de teste, o erro relativo do ajuste fica em 20–29% (21% na PoC final). A exposição e o balanço de branco dos
   móveis ficam coerentes, mas não é uma reconstrução física exata da luz.
 - **Luminárias acesas na foto**, luz colorida forte e fotos noturnas não são modeladas. As luminárias
   adicionadas ficam **apagadas** de propósito: acendê-las alteraria a iluminação da foto, o que a regra
@@ -69,7 +69,31 @@ Atualizado conforme os testes reais avançam.
 
 ## 6. Desempenho
 
-- No modo CPU (sem GPU NVIDIA) o render leva de dezenas de segundos a minutos por quadro.
+- **Medido na PoC final** (CPU de 4 threads, sem GPU, 960×720, 24 amostras, 251 quadros a 24 fps):
+  - análise 19 s com os modelos já baixados (cerca de 170 s na primeira execução, que inclui carregar
+    os modelos);
+  - layout 4 s;
+  - render 6 768 s (≈ 1 h 53 min): 176 de 251 quadros renderizados, cerca de 38 s por quadro;
+  - composição, encode e verificação 48 s.
 - Na GPU, cerca de 70–85% do tempo é render. As otimizações descritas em `ARQUITETURA.md` (border por
-  quadro, reaproveitamento de quadros estáticos, *hold* sem render) reduzem o número de quadros
-  renderizados para algo em torno de 60–75% do total.
+  quadro, reaproveitamento de quadros estáticos, *hold* sem render) reduziram os quadros renderizados
+  para 70% do total na PoC. Os tempos em GPU continuam sendo **estimativas**.
+- Ajustes só de composição não exigem novo render: `python -m mobilia.cli recompor --work-dir <pasta>`
+  refaz o MP4 a partir dos EXRs salvos (≈ 46 s na PoC).
+
+## 7. Defeitos encontrados na PoC e corrigidos
+
+A primeira rodada completa passou na verificação automática (foto preservada bit a bit), mas a
+inspeção visual dos quadros encontrou três defeitos. Todos foram corrigidos, ganharam teste de
+regressão e não aparecem na rodada final:
+
+1. **Linha escura na parede:** uma linha fora da região renderizada pelo Cycles (arredondamento do
+   *border*) era lida como sombra total. Agora pixels não renderizados contam como "sem sombra".
+2. **Degrau de tom no limite da região renderizada:** a sombra suave era cortada de forma abrupta. Agora
+   ela se dissolve numa rampa suave, e a região ganhou margem vertical.
+3. **Quadro cortado na quina:** a parede 3D invisível que recebe sombras era estendida 0,35 m além da
+   ponta e, numa quina oblíqua, passava na frente da outra parede. A extensão agora para antes de
+   cruzar outra parede.
+
+Lição registrada: a verificação bit a bit garante a regra absoluta, mas **não** detecta defeitos
+dentro da área tocada pelos móveis. A inspeção visual dos quadros continua necessária.
