@@ -210,7 +210,7 @@ def configure_render(sc, spec: dict) -> str:
     sc.cycles.diffuse_bounces = 4
     sc.cycles.glossy_bounces = 2
     sc.cycles.transmission_bounces = 8
-    sc.cycles.transparent_max_bounces = 8
+    sc.cycles.transparent_max_bounces = TRANSPARENT_BOUNCES
     sc.cycles.sample_clamp_indirect = 8.0
     sc.cycles.caustics_reflective = False
     sc.cycles.caustics_refractive = False
@@ -822,10 +822,33 @@ def needs_fade_mix(p: "ch.Pose") -> bool:
     return p.fade < 1.0 or p.dz < 0.0
 
 
-def update_fade_shaders(mats: dict, f: int, fps: int) -> int:
+# Limite de superfícies transparentes atravessadas por raio. 8 basta para a sala (vidro, folhas
+# recortadas), mas uma peça em fade-in é um BSDF transparente em TODAS as faces: um raio que cruza
+# o sofá inteiro (braço entalhado, almofadas, estrutura) passa de 8 superfícies e o Cycles encerra o
+# caminho como opaco. Com fade ~0 a peça devia ser invisível, mas o trecho espesso aparecia opaco
+# no alfa e escurecia a parede no passe de sombra (mancha de 1 quadro na entrada do sofá, rodada
+# completa na foto de teste). Só nos quadros com o mix ligado o limite sobe; o custo extra fica
+# restrito aos raios que atravessam peças em fade.
+TRANSPARENT_BOUNCES = 8
+FADE_TRANSPARENT_BOUNCES = 128
+
+
+def fade_mix_active(mats: dict) -> bool:
+    """Algum material está com o mix de fade ligado (saída ligada ao Mix Shader)."""
+    for m in mats:
+        nt = m.node_tree
+        mix, out = nt.nodes.get(m.get("mobilia_fade_mix", "")), nt.nodes.get(m.get("mobilia_fade_out", ""))
+        if mix is not None and out is not None and out.inputs["Surface"].links \
+                and out.inputs["Surface"].links[0].from_socket == mix.outputs["Shader"]:
+            return True
+    return False
+
+
+def update_fade_shaders(mats: dict, f: int, fps: int, sc=None) -> int:
     """O mix transparente fica ligado só enquanto alguma peça do material está em fade-in ou abaixo
     da pose final (surgindo do chão: o corte do piso) em torno do quadro f (f−1..f+1); depois o
-    material volta ao original. Devolve quantos mudaram."""
+    material volta ao original. Com ``sc``, ajusta também o limite de transparência do Cycles
+    (``FADE_TRANSPARENT_BOUNCES`` enquanto algum mix está ligado). Devolve quantos mudaram."""
     changed = 0
     for m, users in mats.items():
         on = False
@@ -839,6 +862,10 @@ def update_fade_shaders(mats: dict, f: int, fps: int) -> int:
             if on:
                 break
         changed += set_fade_shader(m, on)
+    if sc is not None:
+        want = FADE_TRANSPARENT_BOUNCES if fade_mix_active(mats) else TRANSPARENT_BOUNCES
+        if sc.cycles.transparent_max_bounces != want:
+            sc.cycles.transparent_max_bounces = want
     return changed
 
 
@@ -1685,7 +1712,7 @@ def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contac
         spp = int(spl[camada])
         sc.cycles.samples = spp
         sc.cycles.adaptive_min_samples = min(spp, int(amin.get(camada, lay.adaptive_min(camada, spp))))
-        fades = update_fade_shaders(fade_mats, f, fps)
+        fades = update_fade_shaders(fade_mats, f, fps, sc)
         t_prep = time.perf_counter() - t_it
         st = render_frame(sc, out_dir / "frames" / name, pass_out)
         sc.render.resolution_percentage = 100
@@ -2050,7 +2077,7 @@ def main(spec_path: str) -> None:
         spp = int(spp_plan.get(f, spl[camada]))
         sc.cycles.samples = spp
         sc.cycles.adaptive_min_samples = min(spp, int(amin.get(camada, lay.adaptive_min(camada, spp))))
-        fades = update_fade_shaders(fade_mats, f, fps)
+        fades = update_fade_shaders(fade_mats, f, fps, sc)
         name = f"f_{f:05d}.exr"
         t_prep = time.perf_counter() - t_it
         st = render_frame(sc, out_dir / "frames" / name, pass_out)
