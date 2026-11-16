@@ -77,6 +77,17 @@ def support_for(asset_id: str, role: str, size: tuple[float, float, float] | lis
     params = params or {}
     if asset_id in MEASURED:
         return MEASURED[asset_id]
+    if asset_id.startswith("proc:") and role in ("bed", "desk"):
+        # medida exata do gerador procedural (ex.: itens repousam no edredom, não no colchão)
+        try:
+            from ..assets import support_surface
+
+            sup = support_surface(asset_id[5:], (w, d, h), params)
+        except Exception:
+            sup = None
+        if sup is not None:
+            return Support("seat" if role == "bed" else "top", float(sup["z"]),
+                           tuple(tuple(float(v) for v in r) for r in sup["rects"]))
     if role == "bed":
         z = float(params.get("mattress_top", BED_MATTRESS_TOP))
         hd = float(params.get("headboard_depth", BED_HEADBOARD_DEPTH))
