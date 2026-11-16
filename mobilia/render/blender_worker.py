@@ -613,7 +613,31 @@ def import_gltf_item(path: str, item: dict) -> tuple[bpy.types.Object, list]:
         R = mathutils.Matrix.Rotation(yaw_fix, 4, "Z")
         for o in meshes:
             o.data.transform(R)
+    _check_footprint(item, meshes)
     return _normalize_parts(item["id"], meshes)
+
+
+def _check_footprint(item: dict, meshes: list) -> None:
+    """A pegada do layout (catálogo) tem de casar com a malha: se a malha veio com X/Y trocados
+    (``yaw_fix`` faltando no catálogo), gira 90° para não renderizar o móvel atravessado em
+    relação ao que o layout planejou (decoração pendurada fora do tampo, colisões)."""
+    size = item.get("size")
+    if not size:
+        return
+    bpy.context.view_layer.update()
+    mn, mx = _world_bbox(meshes)
+    sx, sy = mx.x - mn.x, mx.y - mn.y
+    s = float(item.get("scale", 1.0)) or 1.0
+    w, d = float(size[0]) / s, float(size[1]) / s
+    direct = abs(sx - w) + abs(sy - d)
+    swapped = abs(sx - d) + abs(sy - w)
+    if direct > 0.05 and swapped < 0.5 * direct:
+        R = mathutils.Matrix.Rotation(math.radians(90.0), 4, "Z")
+        for o in meshes:
+            o.data.transform(R)
+        emit(event="log", level="warning",
+             message=f"{item.get('asset_id', item.get('id'))}: malha {sx:.3f}x{sy:.3f} m com eixos trocados em "
+                     f"relação ao catálogo {w:.3f}x{d:.3f} m; girada 90° (corrigir yaw_fix no catálogo).")
 
 
 def _normalize_parts(item_id: str, meshes: list) -> tuple[bpy.types.Object, list]:

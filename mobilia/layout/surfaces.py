@@ -8,11 +8,16 @@ da base do bounding box, frente voltada para -Y, X = largura (como ``catalog.Ass
 - ``top``: tampo plano de mesas/cômodas. ``rects`` = retângulos planos utilizáveis.
 
 Observação: ``modern_coffee_table_01`` e ``wooden_display_shelves_01`` têm o eixo longo em Y
-no glTF original; os valores abaixo já estão girados 90° para casar com o tamanho do catálogo.
+no glTF original; os valores abaixo já estão girados 90° para casar com o tamanho do catálogo,
+e por isso esses dois assets PRECISAM de ``yaw_fix=90`` no catálogo (sem ele o render gira o
+móvel 90° em relação à pegada do layout e a decoração fica metade no ar).
 O tampo de ``modern_coffee_table_02`` é ripado (frestas finas): tratado como tampo cheio.
+O topo de ``wooden_display_shelves_01`` é a prateleira de cima (z 1.542); os montantes das
+pontas sobem até 1.556 fora do retângulo útil.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 Rect = tuple[float, float, float, float]
@@ -54,13 +59,17 @@ MEASURED: dict[str, Support] = {
     "ph:ClassicNightstand_01": Support("top", 0.700, ((-0.244, -0.182, 0.246, 0.178),)),
     "ph:GothicCommode_01": Support("top", 1.212, ((-0.561, -0.260, 0.559, 0.260),)),
     "ph:vintage_wooden_drawer_01": Support("top", 1.091, ((-0.818, -0.373, 0.822, 0.477),)),
-    "ph:wooden_display_shelves_01": Support("top", 1.556, ((-0.499, -0.156, 0.501, 0.154),)),
+    "ph:wooden_display_shelves_01": Support("top", 1.542, ((-0.499, -0.156, 0.501, 0.154),)),
     "ph:steel_frame_shelves_03": Support("top", 2.302, ((-1.136, -0.331, 1.134, 0.329),)),
 }
 
 # Proporções usadas quando um asset novo ainda não foi medido (altura do assento / altura total).
 _SEAT_RATIO = {"sofa": 0.57, "armchair": 0.50, "dining_chair": 0.47, "bar_stool": 0.92, "desk_chair": 0.47}
 _SEAT_DEPTH_RATIO = {"sofa": 0.72, "armchair": 0.65, "dining_chair": 0.62, "bar_stool": 1.0, "desk_chair": 0.62}
+
+# Recuo mínimo da base de um objeto "on_top" em relação à borda do tampo (m): nada encosta
+# na quina nem fica com a beirada no ar.
+ON_TOP_INSET = 0.02
 
 BED_MATTRESS_TOP = 0.56        # altura padrão do colchão da cama procedural (m)
 BED_HEADBOARD_DEPTH = 0.08     # espessura da cabeceira procedural (m)
@@ -104,8 +113,17 @@ def support_for(asset_id: str, role: str, size: tuple[float, float, float] | lis
     return None
 
 
+def rotated_extent(w: float, d: float, dyaw_deg: float) -> tuple[float, float]:
+    """Largura/profundidade do retângulo alinhado ao apoio que envolve uma base w x d girada
+    ``dyaw_deg`` em relação ao móvel de apoio."""
+    c, s = abs(math.cos(math.radians(dyaw_deg))), abs(math.sin(math.radians(dyaw_deg)))
+    return c * w + s * d, s * w + c * d
+
+
 def fits_on(support: Support, lx: float, ly: float, w: float, d: float, margin: float = 0.01) -> bool:
-    """True se a base (w x d, alinhada ao móvel) centrada em (lx, ly) cabe num retângulo de apoio."""
+    """True se a base (w x d, alinhada ao móvel) centrada em (lx, ly) cabe num retângulo de apoio.
+
+    ``margin`` > 0 tolera esse tanto de beirada para fora; ``margin`` < 0 exige recuo da borda."""
     for x0, y0, x1, y1 in support.rects:
         if (lx - w / 2 >= x0 - margin and lx + w / 2 <= x1 + margin and
                 ly - d / 2 >= y0 - margin and ly + d / 2 <= y1 + margin):

@@ -30,7 +30,7 @@ from .rules import (ART_ABOVE_GAP, ART_CENTER_Z, ON_TOP_ROLES, SIDE_GAP, WALL_GA
 from .slots import Slot, adjacent_slots, corner_slots, free_slots, wall_pose, wall_slots
 from .state import GeoCache, Placement
 from .style import StyleProfile, analyze_style, asset_preference, proc_params, rank_assets
-from .surfaces import Support, fits_on, support_for
+from .surfaces import ON_TOP_INSET, Support, fits_on, support_for
 
 # Onde cada papel secundário pode ser encaixado.
 SLOT_KINDS: dict[str, tuple[str, ...]] = {
@@ -504,6 +504,8 @@ class Solver:
         x0, y0, x1, y1 = max(sup.rects, key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         rd = y1 - y0
+        if sup.kind == "seat" and w > (x1 - x0) + 0.02:
+            return None     # ex.: jogo de almofadas mais largo que o assento da poltrona (sobraria no ar)
         if sup.kind == "seat":
             # almofadas: centradas e encostadas no encosto; manta: no pé da cama
             if role == "throw" and par.role == "bed":
@@ -512,11 +514,13 @@ class Solver:
                 dep = min(d, 0.8 * rd)
                 spots = [(cx, y1 - dep / 2)]
         elif role == "table_lamp":
-            spots = [(cx, cy + min(0.05, max(0.0, (rd - d) / 2)))]
+            spots = [(cx, cy + min(0.05, max(0.0, (rd - d) / 2 - ON_TOP_INSET))), (cx, cy)]
         else:
-            # grade de posições no tampo; escolhe a que mais se afasta dos objetos já colocados
-            xs = np.linspace(x0 + w / 2, x1 - w / 2, 7) if x1 - x0 > w else np.array([cx])
-            ys = np.linspace(y0 + d / 2, y1 - d / 2, 3) if y1 - y0 > d else np.array([cy])
+            # grade de posições no tampo (recuada ON_TOP_INSET da borda); escolhe a que mais se
+            # afasta dos objetos já colocados
+            m = ON_TOP_INSET
+            xs = np.linspace(x0 + m + w / 2, x1 - m - w / 2, 7) if x1 - x0 > w + 2 * m else np.array([cx])
+            ys = np.linspace(y0 + m + d / 2, y1 - m - d / 2, 3) if y1 - y0 > d + 2 * m else np.array([cy])
             cand = [(float(a), float(b)) for b in ys for a in xs]
             if not used:
                 cand.sort(key=lambda q: (abs(q[0] - (cx - 0.22 * (x1 - x0))) + abs(q[1] - cy), q))
@@ -525,7 +529,9 @@ class Solver:
                 cand.sort(key=lambda q: (-min(math.hypot(q[0] - a, q[1] - b) for a, b in ctrs), q))
             spots = cand
         for lx, ly in spots:
-            if sup.kind == "top" and not fits_on(sup, lx, ly, w, d):
+            if sup.kind == "top" and not fits_on(sup, lx, ly, w, d, margin=-ON_TOP_INSET + 1e-6):
+                continue
+            if role == "throw" and par.role == "bed" and not fits_on(sup, lx, ly, w, d):
                 continue
             box = (lx - w / 2, ly - d / 2, lx + w / 2, ly + d / 2)
             if any(not (box[2] <= u[0] + 0.03 or u[2] <= box[0] + 0.03 or box[3] <= u[1] + 0.03 or u[3] <= box[1] + 0.03)

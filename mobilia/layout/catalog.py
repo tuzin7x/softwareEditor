@@ -44,7 +44,7 @@ CATALOG: list[AssetSpec] = [
     _ph("ArmChair_01", "armchair", (848, 765, 1065), ("classico",), "claro"),
     _ph("Ottoman_01", "ottoman", (884, 621, 624), ("moderno", "classico"), "escuro"),
     # --- mesas
-    _ph("modern_coffee_table_01", "coffee_table", (1201, 600, 389), ("moderno",), "madeira"),
+    _ph("modern_coffee_table_01", "coffee_table", (1201, 600, 389), ("moderno",), "madeira", yaw_fix=90.0),
     _ph("modern_coffee_table_02", "coffee_table", (1199, 1199, 369), ("moderno",), "madeira"),
     _ph("coffee_table_round_01", "coffee_table", (1301, 1301, 491), ("moderno",), "claro"),
     _ph("side_table_01", "side_table", (550, 450, 550), ("moderno", "escandinavo"), "madeira"),
@@ -59,7 +59,7 @@ CATALOG: list[AssetSpec] = [
     _ph("GothicCommode_01", "dresser", (1201, 580, 1212), ("classico",), "madeira"),
     _ph("vintage_wooden_drawer_01", "desk_storage", (1715, 1006, 1090), ("classico",), "madeira"),
     # --- armazenamento
-    _ph("wooden_display_shelves_01", "shelf", (1077, 371, 1556), ("moderno", "escandinavo"), "madeira"),
+    _ph("wooden_display_shelves_01", "shelf", (1077, 371, 1556), ("moderno", "escandinavo"), "madeira", yaw_fix=90.0),
     _ph("steel_frame_shelves_03", "shelf_large", (2351, 721, 2311), ("industrial",), "madeira"),
     # --- plantas e decoração
     _ph("potted_plant_01", "plant_large", (588, 636, 1350), ("moderno", "escandinavo", "classico")),
@@ -70,9 +70,9 @@ CATALOG: list[AssetSpec] = [
     _ph("ceramic_vase_04", "vase", (183, 181, 342), ("moderno",), "claro"),
     _ph("hanging_picture_frame_02", "wall_art", (751, 33, 499), ("classico", "moderno"), "claro"),
     _ph("hanging_picture_frame_01", "wall_art", (593, 15, 840), ("moderno",), "claro"),
-    _ph("throw_pillows_01", "pillows", (1021, 627, 450), ("moderno", "boho"), "colorido"),
+    _ph("throw_pillows_01", "pillows", (940, 452, 450), ("moderno", "boho"), "colorido"),
     _ph("wooden_bowl_01", "bowl", (313, 309, 93), ("moderno", "rustico"), "madeira"),
-    _ph("wicker_basket_02", "basket", (374, 270, 218), ("boho", "escandinavo"), "madeira"),
+    _ph("wicker_basket_02", "basket", (347, 254, 200), ("boho", "escandinavo"), "madeira"),
     _ph("book_encyclopedia_set_01", "books", (551, 163, 237), ("classico", "moderno"), "colorido"),
     _ph("ornate_mirror_01", "wall_mirror", (486, 25, 744), ("classico",), "claro"),
     _ph("jug_01", "kitchen_decor", (275, 167, 211), ("rustico", "classico"), "claro"),

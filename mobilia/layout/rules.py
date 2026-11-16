@@ -558,7 +558,7 @@ def score_layout(items: list[Placement], cache: GeoCache, ctx: LayoutContext, pr
 
 def validate_layout(layout, ctx: LayoutContext, cache: GeoCache | None = None) -> list[str]:
     """Verifica as restrições rígidas de um ``Layout`` pronto. Lista vazia = tudo certo."""
-    from .surfaces import fits_on, support_for
+    from .surfaces import fits_on, rotated_extent, support_for
 
     cache = cache or GeoCache(ctx)
     items = [Placement.from_item(it) for it in layout.items]
@@ -581,12 +581,12 @@ def validate_layout(layout, ctx: LayoutContext, cache: GeoCache | None = None) -
             if abs(p.z - (par.z + sup.z)) > 0.005:
                 v.append(f"{p.key}: altura {p.z:.3f} diferente do apoio {par.z + sup.z:.3f}")
             lxy = geom.world_to_local(par.x, par.y, par.yaw, p.xy[None])[0]
-            dyaw = math.radians(p.yaw - par.yaw)
-            ew = abs(math.cos(dyaw)) * p.w + abs(math.sin(dyaw)) * p.d
-            ed = abs(math.sin(dyaw)) * p.w + abs(math.cos(dyaw)) * p.d
-            if sup.kind == "top" and not fits_on(sup, lxy[0], lxy[1], ew, ed, margin=0.02):
+            ew, ed = rotated_extent(p.w, p.d, p.yaw - par.yaw)
+            # tampo: a base inteira (girada) dentro da área útil, sem beirada no ar (só arredondamento)
+            if sup.kind == "top" and not fits_on(sup, lxy[0], lxy[1], ew, ed, margin=0.002):
                 v.append(f"{p.key}: base fora do tampo de {par.key}")
-            if sup.kind == "seat" and not fits_on(sup, lxy[0], lxy[1], min(ew, 0.1), min(ed, 0.1), margin=0.02):
+            # assento: largura inteira sobre o assento (almofadas podem encostar no encosto)
+            if sup.kind == "seat" and not fits_on(sup, lxy[0], lxy[1], ew, min(ed, 0.1), margin=0.02):
                 v.append(f"{p.key}: fora do assento de {par.key}")
         if p.mount == "wall":
             if p.wall_id is None:
