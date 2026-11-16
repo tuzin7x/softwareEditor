@@ -49,12 +49,53 @@ def test_parts_assemble_base_first():
     assert plans["plant_leaves"].motion == "grow" and plans["plant_pot"].motion == "drop"
 
 
-def test_books_enter_one_by_one():
+def test_books_enter_in_at_most_three_waves():
     item = {"start": 0.0, "duration": 0.7, "role": "books", "motion": "drop", "size": [0.5, 0.2, 0.24]}
     names = [f"set_book{i:02d}" for i in range(1, 11)]
     plans = ch.plan_parts(item, names)
     starts = [p.start for p in sorted(plans, key=lambda p: p.name)]
-    assert starts == sorted(starts) and len(set(starts)) == len(starts)
+    assert starts == sorted(starts)            # da esquerda para a direita, em levas contíguas
+    assert len(set(starts)) == 3
+    gaps = sorted(set(starts))
+    assert all(abs((b - a) - ch.ON_TOP_STEP) < 1e-9 for a, b in zip(gaps, gaps[1:]))
+
+
+def _airborne_time(plans, dt=0.001, tol=0.01):
+    """Soma do tempo (s) em que ALGUMA peça visível está mais de ``tol`` m acima do repouso."""
+    t0 = min(p.start for p in plans)
+    t1 = max(p.end for p in plans)
+    n = int((t1 - t0) / dt) + 2
+    air = 0
+    for k in range(n):
+        t = t0 + k * dt
+        if any(pp.visible and pp.dz > tol for pp in (p.pose(t) for p in plans)):
+            air += 1
+    return air * dt
+
+
+def test_on_top_parts_airborne_window_short():
+    """Livros/vaso/fruteira sobre o tampo: nada fica "meio no ar" por muito tempo."""
+    enc = {"start": 3.0, "duration": 0.7, "role": "books", "motion": "drop", "mount": "on_top",
+           "size": [0.551, 0.163, 0.237]}
+    names = [f"book_encyclopedia_set_01_book{i:02d}" for i in range(1, 21)]
+    stack = dict(enc, size=[0.33, 0.26, 0.085])
+    tags = {f"stack.book_{i}": (i, "drop") for i in range(3)}
+    vase = {"start": 1.0, "duration": 0.6, "role": "vase", "motion": "drop", "mount": "on_top",
+            "size": [0.2, 0.2, 0.4]}
+    cases = [ch.plan_parts(enc, names), ch.plan_parts(stack, list(tags), tags), ch.plan_parts(vase, ["vase"])]
+    for plans in cases:
+        assert len({p.start for p in plans}) <= ch.ON_TOP_WAVES
+        assert max(p.params["height"] for p in plans) <= 0.12 + 1e-9
+        assert _airborne_time(plans) < 0.35, [p.name for p in plans][:3]
+    # a pilha cai de baixo para cima: o livro de cima nunca está abaixo do de baixo
+    st = {p.name: p for p in cases[1]}
+    assert st["stack.book_0"].start < st["stack.book_1"].start < st["stack.book_2"].start
+    for k in range(0, 1500):
+        t = 3.0 + k / 1000
+        z = [st[f"stack.book_{i}"].pose(t) for i in range(3)]
+        for lo, hi in zip(z, z[1:]):
+            if lo.visible and hi.visible:
+                assert hi.dz >= lo.dz - 0.003, (t, lo.dz, hi.dz)
 
 
 def test_procedural_part_tags_take_priority():

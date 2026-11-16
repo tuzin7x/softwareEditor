@@ -38,7 +38,7 @@ foto.jpg ─┬─► [Preparo]   EXIF, placa imutável na resolução do vídeo
           │               teto, janelas/portas como retângulos nas paredes, grade de ocupação
           ├─► [Layout]    programa de móveis por ambiente + estilo/paleta da foto +
           │               otimização com regras de design de interiores e visibilidade na câmera
-          ├─► [Assets]    Poly Haven (CC0, glTF, cache local) + procedurais (tapete, luminária, cama...)
+          ├─► [Assets]    Poly Haven (CC0, glTF, cache local) + procedurais (tapete, luminária, cama, livros...)
           ├─► [Render]    subprocesso Blender (bpy 5.x, Cycles OptiX/CUDA):
           │               câmera casada, sala-proxy = shadow catcher, luz calibrada pela foto,
           │               montagem animada peça a peça, EXR multicamada por quadro
@@ -138,6 +138,13 @@ foto da cozinha de teste).
 **Correções automáticas de assets:** vidro de quadros/vitrines vira "vidro arquitetônico" (senão o
 Cycles bloqueia a luz e a arte fica preta); peças com frente fora de −Y recebem `yaw_fix`.
 
+**Decoração sempre apoiada:** depois de gravar a animação, o worker confere na pose final cada item
+"on_top" sobre um tampo: uma grade 5 × 5 de raios sob a base do objeto tem de encontrar a malha do
+móvel de apoio a até 8 mm em ≥ 90% dos raios (proporcional à área cheia em tampos ripados). Se não
+encontrar, o item sai da cena, com aviso no log e em `report.json` (`render.itens_removidos`). Sobre
+mesas de centro, escrivaninhas e racks os livros são uma pilha procedural de 2–3 livros deitados; a
+fileira de enciclopédias em pé fica só para estantes.
+
 ## 6. Animação (um único estilo, refinado)
 
 `mobilia/render/choreography.py` define tempos e curvas, e o worker grava keyframes **por quadro**:
@@ -154,7 +161,9 @@ o vídeo mostra exatamente essas funções.
 - Fade-in: a camada 3D só fica opaca nos primeiros instantes da queda. É feito por material
   (Transparent mix por objeto), então a sombra acompanha a opacidade.
 - Montagem peça a peça: base do sofá e depois o assento; vaso da planta, terra, caule e folhas;
-  corpo do rack e depois as portas; livros um a um.
+  corpo do rack e depois as portas; livros em até 3 levas (0,10 s entre elas).
+- Decoração sobre tampo ou assento cai de só 12 cm, em 0,13 s: nenhum objeto fica "meio no ar"
+  por mais de ~0,35 s.
 - Motion blur do Cycles (obturador 180°), câmera travada, *hold* de 0,8 s no início e 2,5 s no fim.
 
 ## 7. Composição e casamento com a câmera

@@ -500,6 +500,7 @@ def proc_params(role: str, profile: StyleProfile, size) -> dict:
     - proc:desk         top_color, leg_color
     - proc:throw_blanket color
     - proc:curtain      color
+    - proc:book_stack   colors (capas de baixo para cima), count
     """
     out = _proc_colors(role, profile, size)
     out["size"] = [round(float(v), 4) for v in size]      # o gerador dimensiona pelo params["size"]
@@ -526,4 +527,7 @@ def _proc_colors(role: str, profile: StyleProfile, size) -> dict:
         return dict(color=P["accent"])
     if role == "curtain":
         return dict(color=P["linen"])
+    if role == "books":            # pilha: neutro profundo embaixo, neutro claro no meio, destaque em cima
+        hue = _lch(rgb_to_lab(np.asarray(P["accent2"], np.float64)))[2]
+        return dict(colors=[_r(_from_lch(27.0, 5.0, hue)), P["accent2"], P["accent"]], count=3)
     return {}

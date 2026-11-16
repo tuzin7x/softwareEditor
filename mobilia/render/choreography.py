@@ -81,11 +81,14 @@ REST = Pose()
 # ------------------------------------------------------------------ movimentos
 
 
-def motion_drop(t: float, dur: float, height: float, size: float = 1.0, wobble: float = 1.0) -> Pose:
-    """Queda com aceleração (gravidade), toque no chão com leve squash e acomodação por mola."""
+def motion_drop(t: float, dur: float, height: float, size: float = 1.0, wobble: float = 1.0,
+                fall: float | None = None) -> Pose:
+    """Queda com aceleração (gravidade), toque no chão com leve squash e acomodação por mola.
+
+    ``fall`` (s) fixa a duração da queda; sem ele a queda ocupa 55% de ``dur``."""
     if t < 0:
         return HIDDEN
-    t_fall = dur * 0.55
+    t_fall = min(dur, fall) if fall else dur * 0.55
     # fade curto: a peça fica opaca no primeiro terço da queda (evita o aspecto "fantasma")
     fade = smoothstep(0.0, t_fall * 0.3, t)
     if t < t_fall:
@@ -186,7 +189,7 @@ class PartPlan:
         fn = MOTIONS[self.motion]
         if self.motion == "drop":
             return fn(t, self.duration, self.params.get("height", 0.45), self.params.get("size", 1.0),
-                      self.params.get("wobble", 1.0))
+                      self.params.get("wobble", 1.0), self.params.get("fall"))
         if self.motion == "slide":
             return fn(t, self.duration, self.params.get("dist", 0.22))
         if self.motion == "grow":
@@ -216,9 +219,18 @@ ROLE_TIMING = {
 }
 
 
+# Decoração sobre tampo/assento: cai de pouco (12 cm) e depressa. Uma pilha ou um conjunto de
+# livros entra em no máximo ON_TOP_WAVES levas, ON_TOP_STEP s uma da outra; assim nunca fica
+# "meio no ar" por muito tempo (soma do tempo com alguma peça > 1 cm acima do repouso < 0,35 s).
+ON_TOP_DROP = 0.12
+ON_TOP_FALL = 0.13        # s de queda (um pouco mais rápida que a queda livre de 12 cm, ~0,16 s)
+ON_TOP_STEP = 0.10        # s entre levas
+ON_TOP_WAVES = 3
+
+
 def drop_height(role: str, size_z: float, mount: str) -> float:
     if mount == "on_top":
-        return 0.22
+        return ON_TOP_DROP
     if role in ("sofa", "bed", "tv_console", "dresser", "shelf", "desk", "dining_table"):
         return 0.48
     return max(0.3, min(0.55, 0.35 + 0.2 * size_z))
@@ -266,11 +278,17 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
     """Planeja a montagem peça a peça de um item já agendado.
 
     ``part_tags`` (opcional) vem dos assets procedurais: {nome: (assembly_order, assembly_motion)}.
+    Decoração "on_top" (e qualquer conjunto de livros) cai de ``ON_TOP_DROP`` em ``ON_TOP_FALL`` s,
+    em no máximo ``ON_TOP_WAVES`` levas separadas por ``ON_TOP_STEP`` s.
     """
     start, dur, role = item["start"], item["duration"], item["role"]
     motion = item.get("motion", "drop")
     size_z = item.get("size", [0, 0, 1])[2] or 1.0
+    on_top = item.get("mount", "floor") == "on_top"
     h = drop_height(role, size_z, item.get("mount", "floor"))
+    quick = on_top or role == "books"
+    if quick:
+        h = ON_TOP_DROP
     # assets procedurais trazem o movimento de cada peça (ex.: cortina = varão desliza,
     # painéis desdobram); eles têm prioridade sobre o movimento genérico do papel
     tagged = bool(part_tags) and motion != "unroll" and any(
@@ -278,6 +296,8 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
     if not tagged and (motion in ("slide", "unroll", "spread") or len(part_names) <= 1):
         m = "spread" if motion == "unroll" else motion
         params = {"height": h, "size": size_z, "dist": 0.22}
+        if quick:
+            params["fall"] = ON_TOP_FALL
         return [PartPlan(n, m, start, dur, params) for n in part_names]
     if part_tags:
         ranked = sorted(part_names, key=lambda n: (part_tags.get(n, (1, ""))[0], n))
@@ -287,13 +307,18 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
         ranks = {n: part_rank(n) for n in part_names}
     plans = []
     distinct = sorted(set(ranks.values()))
-    step = min(0.32, dur * 0.42)
+    step = ON_TOP_STEP if quick else min(0.32, dur * 0.42)
     is_plant = role.startswith("plant")
     seq_books = [n for n in ranked if "book" in n.lower()]
     for n in ranked:
         level = distinct.index(ranks[n])
+        if quick:
+            # conjuntos de livros (ex.: 20 enciclopédias em pé) entram em levas contíguas
+            if n in seq_books and len(seq_books) > ON_TOP_WAVES:
+                level = seq_books.index(n) * ON_TOP_WAVES // len(seq_books)
+            level = min(level, ON_TOP_WAVES - 1)
         s = start + level * step
-        if n in seq_books and len(seq_books) > 3:      # livros entram um a um, rápidos
+        if not quick and n in seq_books and len(seq_books) > 3:      # livros entram um a um, rápidos
             s = start + seq_books.index(n) * min(0.05, dur / max(1, len(seq_books)))
         tag_motion = part_tags.get(n, (0, ""))[1] if part_tags else ""
         if tag_motion in MOTIONS:
@@ -305,8 +330,10 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
         else:
             m = "drop"
         d = dur if level == 0 else dur * 0.8
-        params = {"height": h if level == 0 else max(0.18, h * 0.6), "size": size_z,
+        params = {"height": h if level == 0 or quick else max(0.18, h * 0.6), "size": size_z,
                   "wobble": 1.0 if level == 0 else 0.6, "start_scale": 0.12, "depth": 0.05}
+        if quick:
+            params["fall"] = ON_TOP_FALL
         plans.append(PartPlan(n, m, round(s, 4), d, params))
     return plans
 

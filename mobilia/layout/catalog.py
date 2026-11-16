@@ -85,7 +85,26 @@ CATALOG: list[AssetSpec] = [
     _proc("curtain", "curtain", (1.6, 0.12, 2.5), ("moderno", "escandinavo", "classico")),
     _proc("desk", "desk", (1.4, 0.7, 0.75), ("moderno", "escandinavo")),
     _proc("throw_blanket", "throw", (1.2, 0.6, 0.06), ("moderno", "escandinavo", "boho")),
+    # pilha de 3 livros deitados (~30 x 23 x 3 cm cada, girados e deslocados): decoração de tampo
+    _proc("book_stack", "books", (0.33, 0.26, 0.085),
+          ("moderno", "escandinavo", "classico", "boho", "industrial", "rustico"), "colorido"),
 ]
+
+
+# Decoração cujo asset depende do móvel de apoio: papel -> {papel do apoio: asset_id}; "*" vale
+# para os demais apoios. A fileira de enciclopédias em pé só faz sentido numa estante; em mesas
+# de centro, escrivaninhas, racks etc. vai a pilha de livros deitados.
+DECOR_BY_PARENT: dict[str, dict[str, str]] = {
+    "books": {"shelf": "ph:book_encyclopedia_set_01", "*": "proc:book_stack"},
+}
+
+
+def decor_asset(role: str, parent_role: str) -> str | None:
+    """asset_id da decoração ``role`` sobre um apoio ``parent_role`` (None = escolha por estilo)."""
+    table = DECOR_BY_PARENT.get(role)
+    if not table:
+        return None
+    return table.get(parent_role, table.get("*"))
 
 
 def by_role(role: str) -> list[AssetSpec]:

@@ -42,7 +42,9 @@ usados pelo motor de layout (``pattern_color``, ``metal_color``, ``frame_color``
 - desk: ``wood`` (oak | walnut), ``top_color`` (tom da madeira), ``legs`` (wood | black |
   painted | metal), ``leg_finish`` (acabamento de metal), ``leg_color``, ``paint_color``,
   ``drawer`` (bool);
-- throw_blanket: ``color``, ``accent``, ``pattern`` (solid | stripes), ``tassels`` (bool).
+- throw_blanket: ``color``, ``accent``, ``pattern`` (solid | stripes), ``tassels`` (bool);
+- book_stack: ``count`` (2 | 3 livros deitados), ``colors`` (capas, de baixo para cima),
+  ``page_color`` (corte das páginas). Cada livro é uma peça ``book_<i>`` (ordem i, "drop").
 """
 from __future__ import annotations
 
@@ -149,6 +151,11 @@ def _rot_x(deg: float) -> Array:
 def _rot_y(deg: float) -> Array:
     c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], np.float64)
+
+
+def _rot_z(deg: float) -> Array:
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], np.float64)
 
 
 # =========================================================================== acumulador de malha
@@ -1563,6 +1570,74 @@ def _pillows(a: _Asset, n_p: int, colors: list, mx: float, my1: float, mz1: floa
                pivot=(0.0, (lo[1] + hi[1]) / 2, lo[2]))
 
 
+# =========================================================================== pilha de livros
+
+# Proporções de cada livro em relação ao de baixo (largura, profundidade, espessura): o maior
+# fica embaixo, como um designer empilha. Giros (graus) e deslocamentos (fração de l/p) leves.
+_BOOK_REL = ((1.0, 1.0, 1.1), (0.93, 0.88, 0.95), (0.84, 0.8, 0.85))
+_BOOK_COVERS = ("#33414f", "#b8a68b", "#7c3f30")
+
+
+def _book_stack_layout(W: float, D: float, H: float, n: int, seed: int) -> list[dict]:
+    """Dimensões, giro e posição de cada livro para que a pilha ocupe EXATAMENTE (W, D, H)."""
+    rng = np.random.default_rng(seed)
+    rel = _BOOK_REL[:n]
+    sgn = 1.0 if rng.random() < 0.5 else -1.0
+    ang = [sgn * rng.uniform(0.5, 2.5)] + [(-sgn if i % 2 else sgn) * rng.uniform(4.0, 9.0) for i in range(1, n)]
+    off = [(0.0, 0.0)] + [(rng.uniform(-0.04, 0.04), rng.uniform(-0.04, 0.04)) for _ in range(1, n)]
+    tsum = sum(r[2] for r in rel)
+    bw, bd = W, D
+    for _ in range(12):     # ponto fixo: ajusta o livro de baixo até a pilha caber no envelope
+        pts = []
+        for (rw, rd, _), a, (ox, oy) in zip(rel, ang, off):
+            hx, hy = rw * bw / 2, rd * bd / 2
+            c = np.array([[-hx, -hy, 0], [hx, -hy, 0], [hx, hy, 0], [-hx, hy, 0]]) @ _rot_z(a).T
+            pts.append(c[:, :2] + [ox * W, oy * D])
+        P = np.concatenate(pts)
+        ex, ey = np.ptp(P[:, 0]), np.ptp(P[:, 1])
+        cx, cy = (P[:, 0].max() + P[:, 0].min()) / 2, (P[:, 1].max() + P[:, 1].min()) / 2
+        bw, bd = bw * W / ex, bd * D / ey
+    books, z = [], 0.0
+    for i, ((rw, rd, rt), a, (ox, oy)) in enumerate(zip(rel, ang, off)):
+        t = H * rt / tsum
+        books.append(dict(w=rw * bw, d=rd * bd, t=t, yaw=a, x=ox * W - cx, y=oy * D - cy, z=z,
+                          spine=-1.0 if i % 2 == 0 else 1.0))
+        z += t
+    return books
+
+
+def _book(mb: MeshBuilder, w: float, d: float, t: float, spine: float) -> None:
+    """Livro de capa dura deitado (base em z = 0, centrado): duas capas, lombada no lado
+    ``spine`` (-1 = -Y, 1 = +Y) e o miolo de páginas recuado nos outros três lados."""
+    c = float(np.clip(0.1 * t, 0.0018, 0.003))       # espessura da capa
+    inset = min(0.004, 0.03 * d)                     # recuo do miolo em relação às capas
+    r = 0.45 * c
+    for zc in (c / 2, t - c / 2):                    # capas de baixo e de cima
+        rounded_box(mb, (0.0, 0.0, zc), (w, d, c), r, 0, step=0.1, seg=2)
+    rounded_box(mb, (0.0, spine * (d / 2 - c / 2), t / 2), (w, c, t), r, 0, step=0.1, seg=2)   # lombada
+    pd = d - c - inset
+    rounded_box(mb, (0.0, spine * (d / 2 - c - pd / 2 + 0.0002), t / 2),
+                (w - 2 * inset, pd + 0.0004, t - 2 * c + 0.0006), 0.0008, 1, step=0.1, seg=2)
+
+
+def _build_book_stack(a: _Asset) -> None:
+    """Pilha de 2–3 livros deitados, levemente girados e deslocados, capas na paleta."""
+    W, D, H = a.size
+    p = a.params
+    n = int(p.get("count", 3))
+    if n not in (2, 3):
+        raise ValueError(f"Pilha de livros aceita 2 ou 3 livros, não {n}")
+    colors = list(p.get("colors") or [])
+    pages = M.paper_edges(p.get("page_color"), a.seed)
+    for i, b in enumerate(_book_stack_layout(W, D, H, n, a.seed)):
+        cover = colors[i] if i < len(colors) else _BOOK_COVERS[i]
+        mb = MeshBuilder()
+        _book(mb, b["w"], b["d"], b["t"], b["spine"])
+        mb.transform(_rot_z(b["yaw"]), (b["x"], b["y"], b["z"]))
+        a.part(f"book_{i}", mb, [M.fabric(cover, "cotton", seed=a.seed + i), pages], i, "drop",
+               pivot=(b["x"], b["y"], b["z"]))
+
+
 # =========================================================================== registro
 
 _BUILDERS: dict[str, Callable[[_Asset], None]] = {
@@ -1573,6 +1648,7 @@ _BUILDERS: dict[str, Callable[[_Asset], None]] = {
     "curtain": _build_curtain,
     "desk": _build_desk,
     "throw_blanket": _build_throw,
+    "book_stack": _build_book_stack,
 }
 assert set(_BUILDERS) == set(PROCEDURAL_KINDS)
 

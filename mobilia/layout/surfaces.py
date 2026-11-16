@@ -28,6 +28,7 @@ class Support:
     kind: str                 # "seat" | "top"
     z: float                  # altura da superfície (m, a partir da base do móvel)
     rects: tuple[Rect, ...]   # áreas utilizáveis no referencial local do móvel
+    coverage: float = 1.0     # fração da área útil que é material (< 1 em tampo ripado)
 
     @property
     def back_y(self) -> float:
@@ -49,7 +50,7 @@ MEASURED: dict[str, Support] = {
     "ph:bar_chair_round_01": Support("seat", 0.689, ((-0.237, -0.238, 0.233, 0.242),)),
     # tampos
     "ph:modern_coffee_table_01": Support("top", 0.390, ((-0.561, -0.270, 0.559, 0.270),)),
-    "ph:modern_coffee_table_02": Support("top", 0.369, ((-0.550, -0.550, 0.550, 0.550),)),
+    "ph:modern_coffee_table_02": Support("top", 0.369, ((-0.550, -0.550, 0.550, 0.550),), coverage=0.6),
     "ph:coffee_table_round_01": Support("top", 0.491, ((-0.401, -0.401, 0.399, 0.399),)),
     "ph:side_table_01": Support("top", 0.551, ((-0.235, -0.195, 0.235, 0.195),)),
     "ph:modern_wooden_cabinet": Support("top", 0.680, ((-1.180, -0.230, 1.180, 0.230),)),

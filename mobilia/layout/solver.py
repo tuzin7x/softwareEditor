@@ -57,7 +57,7 @@ FREE_FALLBACK = {"plant_large", "plant_medium", "plant_small", "basket", "vase",
 DECOR_TARGETS: dict[str, tuple[str, ...]] = {
     "pillows": ("sofa", "armchair"), "throw": ("bed", "sofa"),
     "table_lamp": ("nightstand", "side_table", "desk", "dresser"),
-    "books": ("coffee_table", "desk", "tv_console", "nightstand", "side_table", "dresser"),
+    "books": ("coffee_table", "desk", "tv_console", "nightstand", "side_table", "dresser", "shelf"),
     "vase": ("coffee_table", "dining_table", "side_table", "dresser", "tv_console", "desk"),
     "bowl": ("coffee_table", "dining_table", "tv_console"),
     "kitchen_decor": ("dining_table",),
@@ -460,6 +460,9 @@ class Solver:
                 if not specs:
                     continue
                 size, asset_id = specs[0].size, f"proc:{PROC_KIND[role]}"
+            elif role in catalog.DECOR_BY_PARENT:      # asset escolhido pelo apoio (abaixo)
+                asset_id = catalog.decor_asset(role, "*")
+                size = catalog.get(asset_id).size
             else:
                 specs = self.ranked(role, 1)
                 if not specs:
@@ -480,16 +483,18 @@ class Solver:
                     sup = support_for(par.asset_id, par.role, (par.w, par.d, par.h), par.params)
                     if sup is None:
                         continue
-                    spot = self._decor_spot(role, par, sup, size, used.setdefault(par.key, []))
+                    aid = catalog.decor_asset(role, par.role) or asset_id
+                    sz = size if aid == asset_id else tuple(float(v) for v in catalog.get(aid).size)
+                    spot = self._decor_spot(role, par, sup, sz, used.setdefault(par.key, []))
                     if spot is None:
                         continue
                     lx, ly = spot
                     c = geom.local_to_world(par.x, par.y, par.yaw, lx, ly)
-                    w_, d_, h_ = size
+                    w_, d_, h_ = sz
                     key = f"{role}_{sum(1 for p in items if p.role == role)}"
-                    p = Placement(key, role, asset_id, w_, d_, h_, float(c[0]), float(c[1]), float(par.z + sup.z),
+                    p = Placement(key, role, aid, w_, d_, h_, float(c[0]), float(c[1]), float(par.z + sup.z),
                                   par.yaw, "on_top", None, par.key,
-                                  proc_params(role, self.profile, size) if role in PROC_KIND else {}, "")
+                                  proc_params(role, self.profile, sz) if aid.startswith("proc:") else {}, "")
                     if item_violations(p, self.cache.geo(p)):
                         used[par.key].pop()
                         continue

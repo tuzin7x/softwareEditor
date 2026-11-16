@@ -89,6 +89,12 @@ def normalize_procedural_params(kind: str, params: dict) -> dict:
             out["accent"] = _hex(p["accent"])
         pat = str(p.get("pattern", "stripes")).lower()
         out["pattern"] = "stripes" if pat in ("stripes", "listras") else "solid"
+    elif kind == "book_stack":
+        out["colors"] = [_hex(c) for c in p.get("colors") or [] if c is not None]
+        if p.get("count") in (2, 3):
+            out["count"] = int(p["count"])
+        if p.get("page_color") is not None:
+            out["page_color"] = _hex(p["page_color"])
     elif kind == "curtain":
         out["color"] = _hex(p.get("color"))
         for k in ("sheer", "panels", "coverage"):

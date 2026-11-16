@@ -714,6 +714,107 @@ def bake_animation(sc, items_rt: list[dict], fps: int, n_frames: int) -> None:
             unroll()
 
 
+# Rede de segurança da decoração "on_top": grade de raios sob a base do filho contra a malha do
+# apoio, na pose final. Pelo menos REST_MIN_HITS dos raios (× ``Support.coverage``, para tampos
+# ripados) precisam encontrar o tampo a até REST_TOL m da base; senão o item sai da cena.
+REST_GRID = 5
+REST_TOL = 0.008
+REST_MIN_HITS = 0.9
+
+
+def _world_bvh(objs: list):
+    """BVH (referencial do mundo) das malhas visíveis no render, na pose avaliada atual."""
+    from mathutils.bvhtree import BVHTree
+
+    dg = bpy.context.evaluated_depsgraph_get()
+    verts, tris, off = [], [], 0
+    for o in objs:
+        if o.type != "MESH" or o.hide_render:
+            continue
+        ev = o.evaluated_get(dg)
+        me = ev.to_mesh()
+        me.calc_loop_triangles()
+        co = np.empty(len(me.vertices) * 3, np.float64)
+        me.vertices.foreach_get("co", co)
+        mw = np.asarray(ev.matrix_world, np.float64)
+        co = co.reshape(-1, 3) @ mw[:3, :3].T + mw[:3, 3]
+        tri = np.empty(len(me.loop_triangles) * 3, np.int64)
+        me.loop_triangles.foreach_get("vertices", tri)
+        verts.append(co)
+        tris.append(tri.reshape(-1, 3) + off)
+        off += len(co)
+        ev.to_mesh_clear()
+    if not tris or off == 0:
+        return None
+    return BVHTree.FromPolygons(np.concatenate(verts).tolist(), np.concatenate(tris).tolist())
+
+
+def rest_support_hits(bvh, item: dict, z_top: float, n: int = REST_GRID, tol: float = REST_TOL) -> float:
+    """Fração dos n×n raios (grade sob a base do item, recuada 10% das bordas) que encontram o
+    apoio a até ``tol`` da altura ``z_top`` (raios de cima para baixo, começando 3 cm acima)."""
+    x, y, _ = (float(v) for v in item["position"])
+    w, d = float(item["size"][0]), float(item["size"][1])
+    yaw = math.radians(float(item.get("yaw_deg", 0.0)))
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    down = mathutils.Vector((0.0, 0.0, -1.0))
+    ok = 0
+    fr = np.linspace(-0.4, 0.4, n)
+    for fu in fr:
+        for fv in fr:
+            u, v = fu * w, fv * d
+            o = mathutils.Vector((x + c * u - s_ * v, y + s_ * u + c * v, z_top + 0.03))
+            loc = bvh.ray_cast(o, down, 0.03 + tol + 0.002)[0] if bvh is not None else None
+            ok += loc is not None and abs(loc.z - z_top) <= tol
+    return ok / float(n * n)
+
+
+def _check_rest_support(items_rt: list[dict], sc=None, n_frames: int | None = None) -> list[dict]:
+    """Remove da cena a decoração "on_top" que, na pose final, não está apoiada no tampo do pai
+    (ex.: mesa renderizada girada em relação ao layout). Devolve a lista de itens removidos
+    (para o relatório). Assentos (sofá, poltrona, cama) são macios e ficam de fora do teste."""
+    from mobilia.layout.surfaces import support_for
+
+    sc = sc or bpy.context.scene
+    if n_frames:
+        sc.frame_set(int(n_frames))          # pose final: tudo em repouso
+    bpy.context.view_layer.update()
+    by_id = {rt["item"]["id"]: rt for rt in items_rt}
+    bvhs: dict = {}
+    removed = []
+    for rt in list(items_rt):
+        it = rt["item"]
+        if it.get("mount") != "on_top":
+            continue
+        par_rt = by_id.get(it.get("parent") or "")
+        if par_rt is None:
+            continue
+        par = par_rt["item"]
+        sup = support_for(par.get("asset_id", ""), par.get("role", ""), par.get("size") or (1, 1, 1),
+                          par.get("params") or {})
+        if sup is None or sup.kind != "top":
+            continue
+        if par["id"] not in bvhs:
+            bvhs[par["id"]] = _world_bvh(par_rt["parts"])
+        z_top = float(it["position"][2])
+        frac = rest_support_hits(bvhs[par["id"]], it, z_top)
+        need = REST_MIN_HITS * float(sup.coverage)
+        if frac >= need:
+            continue
+        for o in list(rt["parts"]) + [rt["root"]]:
+            try:
+                bpy.data.objects.remove(o, do_unlink=True)
+            except (ReferenceError, RuntimeError):
+                pass
+        items_rt.remove(rt)
+        rec = {"id": it["id"], "role": it.get("role"), "asset_id": it.get("asset_id"), "parent": par["id"],
+               "apoio_acertos": round(frac, 3), "minimo": round(need, 3)}
+        removed.append(rec)
+        emit(event="log", level="warning",
+             message=f"{it['id']} removido: só {frac:.0%} da base apoiada no tampo de {par['id']} "
+                     f"(mínimo {need:.0%}); evitaria um objeto flutuando ou pendurado na borda.")
+    return removed
+
+
 def _key_pose(part, rest, pose: "ch.Pose", s: float, f: int) -> None:
     part.location = (rest.x + pose.dx / s, rest.y + pose.dy / s, rest.z + pose.dz / s)
     part.rotation_euler = (pose.rx, pose.ry, pose.rz)
@@ -910,12 +1011,14 @@ def main(spec_path: str) -> None:
             part["_rest_bbox_min"] = list(mn)
             part["_rest_bbox_max"] = list(mx)
     bake_animation(sc, items_rt, fps, n_frames)
+    removed = _check_rest_support(items_rt, sc, n_frames)
     emit(event="log", level="info", message=f"Cena montada: {len(items_rt)} itens, dispositivo {dev}")
 
     # --- render quadro a quadro
     W, H = spec["width"], spec["height"]
     margin = float(spec["render"].get("border_margin_m", 0.6))
-    meta = {"frames": [], "calibration": calib, "device": dev, "width": W, "height": H}
+    meta = {"frames": [], "calibration": calib, "device": dev, "width": W, "height": H,
+            "removed_items": removed}
     last_sig, last_src, last_border = None, None, None
     # Render incremental (só a região das peças em movimento) é EXPERIMENTAL: em testes
     # reduziu a área renderizada em ~14%, mas o sombreamento suave de peças junto à parede

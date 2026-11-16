@@ -14,6 +14,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ REPO = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("bpy") is None,
                                 reason="bpy (Blender como módulo Python) não está instalado")
 
-KINDS = ("rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket")
+KINDS = ("rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket", "book_stack")
 MOTIONS = {"drop", "rise", "slide", "unroll", "unfold", "grow", "settle"}
 
 # (rótulo, tipo, parâmetros) — padrões do catálogo + variações de tamanho/estilo
@@ -41,6 +42,7 @@ CASES: list[tuple[str, str, dict]] = [(k, k, {}) for k in KINDS] + [
     ("table_lamp_wood", "table_lamp", {"size": [0.35, 0.35, 0.6], "base_material": "wood",
                                        "shade_shape": "drum"}),
     ("throw_solid", "throw_blanket", {"size": [1.3, 0.45, 0.08], "pattern": "solid", "tassels": False}),
+    ("book_stack_2", "book_stack", {"size": [0.3, 0.24, 0.06], "count": 2, "colors": ["#2f3e46", "#d8c3a5"]}),
     # parâmetros como o motor de layout envia (paleta sRGB 0..1, nomes em português)
     ("layout_rug_persa", "rug", {"size": [2.4, 1.7, 0.012], "color": [0.48, 0.2, 0.16],
                                  "pattern_color": [0.14, 0.2, 0.29], "pattern": "persa", "thickness": 0.012}),
@@ -58,6 +60,8 @@ CASES: list[tuple[str, str, dict]] = [(k, k, {}) for k in KINDS] + [
                                          "light_on": True}),
     ("layout_table_lamp", "table_lamp", {"base_color": [0.79, 0.64, 0.49], "shade_color": [0.93, 0.91, 0.86],
                                          "metal_color": [0.929, 0.922, 0.902], "light_on": True}),
+    ("layout_book_stack", "book_stack", {"size": [0.33, 0.26, 0.085], "count": 3,
+                                         "colors": [[0.2, 0.18, 0.16], [0.86, 0.83, 0.78], [0.55, 0.3, 0.2]]}),
 ]
 
 _SCRIPT = r'''
@@ -99,8 +103,12 @@ for label, kind, params in CASES:
         me = c.data
         idx = np.empty(len(me.polygons), np.int64)
         me.polygons.foreach_get("material_index", idx)
+        pco = np.empty(len(me.vertices) * 3, np.float64)
+        me.vertices.foreach_get("co", pco)
+        pco = pco.reshape(-1, 3) + np.asarray(c.location)
         parts.append(dict(
-            name=c.name, type=c.type,
+            name=c.name, type=c.type, lo=pco.min(0).tolist(), hi=pco.max(0).tolist(),
+            pivot=list(c.location),
             part=c.get("mobilia_part"), order=c.get("assembly_order"), motion=c.get("assembly_motion"),
             n_slots=len(c.material_slots),
             slots_filled=all(s.material is not None for s in c.material_slots),
@@ -319,3 +327,28 @@ def test_support_surface_matches_geometry(report, label):
     tol = 0.002 if c["kind"] == "desk" else 0.025   # edredom tem relevo macio
     for h in hits:
         assert abs(h - sup["z"]) <= tol, (h, sup["z"])
+
+
+@pytest.mark.parametrize("label", ["book_stack", "book_stack_2", "layout_book_stack"])
+def test_book_stack_footprint(report, label):
+    """Pilha de livros deitados: 2–3 livros de ~30 x 23 x 3 cm, de baixo para cima, cada um
+    inteiro dentro da pegada do catálogo (é ela que o layout encaixa no tampo) e apoiado no de baixo."""
+    c = report["cases"][label]
+    W, D, H = c["size"]
+    books = sorted(c["parts"], key=lambda p: p["order"])
+    n = 2 if label == "book_stack_2" else 3
+    assert [p["part"] for p in books] == [f"book_{i}" for i in range(n)]
+    assert [p["order"] for p in books] == list(range(n))
+    assert all(p["motion"] == "drop" for p in books)
+    for k, p in enumerate(books):
+        lo, hi = np.asarray(p["lo"]), np.asarray(p["hi"])
+        ext = hi - lo
+        assert 0.2 <= max(ext[0], ext[1]) <= 0.36 and 0.15 <= min(ext[0], ext[1]) <= 0.28, ext
+        assert 0.02 <= ext[2] <= 0.045, ext
+        # pegada do catálogo (origem no centro da base)
+        assert np.all(lo[:2] >= [-W / 2 - 0.002, -D / 2 - 0.002]) and np.all(hi[:2] <= [W / 2 + 0.002, D / 2 + 0.002])
+        assert abs(p["pivot"][2] - lo[2]) <= 1e-4      # pivô na base (a queda termina no repouso)
+        if k:
+            below = books[k - 1]
+            assert abs(lo[2] - below["hi"][2]) <= 0.0015, (lo[2], below["hi"][2])   # sem vão nem interpenetração
+    assert abs(books[0]["lo"][2]) <= 0.002 and abs(books[-1]["hi"][2] - H) <= 0.002

@@ -233,7 +233,6 @@ def test_raw_sizes_fixture_matches_gltf():
     from mathutils.bvhtree import BVHTree
 
     top_parents = {p for ps in DECOR_TARGETS.values() for p in ps}
-    slatted = {"ph:modern_coffee_table_02": 0.6}    # tampo ripado: frestas entre as ripas
     seen = 0
     for asset_id, raw in RAW.items():
         path = _cached_gltf(asset_id)
@@ -269,6 +268,66 @@ def test_raw_sizes_fixture_matches_gltf():
                 for x in np.arange(x0 + 0.005, x1, 0.02):
                     loc = bvh.ray_cast(mathutils.Vector((x, y, mx[2] - mn[2] + 1)), mathutils.Vector((0, 0, -1)))[0]
                     hits.append(loc is not None and abs(loc.z - sup.z) < 0.01)
-            assert np.mean(hits) >= slatted.get(asset_id, 0.97), (asset_id, float(np.mean(hits)))
+            # tampo ripado (coverage < 1): frestas entre as ripas
+            assert np.mean(hits) >= min(0.97, sup.coverage), (asset_id, float(np.mean(hits)))
     if seen == 0:
         pytest.skip("nenhum glTF Poly Haven em cache")
+
+
+_REST_SCRIPT = r'''
+import json, sys
+import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+from mobilia.render import blender_worker as bw
+
+path, yaw_fix = sys.argv[1], float(sys.argv[2])
+bw._check_footprint = lambda item, meshes: None      # simula o defeito antigo (sem a correção automática)
+table = {"id": "coffee_table_0", "role": "coffee_table", "asset_id": "ph:modern_coffee_table_01",
+         "size": [1.201, 0.6, 0.389], "position": [0.0, 0.0, 0.0], "yaw_deg": 0.0, "yaw_fix": yaw_fix,
+         "mount": "floor", "params": {}}
+root, parts = bw.import_gltf_item(path, table)
+bw.place_root(root, table)
+items_rt = [{"item": table, "root": root, "parts": parts, "plans": {}}]
+for key, x, kind, params, size in (("books_0", 0.35, "book_stack", {}, [0.33, 0.26, 0.085]),
+                                   ("books_1", 0.0, "book_stack", {"count": 2}, [0.3, 0.24, 0.06])):
+    it = {"id": key, "role": "books", "asset_id": f"proc:{kind}", "size": size, "position": [x, 0.0, 0.39],
+          "yaw_deg": 0.0, "mount": "on_top", "parent": "coffee_table_0",
+          "source": {"type": "procedural", "kind": kind, "params": dict(params, size=size)}}
+    r, ps = bw.build_procedural_item(it)
+    bw.place_root(r, it)
+    items_rt.append({"item": it, "root": r, "parts": ps, "plans": {}})
+removed = bw._check_rest_support(items_rt)
+print("RESULT:" + json.dumps({"removed": removed, "kept": [rt["item"]["id"] for rt in items_rt],
+                              "objects": sorted(o.name for o in bpy.data.objects if o.name.startswith("books"))}))
+'''
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("yaw_fix", [0.0, 90.0])
+def test_check_rest_support_removes_hanging_decor(yaw_fix):
+    """Rede de segurança do worker: com a mesa de centro desenhada atravessada (yaw_fix=0 e sem a
+    correção automática de pegada), a pilha de livros na ponta do tampo fica sem apoio e sai da
+    cena; a do centro continua. Com o yaw_fix certo nada é removido."""
+    import subprocess
+    import sys
+    import textwrap
+
+    pytest.importorskip("bpy")
+    path = _cached_gltf("ph:modern_coffee_table_01")
+    if path is None:
+        pytest.skip("glTF da mesa de centro não está em cache")
+    env = dict(os.environ)
+    repo = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run([sys.executable, "-c", textwrap.dedent(_REST_SCRIPT), str(path), str(yaw_fix)],
+                          cwd=repo, env=env, capture_output=True, text=True, timeout=600)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT:")]
+    assert proc.returncode == 0 and lines, proc.stderr[-3000:]
+    out = json.loads(lines[-1][len("RESULT:"):])
+    if yaw_fix == 0.0:
+        assert [r["id"] for r in out["removed"]] == ["books_0"], out
+        assert out["removed"][0]["apoio_acertos"] < 0.9
+        assert "books_0" not in out["kept"] and "books_1" in out["kept"]
+        assert not any(n.startswith("books_0") for n in out["objects"]), out["objects"]
+    else:
+        assert out["removed"] == [], out

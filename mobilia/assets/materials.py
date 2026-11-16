@@ -858,6 +858,25 @@ def opal_bulb() -> bpy.types.Material:
     return _cached("bulb_opal", {}, build)
 
 
+def paper_edges(color: ColorLike | None = None, seed: int = 0) -> bpy.types.Material:
+    """Corte das páginas de um livro: papel fosco com as estrias finas das folhas (paralelas ao
+    tampo, ou seja, variando só em Z no referencial da peça)."""
+    c = parse_color(color, "#ede6d6")
+    key = dict(c=c, s=seed)
+
+    def build(mat):
+        g = _G(mat)
+        P = g.vmath("ADD", g.coords("OBJECT"), _seed_offset(seed))
+        leaves = g.noise(g.mapping(P, scale=(30.0, 30.0, 2600.0)), 1.0, detail=1.0)
+        col = g.scale_color(_rgba(c), g.map_range(leaves.outputs["Factor"], 0.3, 0.7, 0.9, 1.03))
+        col = g.scale_color(col, _variation(g, P, 6.0, 0.03))
+        nrm = g.bump(leaves.outputs["Factor"], 0.2, 0.0003)
+        bsdf = g.principled(base=col, rough=0.88, spec=0.3, diffuse_rough=0.6, normal=nrm)
+        g.output(bsdf.outputs[0])
+
+    return _cached("paper", key, build)
+
+
 def felt(color: ColorLike | None = None) -> bpy.types.Material:
     """Feltro (sola de bases)."""
     c = parse_color(color, "#3b3a38")

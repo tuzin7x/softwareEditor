@@ -1,8 +1,8 @@
 """Assets 3D do Mobília Studio.
 
 - ``procedural.py`` — gera no Blender (``bpy``) os itens que a biblioteca CC0 da
-  Poly Haven não tem: tapete, luminária de piso, abajur, cama, cortina, escrivaninha
-  e manta. Cada asset é um EMPTY raiz (origem no centro da base, frente para -Y,
+  Poly Haven não tem: tapete, luminária de piso, abajur, cama, cortina, escrivaninha,
+  manta e pilha de livros deitados. Cada asset é um EMPTY raiz (origem no centro da base, frente para -Y,
   metros) com as peças como filhos, prontas para a coreografia de montagem.
 - ``materials.py`` — materiais PBR procedurais (sem texturas externas).
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 # Tipos procedurais (asset_id "proc:<tipo>" no catálogo)
 PROCEDURAL_KINDS: tuple[str, ...] = (
-    "rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket",
+    "rug", "floor_lamp", "table_lamp", "bed", "curtain", "desk", "throw_blanket", "book_stack",
 )
 
 # Movimentos de montagem que uma peça pode declarar em obj["assembly_motion"]
