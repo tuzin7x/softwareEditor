@@ -20,7 +20,12 @@ def app():
     from mobilia.ui import theme
     a = QApplication.instance() or QApplication([])
     a.setStyle("Fusion"); a.setStyleSheet(theme.QSS)
-    return a
+    yield a
+    # "Copiar diagnóstico" deixa um QMimeData na área de transferência; com ele lá, o PySide6
+    # (plataforma offscreen) derruba o interpretador no encerramento (código 139) mesmo com todos
+    # os testes aprovados. Limpar a área de transferência ainda com o Python vivo evita isso.
+    a.clipboard().clear()
+    a.processEvents()
 
 
 @pytest.fixture()
