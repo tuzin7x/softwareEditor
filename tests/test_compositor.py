@@ -300,3 +300,104 @@ def test_border_rounding_no_dark_line():
     outside[y0:y1, x0:x1] = False
     assert (out[outside] == photo[outside]).all()
     assert (out[y0 - 1] == photo[y0 - 1]).all() and (out[:, x1] == photo[:, x1]).all()
+
+
+# ---------------------------------------------------------------- PT5: composição recortada
+def _scene(H, W, kind, seed=0):
+    """Camadas sintéticas de quadro inteiro (RGBA + sombra) com móveis em lugares difíceis."""
+    rng = np.random.default_rng(seed)
+    rgba = np.zeros((H, W, 4), np.float32)
+    # sombra larga e texturizada (sol/luz rebatida) por toda a imagem: o desvio passa do eps até
+    # o raio de influência, onde a borda do recorte faria diferença se a margem fosse curta
+    shadow = (0.9 + 0.06 * rng.random((H, W, 3))).astype(np.float32)
+    yy, xx = np.mgrid[0:H, 0:W]
+    boxes = {"meio": [(110, 150, 70, 120)], "canto": [(0, 40, 0, 50)],
+             "dois": [(60, 120, 20, 60), (150, 200, 250, 300)], "ponto": [(120, 121, 160, 161)],
+             "borda_dir": [(90, 160, 290, 320)]}[kind]
+    for y0, y1, x0, x1 in boxes:
+        rgba[y0:y1, x0:x1, :3] = rng.random((y1 - y0, x1 - x0, 3)).astype(np.float32) * 0.5
+        rgba[y0:y1, x0:x1, 3] = 1.0
+        if y0 > 0:
+            rgba[y0 - 1, x0:x1, 3] = 0.4                       # antisserrilhado
+            rgba[y0 - 1, x0:x1, :3] = 0.1
+            rgba[max(0, y0 - 2), x0:x1, 3] = 1e-4             # abaixo de alpha_eps
+        d = np.hypot((yy - min(H - 1, y1 + 4)) / 8.0, (xx - (x0 + x1) / 2) / max(8.0, (x1 - x0) / 1.5))
+        shadow *= (1.0 - 0.5 * np.exp(-d ** 2))[..., None].astype(np.float32)
+    return rgba, shadow.astype(np.float32)
+
+
+def test_crop_composite_bit_identical():
+    """Compor só no recorte (border + raio de influência + margem dos gaussianos) dá o MESMO quadro,
+    byte a byte, que a conta no quadro inteiro (protótipo: scratchpad/speed/crop_bench.py), com e
+    sem border, com o desfoque de nitidez ligado, com móveis encostados na borda da imagem e com as
+    camadas recortadas (``origin``)."""
+    H, W = 240, 320
+    rng = np.random.default_rng(1)
+    plate = rng.integers(0, 256, size=(H, W, 3), dtype=np.uint8)
+    plate[150:] = (170, 150, 130)
+    full_box = [0, 0, W, H]
+    for sharp in (0.0, 0.8):
+        comp = Compositor(plate)
+        comp.plate.blur_sigma_px = sharp                 # força (ou desliga) o casamento de nitidez
+        for kind in ("meio", "canto", "dois", "ponto", "borda_dir"):
+            rgba, shadow = _scene(H, W, kind)
+            for border in (None, [0, 30, W, H], [50, 20, 305, 230], [0, 0, W, H]):
+                out, st = comp.composite(3, rgba, shadow, border)
+                ref_st = type(st)(3)
+                ref_sub = comp._composite_region(ref_st, rgba, shadow, border, full_box)   # quadro inteiro
+                assert np.array_equal(out, ref_sub), (sharp, kind, border)
+                assert (st.object_pixels, st.shadow_pixels, st.changed_pixels, st.preserved_exact) == \
+                    (ref_st.object_pixels, ref_st.shadow_pixels, ref_st.changed_pixels, True)
+                if kind in ("meio", "ponto") and border != [0, 0, W, H]:
+                    assert (st.box[2] - st.box[0]) * (st.box[3] - st.box[1]) < W * H   # recortou mesmo
+            # camadas só no retângulo do border (como chegam do EXR recortado), fora dele neutras
+            bx = [40, 25, 310, 235] if kind != "canto" else [0, 0, 120, 90]
+            x0, y0, x1, y1 = bx
+            rg_full = np.zeros_like(rgba)
+            sh_full = np.ones_like(shadow)
+            rg_full[y0:y1, x0:x1] = rgba[y0:y1, x0:x1]
+            sh_full[y0:y1, x0:x1] = shadow[y0:y1, x0:x1]
+            a, sa = comp.composite(4, rg_full, sh_full, None)
+            b, sb = comp.composite(4, rgba[y0:y1, x0:x1].copy(), shadow[y0:y1, x0:x1].copy(), None,
+                                   origin=(x0, y0))
+            assert np.array_equal(a, b) and sa == sb, (sharp, kind)
+    # sem nenhum pixel de móvel: a própria foto (e nenhuma conta)
+    out, st = Compositor(plate).composite(1, np.zeros((H, W, 4), np.float32), np.full((H, W, 3), 0.5, np.float32),
+                                          None)
+    assert np.array_equal(out, plate) and st.box is None and st.changed_pixels == 0
+
+
+def test_verification_catches_crop_paste_bug():
+    """A verificação independente (``verify.py``: array_equal fora da máscara de influência) passa
+    nos quadros certos e pega um erro de 1 px fora do recorte e uma colagem do recorte deslocada."""
+    from mobilia.composite.verify import MARGIN_PX, influence_mask, outside_mask_equal
+
+    H, W = 240, 320
+    rng = np.random.default_rng(2)
+    plate = rng.integers(0, 256, size=(H, W, 3), dtype=np.uint8)
+    comp = Compositor(plate)
+    radius = comp.influence_px + MARGIN_PX
+    for kind in ("meio", "canto", "dois", "ponto", "borda_dir"):
+        rgba, shadow = _scene(H, W, kind, seed=3)
+        out, st = comp.composite(1, rgba, shadow, None)
+        mask = influence_mask(rgba[..., 3], (0, 0), (H, W), radius)
+        changed = (out != plate).any(-1)
+        assert changed.any() and not (changed & ~mask).any(), kind      # superconjunto, sem falso alarme
+        assert outside_mask_equal(out, plate, mask) == (True, 0, 0)
+        assert (~mask).any()
+    # 1 px errado fora do recorte da composição
+    rgba, shadow = _scene(H, W, "meio", seed=3)
+    out, st = comp.composite(1, rgba, shadow, None)
+    mask = influence_mask(rgba[..., 3], (0, 0), (H, W), radius)
+    x0, y0, x1, y1 = st.box
+    ys, xs = np.nonzero(~mask)
+    k = int(np.argmax((ys < y0) | (ys >= y1) | (xs < x0) | (xs >= x1)))
+    bad = out.copy()
+    bad[ys[k], xs[k], 1] ^= 1
+    assert outside_mask_equal(bad, plate, mask) == (False, 1, 1)
+    # recorte colado 1 px para baixo (erro de índice na colagem)
+    sub = out[y0:y1, x0:x1]
+    shifted = plate.copy()
+    shifted[y0 + 1:min(H, y1 + 1), x0:x1] = sub[:min(H, y1 + 1) - y0 - 1]
+    ok, n_bad, _ = outside_mask_equal(shifted, plate, mask)
+    assert not ok and n_bad > 0

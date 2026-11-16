@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -66,21 +67,26 @@ class JobResult:
 
 
 class ProgressEmitter:
-    """Emite eventos JSON (para a UI) e/ou chama um callback Python."""
+    """Emite eventos JSON (para a UI) e/ou chama um callback Python.
+
+    Pode ser usado de várias threads (a composição em fluxo emite prévias enquanto o render
+    emite o progresso): cada evento sai inteiro, numa linha."""
 
     def __init__(self, stream=None, callback=None):
         self.stream = stream
         self.callback = callback
+        self._lock = threading.RLock()       # o callback pode emitir de novo
         self._weights = {k: w for k, _, w in STAGES}
         self._order = [k for k, _, _ in STAGES]
         self._labels = {k: label for k, label, _ in STAGES}
 
     def _emit(self, ev: dict) -> None:
-        if self.stream is not None:
-            self.stream.write(json.dumps(ev, ensure_ascii=False) + "\n")
-            self.stream.flush()
-        if self.callback is not None:
-            self.callback(ev)
+        with self._lock:
+            if self.stream is not None:
+                self.stream.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                self.stream.flush()
+            if self.callback is not None:
+                self.callback(ev)
 
     def stage(self, stage: str, local_fraction: float = 0.0, message: str | None = None) -> None:
         done = sum(self._weights[s] for s in self._order[: self._order.index(stage)])

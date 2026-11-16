@@ -5,12 +5,18 @@ bit a bit vale para os quadros compostos (mestres) e é verificada antes do enco
 O MP4 final é codificado em alta qualidade (CRF baixo) e com a conversão RGB→YUV
 explícita em BT.709 (o padrão do swscale seria BT.601, o que deslocaria as cores),
 e o relatório mede o PSNR do vídeo decodificado contra os quadros mestres.
+
+Codificador (PT5): NVENC quando a GPU NVIDIA consegue codificar (a CPU fica livre para a
+composição, que roda em paralelo ao render), senão libx264 com preset ``medium`` (~1,7× mais rápido
+que ``slow`` na mesma qualidade visual: −0,3 dB de PSNR em CRF 14). A verificação decodifica só
+alguns quadros, cada um com um *seek* na entrada (``seek_frames``), sem ler o vídeo inteiro.
 """
 from __future__ import annotations
 
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,9 +42,39 @@ def ffmpeg_exe() -> str:
 class EncodeSettings:
     codec: str = "libx264"            # libx264 | h264_nvenc | libx265 | hevc_nvenc
     crf: int = 14
-    preset: str = "slow"
+    preset: str = "medium"
     pix_fmt: str = "yuv420p"
     keyint_s: float = 4.0
+
+
+# Força o codificador ("libx264", "h264_nvenc"...); vazio ou "auto" = escolha automática.
+ENV_CODEC = "MOBILIA_CODIFICADOR"
+_NVENC: dict[str, bool] = {}
+_NVENC_LOCK = threading.Lock()
+
+
+def nvenc_available() -> bool:
+    """O FFmpeg consegue abrir o NVENC nesta máquina? (GPU NVIDIA + driver; testado uma vez por
+    processo com um encode minúsculo de verdade, porque o encoder pode estar compilado no FFmpeg
+    sem haver GPU que o rode)."""
+    with _NVENC_LOCK:
+        if "ok" not in _NVENC:
+            from ..hardware import nvenc_available as probe
+
+            try:
+                _NVENC["ok"] = bool(probe(ffmpeg_exe()))
+            except Exception:
+                _NVENC["ok"] = False
+        return _NVENC["ok"]
+
+
+def choose_codec(gpu: bool) -> str:
+    """``h264_nvenc`` quando há GPU NVIDIA que codifica, senão ``libx264`` (``MOBILIA_CODIFICADOR``
+    força um deles)."""
+    forced = os.environ.get(ENV_CODEC, "").strip().lower()
+    if forced and forced != "auto":
+        return forced
+    return "h264_nvenc" if gpu and nvenc_available() else "libx264"
 
 
 def _codec_args(s: EncodeSettings, fps: int) -> list[str]:
@@ -87,6 +123,23 @@ class VideoWriter:
         self.proc.stdin.write(np.ascontiguousarray(rgb8, dtype=np.uint8).tobytes())
         self.frames += 1
 
+    def abort(self) -> None:
+        """Interrompe o FFmpeg e apaga o arquivo parcial (trabalho com erro). Pode ser chamado de
+        outra thread enquanto uma escrita está presa no pipe: matar o processo a destrava."""
+        if self.proc.poll() is None:
+            self.proc.kill()
+        try:
+            self.proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+        self.proc.wait()
+        if self._log not in (None, subprocess.DEVNULL):
+            self._log.close()
+        try:
+            self._tmp.unlink()
+        except OSError:
+            pass
+
     def close(self) -> Path:
         self.proc.stdin.close()
         rc = self.proc.wait()
@@ -98,11 +151,13 @@ class VideoWriter:
         return self.path
 
 
+_TO_RGB = "scale=in_color_matrix=bt709:in_range=tv:out_range=pc:flags=accurate_rnd+full_chroma_int,format=rgb24"
+
+
 def decode_frames(path: str | Path, width: int, height: int, frames: list[int] | None = None):
-    """Decodifica o MP4 para RGB (BT.709) — usado para medir a fidelidade do encode."""
+    """Decodifica o MP4 inteiro para RGB (BT.709), em ordem (quadro 1 = primeiro)."""
     cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-i", str(path),
-           "-vf", "scale=in_color_matrix=bt709:in_range=tv:out_range=pc:flags=accurate_rnd+full_chroma_int,format=rgb24",
-           "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+           "-vf", _TO_RGB, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     n = width * height * 3
     idx = 0
@@ -116,6 +171,28 @@ def decode_frames(path: str | Path, width: int, height: int, frames: list[int] |
             yield idx, np.frombuffer(buf, np.uint8).reshape(height, width, 3)
     p.stdout.close()
     p.wait()
+
+
+def seek_frames(path: str | Path, width: int, height: int, frames: list[int], fps: float):
+    """Decodifica só os quadros pedidos (1 = primeiro), sem ler o vídeo inteiro.
+
+    Cada quadro é um FFmpeg com *seek* na entrada (``-ss`` antes de ``-i``): ele pula para o
+    quadro-chave anterior e decodifica só até o instante pedido (seek exato, o padrão do FFmpeg).
+    O instante fica 1/4 de quadro antes do quadro k: o primeiro quadro com tempo ≥ esse instante é
+    o k, sem depender de arredondamento da base de tempo. Os quadros rodam em paralelo."""
+    n = width * height * 3
+    procs = []
+    for k in sorted({int(f) for f in frames if int(f) >= 1}):
+        cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error"]
+        if k > 1:
+            cmd += ["-ss", f"{(k - 1.25) / float(fps):.6f}"]
+        cmd += ["-i", str(path), "-frames:v", "1", "-vf", _TO_RGB, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        procs.append((k, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))))
+    for k, p in procs:
+        buf, _ = p.communicate()
+        if len(buf) >= n:
+            yield k, np.frombuffer(buf[:n], np.uint8).reshape(height, width, 3)
 
 
 def psnr(a: np.ndarray, b: np.ndarray, mask: np.ndarray | None = None) -> float:

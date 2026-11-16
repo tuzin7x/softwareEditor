@@ -52,7 +52,7 @@ class RenderSettings:
 class VideoSettings:
     codec: str = "libx264"             # libx264 | h264_nvenc | libx265 | hevc_nvenc
     crf: int = 14                      # qualidade (menor = melhor)
-    preset: str = "slow"
+    preset: str = "medium"
     pix_fmt: str = "yuv420p"           # compatibilidade máxima (Instagram/WhatsApp)
     hold_start_s: float = 0.8          # foto vazia antes da primeira peça surgir
     hold_end_s: float = 2.5            # ambiente pronto no final

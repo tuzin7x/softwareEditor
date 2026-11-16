@@ -32,9 +32,9 @@ ETAPAS: tuple[str, ...] = (
     "render_marcos",     # quadros estáticos intermediários
     "render_dinamico",   # quadros com peças em movimento
     "blender_fim",       # gravação de frames.json, encerramento do processo e folgas
-    "composicao",        # leitura dos EXR + composição bit a bit
-    "codificacao",       # envio ao FFmpeg + finalização do MP4
-    "verificacao",       # decodificação e PSNR
+    "composicao",        # composição bit a bit que sobra depois do render (o resto corre junto dele)
+    "codificacao",       # envio ao FFmpeg depois do render + finalização do MP4
+    "verificacao",       # 3 quadros do MP4 decodificados por seek + PSNR
     "relatorio",
 )
 ETAPAS_ANALISE: tuple[str, ...] = (

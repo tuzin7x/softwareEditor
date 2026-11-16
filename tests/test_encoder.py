@@ -29,3 +29,48 @@ def test_encode_roundtrip_color_and_quality(tmp_path):
     # sem deslocamento de cor (matriz BT.601 x BT.709 erraria vários níveis)
     for sl in (np.s_[100:140, 5:55], np.s_[100:140, 70:120], np.s_[100:140, 140:185]):
         assert np.abs(dec[sl].mean((0, 1)) - ref[sl].mean((0, 1))).max() < 2.0
+
+
+def test_seek_verify(tmp_path):
+    """``seek_frames`` (um FFmpeg com -ss por quadro, sem decodificar o vídeo inteiro) devolve
+    exatamente os mesmos quadros da decodificação completa: início, meio, fim e quadros em volta
+    das fronteiras de GOP (quadro-chave a cada 4 s)."""
+    from mobilia.video.encoder import seek_frames
+
+    H, W = 64, 96
+    rng = np.random.default_rng(4)
+    base = rng.integers(0, 256, size=(H, W, 3), dtype=np.uint8)
+    for fps, n in ((12, 61), (24, 121)):
+        out = tmp_path / f"v{fps}.mp4"
+        w = VideoWriter(out, W, H, fps, EncodeSettings())
+        for i in range(n):
+            f = base.copy()
+            f[:8] = (i * 5) % 256                        # carimbo: cada quadro é diferente
+            f[20 + (i % 30):30 + (i % 30), 10:50] = (i * 37) % 256
+            w.write(f)
+        w.close()
+        full = dict(decode_frames(out, W, H))
+        g = 4 * fps
+        want = sorted({1, n // 2, n, g - 1, g, g + 1, 2})
+        got = dict(seek_frames(out, W, H, want, fps))
+        assert sorted(got) == want
+        for k in want:
+            assert np.array_equal(got[k], full[k]), (fps, k)
+
+
+def test_codec_choice(monkeypatch):
+    """NVENC só com GPU que codifica de verdade; sem GPU o teste do NVENC nem roda; a variável
+    ``MOBILIA_CODIFICADOR`` força a escolha. O preset padrão do x264 é ``medium``."""
+    from mobilia.video import encoder
+
+    calls = []
+    monkeypatch.delenv(encoder.ENV_CODEC, raising=False)
+    monkeypatch.setattr(encoder, "nvenc_available", lambda: calls.append(1) or False)
+    assert encoder.choose_codec(gpu=False) == "libx264" and calls == []
+    assert encoder.choose_codec(gpu=True) == "libx264" and calls == [1]
+    monkeypatch.setattr(encoder, "nvenc_available", lambda: True)
+    assert encoder.choose_codec(gpu=True) == "h264_nvenc"
+    monkeypatch.setenv(encoder.ENV_CODEC, "libx264")
+    assert encoder.choose_codec(gpu=True) == "libx264"
+    assert EncodeSettings().preset == "medium"
+    assert "-preset" in (a := encoder._codec_args(EncodeSettings(codec="h264_nvenc"), 24)) and "p7" in a

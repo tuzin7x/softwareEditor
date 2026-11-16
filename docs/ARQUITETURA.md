@@ -19,14 +19,17 @@ Como garantimos isso (e verificamos em todo quadro):
 2. As sombras vêm do passe **Shadow Catcher** do Cycles: um fator multiplicativo `S` aplicado
    **só** na vizinhança dos móveis.
 3. O compositor calcula `saída = foto·S'·(1−A) + C` e, em seguida, **copia os bytes originais da
-   foto** em todo pixel com `A = 0` e `S' = 1`. Cada quadro é conferido (`max_diff_outside == 0`);
-   se algum pixel "intocado" divergir, o trabalho aborta com erro. O relatório final (`report.json`)
-   registra quantos pixels mudaram por quadro.
+   foto** em todo pixel com `A = 0` e `S' = 1`. Cada quadro é conferido por uma verificação
+   **independente** (`composite/verify.py`): fora da máscara de influência (pixels a até 10% da
+   diagonal + 8 px de algum pixel com alfa > 0, montada só a partir do alfa do CG), o quadro tem de
+   ser `np.array_equal` à foto. Se algum byte divergir, o trabalho aborta naquele quadro, sem MP4.
+   O relatório final (`report.json`) registra quantos pixels mudaram por quadro.
 4. Quadros sem móveis visíveis (o início do vídeo) são cópias exatas da foto.
 
 > O MP4 (H.264/yuv420p) é um formato com perda. A garantia bit a bit vale para os **quadros mestres**
 > (compostos antes do encode). O encode usa CRF 14 com conversão RGB→YUV **BT.709 explícita**, e o
-> relatório mede o PSNR do vídeo decodificado contra os quadros mestres (fundo intocado).
+> relatório mede o PSNR do vídeo decodificado contra os quadros mestres (fundo intocado) no início,
+> no meio e no fim do vídeo (cada um por *seek*, sem decodificar o arquivo inteiro).
 
 ## 2. Visão geral do pipeline
 
@@ -44,7 +47,8 @@ foto.jpg ─┬─► [Preparo]   EXIF, placa imutável na resolução do vídeo
           │               montagem animada peça a peça, EXR multicamada por quadro
           ├─► [Composição] saída = foto·S'·(1−A)+C ; cópia bit a bit fora dos móveis/sombras;
           │               grão do sensor e nitidez casados só na camada 3D
-          └─► [Vídeo]     FFmpeg (libx264 CRF 14 ou NVENC), BT.709, +faststart; verificação por decode
+          └─► [Vídeo]     FFmpeg (NVENC ou libx264 CRF 14 medium), BT.709, +faststart; verificação por seek
+                          (composição e codificação correm em paralelo ao render, quadro a quadro)
 ```
 
 Código: `mobilia/` — `analysis/` (geometria, segmentação, sala), `layout/` (catálogo, solver, estilo),
@@ -96,10 +100,10 @@ região e deixaram emendas sutis, então a qualidade venceu e o modo fica deslig
   rápido de gravar que ZIP; ver `render/border.py`). O border em pixels é decidido primeiro e o valor
   normalizado entregue ao Blender aponta 1/4 de pixel para dentro de cada aresta, então o retângulo
   anotado no `frames.json` é exatamente o que o Cycles renderiza (antes podia sobrar 1 px sem render,
-  a antiga "linha escura"). A composição cola o recorte num quadro inteiro (RGBA 0 e sombra neutra
-  fora dele): o resultado é byte a byte o do EXR de quadro inteiro (`crop_to_border: false`);
-- cada EXR é apagado logo depois do último quadro que o usa na composição. Para depurar ou usar o
-  `recompor`, `MOBILIA_MANTER_EXR=1` mantém os arquivos;
+  a antiga "linha escura"). A composição usa o recorte no lugar dele (RGBA 0 e sombra neutra fora
+  dele): o resultado é byte a byte o do EXR de quadro inteiro (`crop_to_border: false`);
+- cada EXR é apagado logo depois de o último quadro que o usa ir para o codificador. Para depurar
+  ou usar o `recompor`, `MOBILIA_MANTER_EXR=1` mantém os arquivos;
 - o mix transparente do fade só fica ligado enquanto a peça está em fade-in: depois o material volta
   ao original (sem BSDF transparente, os raios de sombra não precisam avaliar o material);
 - a cauda invisível do assentamento não é renderizada (ver a seção 6).
@@ -200,6 +204,35 @@ o vídeo mostra exatamente essas funções.
 
 ## 7. Composição e casamento com a câmera
 
+**Composição em fluxo (PT5, `composite/stream.py`).** O worker do Blender anuncia cada quadro assim
+que o EXR fica pronto (evento `frame_ready`), e o motor compõe, verifica e codifica enquanto a GPU
+renderiza os quadros seguintes: depois do último render sobra só a "cauda".
+- Cada EXR novo é uma tarefa num conjunto de threads (NumPy, SciPy e OpenEXR soltam o GIL): leitura
+  do recorte, composição e verificação. Uma thread escritora entrega os quadros ao FFmpeg na ordem
+  do vídeo, só depois de a verificação do quadro passar. A memória fica limitada (o anúncio de
+  quadros espera quando há quadros demais à espera do codificador).
+- Quadros reaproveitados (mesma pose) usam o quadro já composto, em cache; quadros só-foto são a
+  própria placa. Nenhum dos dois passa pelo compositor de novo.
+- A composição é feita só no **recorte** = caixa dos pixels com móvel + raio de influência + raios
+  dos dois gaussianos (sombra e nitidez) + 2 px. Fora dele o resultado de quadro inteiro já seria a
+  foto, e dentro dele cada valor intermediário é igual ao do quadro inteiro: a saída é a mesma byte
+  a byte (testado; na sala de teste os 251 quadros mestres saíram idênticos aos da versão anterior).
+  As camadas vêm do EXR recortado direto para esse retângulo, sem buffers do quadro inteiro.
+- A placa (ruído, nitidez e grão da foto) é estimada numa thread logo no início do render.
+- Codificador: NVENC quando a GPU NVIDIA consegue codificar (`MOBILIA_CODIFICADOR` força um),
+  senão libx264 CRF 14 preset `medium` (~1,7× mais rápido que `slow`, −0,3 dB de PSNR).
+- Se o worker não anunciar os quadros (versão antiga), tudo é composto no fim a partir do
+  `frames.json`; se os anúncios não baterem com o arquivo, o trabalho para com erro.
+- `recompor` usa o mesmo caminho com todos os quadros de uma vez: na sala de teste a 960 × 720 (251
+  quadros, 176 EXR), 55 s → 9 s em 4 núcleos de CPU, com os mesmos quadros mestres.
+- `report.json`: `composicao` (`paralela`, `trabalhadores`, `compostos_durante_render`, `cauda_s`,
+  `quadros_compostos`/`quadros_cache`/`quadros_so_foto`, `recorte_composicao_medio_px`, tempos de
+  leitura, composição e verificação por quadro), `preservacao.verificacao` (método, raio da máscara)
+  e `encode` (`codificador`, `preset`, `verificacao_metodo: "seek"`). Em `tempos_s`, `composicao` e
+  `codificacao` contam só a cauda depois do render (o resto ficou escondido atrás dele).
+
+**Casamento com a câmera:**
+
 - Grão do sensor: o ruído estimado nas regiões planas da foto é aplicado **só** sobre o CG, com um
   padrão **fixo** entre quadros (a foto é estática; grão variando faria o móvel "chiar").
 - Nitidez: um desfoque equivalente ao da foto é estimado e aplicado ao CG.
@@ -255,7 +288,7 @@ o vídeo mostra exatamente essas funções.
     movimento), `final` (cena completa parada) ou `marco` (parado com parte dos itens).
   - `render.desempenho` (amostras/s nos quadros finais, custo fixo por quadro), `render.camadas`,
     `render.por_quadro`, `render.quadros` (total, renderizados, reutilizados, só foto), cobertura média
-    do recorte, `composicao.por_quadro` (leitura, composição, envio ao FFmpeg), `encode` e `gpu`
+    do recorte, `composicao.por_quadro` (leitura, composição, verificação, envio ao FFmpeg), `encode` e `gpu`
     (pico de VRAM do dispositivo por fase via NVML, e o do PyTorch na análise).
   - "Copiar diagnóstico" (tela de conclusão e caixa de erro) gera um zip com `report.json`,
     `frames.json`, `scene.json`, `layout.json`, os registros e um manifesto, e copia o arquivo para a área

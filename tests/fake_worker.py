@@ -7,11 +7,12 @@ Modos:
   (report.json, frames.json, registros e uma placa derivada da foto);
 - ``blender --aquecimento <pasta>``: imita o aquecimento do instalador (``warmup_done``);
 - ``blender <scene.json>``: imita o worker do Blender (``mobilia.render.blender_worker``): emite
-  ``worker_ready``/``render_progress``/``render_done`` e grava EXRs recortados no border
-  (Combined + Shadow Catcher) de um quadrado que entra em cena e para, com a telemetria por
-  quadro do worker real.
+  ``worker_ready``/``frame_ready``/``render_progress``/``render_done`` e grava EXRs recortados no
+  border (Combined + Shadow Catcher) de um quadrado que entra em cena e para, com a telemetria por
+  quadro do worker real. ``MOBILIA_DUBLE_SEM_FLUXO=1`` imita um worker sem os eventos por quadro.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -20,6 +21,13 @@ from pathlib import Path
 
 def _emit(**ev):
     print(json.dumps(ev, ensure_ascii=False), flush=True)
+
+
+def _add_frame(frames: list, entry: dict) -> None:
+    """Como ``blender_worker.add_frame``: anota e anuncia o quadro (composição em fluxo)."""
+    frames.append(entry)
+    if os.environ.get("MOBILIA_DUBLE_SEM_FLUXO") != "1":
+        _emit(event="frame_ready", entry=entry)
 
 
 def _write_exr(path: Path, rgba, shadow) -> None:
@@ -70,14 +78,14 @@ def blender(spec_path: str) -> int:
     last = None
     for f in range(1, n + 1):
         if f <= 4:
-            frames.append({"frame": f, "source": None, "border": None})
+            _add_frame(frames, {"frame": f, "source": None, "border": None})
             continue
         x = min(f, stop_at) * (W - side) // (2 * stop_at)
         key = (x,)
         border = [max(0, x - 6), H // 3 - 6, min(W, x + side + 6), min(H, H // 3 + side + 6)]
         if key == last:
-            frames.append({"frame": f, "source": frames[-1]["source"], "border": frames[-1]["border"],
-                           "reused": True})
+            _add_frame(frames, {"frame": f, "source": frames[-1]["source"], "border": frames[-1]["border"],
+                                "reused": True})
             continue
         ti = time.perf_counter()
         rgba = np.zeros((H, W, 4), np.float32)
@@ -92,7 +100,7 @@ def blender(spec_path: str) -> int:
         camada = "dinamico" if f < stop_at else "final"
         layer_s[camada] += wall
         area = (border[2] - border[0]) * (border[3] - border[1])
-        frames.append({"frame": f, "source": name, "border": border, "mode": "full", "crop": True})
+        _add_frame(frames, {"frame": f, "source": name, "border": border, "mode": "full", "crop": True})
         por_quadro.append({"quadro": f, "camada": camada, "itens": 1, "pecas_em_movimento": int(f < stop_at),
                            "area_px": area, "cobertura": round(area / (W * H), 4), "spp": 8, "amostras": 8,
                            "amostragem_s": round(wall * 0.6, 4), "denoise_s": round(wall * 0.2, 4),
@@ -118,8 +126,10 @@ def blender(spec_path: str) -> int:
                                        "reutilizados": sum(1 for fr in frames if fr.get("reused")),
                                        "so_foto": sum(1 for fr in frames if fr.get("source") is None)},
                            "samples_config": int(spec["render"]["samples"])}}
+    # o render real ainda grava a telemetria e encerra o Blender aqui: a composição em fluxo
+    # já trabalha nos quadros anunciados enquanto isso
+    time.sleep(0.3)
     (out / "frames.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
-    time.sleep(0.02)
     _emit(event="render_done", rendered=len(por_quadro), meta=str(out / "frames.json"))
     return 0
 

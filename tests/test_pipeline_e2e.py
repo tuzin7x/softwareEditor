@@ -136,11 +136,27 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     assert 0 < r["cobertura_recorte_media"] < 1
     # composição / encode / preservação / GPU
     c = rep["composicao"]
-    assert len(c["por_quadro"]) == q["total"] and c["recorte_medio_px"] > 0 and c["paralela"] is False
-    assert {"leitura_s", "composicao_s", "codificacao_s"} <= set(c["por_quadro"][0])
-    assert rep["encode"]["codificador"] == "libx264" and rep["encode"]["bytes"] > 0 and rep["encode"]["s"] > 0
-    assert rep["preservacao"]["preservado_exato_todos"] is True
-    assert rep["preservacao"]["quadros_verificados"] == q["total"]
+    assert len(c["por_quadro"]) == q["total"] and c["recorte_medio_px"] > 0
+    assert {"leitura_s", "composicao_s", "verificacao_s", "codificacao_s"} <= set(c["por_quadro"][0])
+    # PT5: composição em fluxo, durante o render; reaproveitados vêm do cache (não são recompostos)
+    assert c["paralela"] is True and c["trabalhadores"] >= 1
+    assert 0 < c["compostos_durante_render"] <= q["total"]
+    assert c["quadros_compostos"] == q["renderizados"] and c["quadros_cache"] == q["reutilizados"]
+    assert c["quadros_so_foto"] == q["so_foto"]
+    assert 0 < c["recorte_composicao_medio_px"] < 160 * 120
+    assert sum(p["cache"] for p in c["por_quadro"]) == q["reutilizados"]
+    assert all(p["composicao_s"] == 0 for p in c["por_quadro"] if p["cache"])
+    e = rep["encode"]
+    assert e["codificador"] == "libx264" and e["preset"] == "medium" and e["bytes"] > 0 and e["s"] > 0
+    # MP4 conferido por seek em 3 quadros: início, meio e fim (o dublê renderiza menos quadros que
+    # o previsto pela cena: o "meio" é o quadro guardado mais perto dele)
+    pos = [v["posicao"] for v in e["verificacao"]]
+    assert e["verificacao_metodo"] == "seek" and len(pos) == 3 and pos[0] == 1 and pos[-1] == q["total"]
+    assert q["total"] / 4 <= pos[1] <= 3 * q["total"] / 4
+    pres = rep["preservacao"]
+    assert pres["preservado_exato_todos"] is True
+    assert pres["quadros_verificados"] == q["total"]
+    assert pres["verificacao"]["compostos"] == q["renderizados"] and pres["verificacao"]["raio_px"] > 0
     assert set(rep["gpu"]["vram_pico_mb"]) >= {"analise", "render"}
     assert rep["foto"]["megapixels"] == pytest.approx(1920 * 1440 / 1e6, abs=1e-3)
     assert set(rep["calibracao_luz"]) >= {"rel_rms", "ganhos_canal", "fracao_mascara", "sol_ajustado"}
@@ -184,6 +200,57 @@ def test_fast_pipeline_keeps_exr_on_request(tmp_path, monkeypatch):
     a = dict(decode_frames(out, w, h, idx))
     b = dict(decode_frames(again, w, h, idx))
     assert all(np.array_equal(a[i], b[i]) for i in idx)
+
+
+def test_fast_pipeline_worker_without_frame_events(tmp_path, monkeypatch):
+    """Worker sem os eventos ``frame_ready`` (versão antiga): tudo é composto no fim, a partir do
+    ``frames.json``, com o mesmo resultado garantido."""
+    from mobilia import pipeline
+    from mobilia.jobs import JobRequest, ProgressEmitter
+
+    monkeypatch.setenv("MOBILIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(pipeline.ENV_BLENDER_WORKER, json.dumps([sys.executable, str(FAKE), "blender"]))
+    monkeypatch.setenv("MOBILIA_DUBLE_SEM_FLUXO", "1")
+    _tiny_quality(monkeypatch, pipeline, long_edge=160, samples=8, fps=12)
+    _fake_analysis(monkeypatch, tmp_path)
+    req = JobRequest(str(FX / "photos/sala_vazia_stafford.jpg"), "sala", str(tmp_path / "v.mp4"),
+                     quality="previa", work_dir=str(tmp_path / "job"))
+    rep = json.loads(Path(pipeline.run_job(req, ProgressEmitter()).report_path).read_text(encoding="utf-8"))
+    c, q = rep["composicao"], rep["render"]["quadros"]
+    assert c["compostos_durante_render"] == 0 and c["quadros_compostos"] == q["renderizados"]
+    assert rep["preservacao"]["preservado_exato_todos"] is True
+    assert rep["preservacao"]["quadros_verificados"] == q["total"]
+
+
+def test_stream_failure_stops_the_job(tmp_path, monkeypatch):
+    """Um quadro que muda bytes da foto fora da máscara de influência para o trabalho durante o
+    render (o Blender é encerrado), sem MP4, com os EXR ainda não conferidos no disco."""
+    from mobilia import pipeline
+    from mobilia.composite.compositor import Compositor
+    from mobilia.composite.stream import PreservationError
+    from mobilia.jobs import JobRequest, ProgressEmitter
+
+    monkeypatch.setenv("MOBILIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(pipeline.ENV_BLENDER_WORKER, json.dumps([sys.executable, str(FAKE), "blender"]))
+    _tiny_quality(monkeypatch, pipeline, long_edge=160, samples=8, fps=12)
+    _fake_analysis(monkeypatch, tmp_path)
+    orig = Compositor.composite
+
+    def buggy(self, frame, *a, **kw):
+        out, st = orig(self, frame, *a, **kw)
+        if frame >= 8:
+            out = out.copy()
+            out[-1, 0] = 255 - out[-1, 0]               # canto longe do quadrado que entra em cena
+        return out, st
+
+    monkeypatch.setattr(Compositor, "composite", buggy)
+    out = tmp_path / "v.mp4"
+    req = JobRequest(str(FX / "photos/sala_vazia_stafford.jpg"), "sala", str(out), quality="previa",
+                     work_dir=str(tmp_path / "job"))
+    with pytest.raises(PreservationError, match="quadro 8"):
+        pipeline.run_job(req, ProgressEmitter())
+    assert not out.exists() and not list(tmp_path.glob("v.partial*"))
+    assert list((tmp_path / "job" / "render" / "frames").glob("*.exr"))
 
 
 def test_compose_deletes_exr_after_last_use_and_survives_locked_file(tmp_path, monkeypatch):
@@ -241,8 +308,8 @@ def test_compose_deletes_exr_after_last_use_and_survives_locked_file(tmp_path, m
     events: list[dict] = []
     comp = pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7,
                                   ProgressEmitter(callback=events.append), delete_exr=True)
-    # f_00001 só depois do quadro 2 (reaproveitado: 1 quadro já enviado ao codificador), não no 1
-    assert deleted == [("f_00001.exr", 1), ("f_00003.exr", 2)]
+    # f_00001 só depois de o quadro 2 (reaproveitado, vem do cache) ir para o codificador, não no 1
+    assert deleted == [("f_00001.exr", 2), ("f_00003.exr", 3)]
     assert not (frames_dir / "f_00001.exr").exists() and (frames_dir / "f_00003.exr").exists()
     c = comp["composicao"]
     assert c["exr_apagados"] == 1 and c["exr_bytes_apagados"] == size1

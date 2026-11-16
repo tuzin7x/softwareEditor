@@ -1223,6 +1223,14 @@ def render_frame(sc, path: Path, out: dict) -> dict:
     return st
 
 
+def add_frame(meta: dict, entry: dict) -> None:
+    """Anota o quadro no ``frames.json`` e o anuncia na hora (evento ``frame_ready``): o motor
+    compõe e codifica em fluxo enquanto o render segue (PT5). Quando o evento sai, o EXR do
+    quadro já está completo no disco (``render_frame`` só volta depois de gravá-lo)."""
+    meta["frames"].append(entry)
+    emit(event="frame_ready", entry=entry)
+
+
 def frame_layer(items_rt: list[dict], f: int, fps: int, dyn: list, final_sig: tuple) -> str:
     """Camada do quadro para a telemetria: "dinamico" (peça em movimento), "final" (cena completa
     em repouso, igual ao último quadro) ou "marco" (parado, com parte dos itens)."""
@@ -1369,11 +1377,11 @@ def main(spec_path: str) -> None:
         if only and f not in only:
             continue
         if not any_visible(items_rt, f, fps):
-            meta["frames"].append({"frame": f, "source": None, "border": None})
+            add_frame(meta, {"frame": f, "source": None, "border": None})
             continue
         sig = frame_signature(items_rt, f, fps)
         if sig == last_sig:
-            meta["frames"].append({"frame": f, "source": last_src, "border": last_border, "reused": True})
+            add_frame(meta, {"frame": f, "source": last_src, "border": last_border, "reused": True})
             continue
         t_it = time.perf_counter()
         sc.frame_set(f)
@@ -1393,7 +1401,7 @@ def main(spec_path: str) -> None:
         # com o recorte, o EXR tem só esse retângulo e a composição o cola no quadro inteiro
         pb = bd.pixel_border(b, W, H) if b is not None else None
         if pb is None:
-            meta["frames"].append({"frame": f, "source": None, "border": None})
+            add_frame(meta, {"frame": f, "source": None, "border": None})
             continue
         border_px, b = pb
         sc.render.use_border = True
@@ -1407,7 +1415,7 @@ def main(spec_path: str) -> None:
         name = f"f_{f:05d}.exr"
         t_prep = time.perf_counter() - t_it
         st = render_frame(sc, out_dir / "frames" / name, pass_out)
-        meta["frames"].append({"frame": f, "source": name, "border": border_px, "mode": mode, "crop": crop})
+        add_frame(meta, {"frame": f, "source": name, "border": border_px, "mode": mode, "crop": crop})
         last_sig, last_src, last_border = sig, name, border_px
         done += 1
         area = max(0, border_px[2] - border_px[0]) * max(0, border_px[3] - border_px[1])

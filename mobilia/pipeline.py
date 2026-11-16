@@ -254,15 +254,24 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
             em.log(f"Modelos 3D baixados: {net['arquivos']} arquivo(s), {net['bytes'] / 1e6:.0f} MB em {dl:.0f} s")
 
         # ---------------------------------------------------------------- render (subprocesso Blender)
+        # + composição em fluxo (PT5): cada quadro é composto, verificado e codificado assim que o
+        # worker o anuncia, enquanto o Blender renderiza os seguintes; só a "cauda" fica depois
         em.stage("render", 0.0, "Montando a cena 3D e calibrando a luz pela foto")
-        with vram.track("render"):
-            render_meta, proc = _run_render_worker(work / "scene.json", em, with_times=True)
-        _blender_stages(sw, render_meta.get("telemetria") or {}, proc)
-
-        # ---------------------------------------------------------------- composição + vídeo
-        # cada EXR é apagado assim que o último quadro que o usa é composto (PT4)
-        comp = compose_video(work, plate8, render_meta, Path(req.output_path), q["fps"], req.seed, em,
-                             delete_exr=not keep_exr())
+        with sw.measure("composicao"):      # imports + FFmpeg aberto; a placa é estimada em paralelo
+            composer = stream_composer(work, plate8, spec, Path(req.output_path), q["fps"], req.seed, em,
+                                       gpu=prof.torch_device == "cuda", delete_exr=not keep_exr())
+        try:
+            with vram.track("render"):
+                render_meta, proc = _run_render_worker(work / "scene.json", em, with_times=True,
+                                                       on_frame=composer.push)
+            _blender_stages(sw, render_meta.get("telemetria") or {}, proc)
+            # ------------------------------------------------------------ cauda da composição + vídeo
+            # cada EXR é apagado assim que o último quadro que o usa vai para o codificador (PT4)
+            comp = composer.finish(render_meta)
+        except BaseException:
+            composer.abort()
+            raise
+        comp["composicao"]["exr_recortado"] = bool((render_meta.get("exr") or {}).get("recorte", False))
         sw.add("composicao", comp["tempos"]["composicao"])
         sw.add("codificacao", comp["tempos"]["codificacao"])
         sw.add("verificacao", comp["verify_seconds"])
@@ -426,164 +435,58 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
     }
 
 
+def stream_composer(work: Path, plate8: np.ndarray, spec: dict, out_path: Path, fps: int, seed: int,
+                    em: ProgressEmitter, gpu: bool = False, delete_exr: bool = False):
+    """Compositor em fluxo para o render que vai começar (``StreamComposer``): a placa é estimada
+    e o FFmpeg aberto já agora, durante o início do Blender. NVENC quando a GPU codifica."""
+    from .composite.stream import StreamComposer
+    from .video.encoder import choose_codec
+
+    rs = spec.get("render") or {}
+    return StreamComposer(work, plate8, out_path, fps, seed, em, codec=choose_codec(gpu), delete_exr=delete_exr,
+                          sequential=bool(rs.get("incremental", False)), n_frames=rs.get("n_frames"),
+                          streaming=True)
+
+
 def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: Path, fps: int,
-                  seed: int, em: ProgressEmitter, codec: str = "libx264", delete_exr: bool = False) -> dict:
+                  seed: int, em: ProgressEmitter, codec: str = "libx264", delete_exr: bool = False,
+                  workers: int | None = None) -> dict:
     """Compõe os passes renderizados sobre a foto, grava o MP4 e verifica o resultado.
 
     Usa só o que está em ``work/render`` (EXRs + frames.json): pode ser repetido sem
     renderizar de novo (comando ``recompor``) enquanto os EXR existirem. Com ``delete_exr``, cada
-    EXR é apagado logo depois do último quadro que o usa. Os EXR podem ser recortados no border
-    (``use_crop_to_border``): ``load_render_passes`` cola o recorte no quadro inteiro.
-    Mede por quadro a leitura dos EXR, a composição e o envio ao codificador
-    (``composicao.por_quadro``).
+    EXR é apagado logo depois do último quadro que o usa. É o mesmo caminho da composição em
+    fluxo do ``run_job`` (``composite/stream.py``), com todos os quadros entregues de uma vez:
+    composição só no recorte de influência (bit a bit igual à de quadro inteiro), quadros
+    reaproveitados vindos do cache, threads em paralelo, verificação independente por quadro e
+    verificação do MP4 por *seek*. Mede por quadro a leitura dos EXR, a composição, a verificação
+    e o envio ao codificador (``composicao.por_quadro``).
     """
-    from .composite.compositor import Compositor, LayerAccumulator, load_render_passes
-    from .video.encoder import EncodeSettings, VideoWriter, decode_frames, psnr
+    from .composite.stream import StreamComposer
 
-    t = time.perf_counter()
     em.stage("composicao", 0.0, "Compondo sobre a foto original")
-    H, W = plate8.shape[:2]
     frames_dir = work / "render" / "frames"
+    frames = render_meta["frames"]
     # último quadro que usa cada EXR (quadros reaproveitados apontam para o EXR anterior)
-    last_use = {fr["source"]: i for i, fr in enumerate(render_meta["frames"]) if fr.get("source")}
+    last_use = {fr["source"]: i + 1 for i, fr in enumerate(frames) if fr.get("source")}
     missing = [s for s in last_use if not (frames_dir / s).exists()]
     if missing:
         raise FileNotFoundError(
             f"{len(missing)} EXR de quadro não existem mais em {frames_dir} (ex.: {missing[0]}). "
             f"Os EXR são apagados depois da composição; para recompor, gere de novo com "
             f"{ENV_MANTER_EXR}=1.")
-    comp = Compositor(plate8, seed=seed)
-    out_path = Path(out_path)
-    settings = EncodeSettings(codec=codec)
-    enc = VideoWriter(out_path, W, H, fps, settings, log_path=work / "encode.log")
-    t_setup = time.perf_counter() - t
-    frames = render_meta["frames"]
-    stats = []
-    previews = []
-    keyframes_dir = work / "quadros"
-    keyframes_dir.mkdir(exist_ok=True)
-    n = len(frames)
-    sample = sorted({1, max(1, n // 2), n})
-    masters: dict[int, np.ndarray] = {}
-    acc = LayerAccumulator(H, W, feather_px=max(6, W // 120),
-                           shadow_feather_px=max(16, int(0.04 * float(np.hypot(W, H)))))
-    loaded_src = None
-    per_frame: list[dict] = []
-    tot = {"leitura": 0.0, "composicao": 0.0, "codificacao": 0.0, "previas": 0.0}
-    crops: list[int] = []
-    exr_info = {"apagados": 0, "bytes": 0}
-    for i, fr in enumerate(frames):
-        src = fr.get("source")
-        t_read = t_comp = 0.0
-        tf = time.perf_counter()
-        if src is None:
-            acc.reset()
-            out8, st = comp.composite(fr["frame"], None, None, None)
-            t_comp = time.perf_counter() - tf
-        else:
-            if src != loaded_src and not fr.get("reused"):
-                rgba, sh = load_render_passes(frames_dir / src, fr.get("border"), (H, W))
-                acc.update(rgba, sh, fr.get("border"), fr.get("mode", "full"))
-                loaded_src = src
-            t_read = time.perf_counter() - tf
-            out8, st = comp.composite(fr["frame"], acc.rgba, acc.shadow, None)
-            t_comp = time.perf_counter() - tf - t_read
-            b = fr.get("border")
-            if b:
-                crops.append(max(0, b[2] - b[0]) * max(0, b[3] - b[1]))
-        if not st.preserved_exact:
-            enc.close()
-            raise RuntimeError(f"Violação da preservação de pixels no quadro {fr['frame']}")
-        stats.append(st)
-        if delete_exr and src is not None and last_use.get(src) == i:
-            p_exr = frames_dir / src
-            try:
-                size = p_exr.stat().st_size
-                p_exr.unlink()
-                exr_info["bytes"] += size           # só conta o que saiu mesmo do disco
-                exr_info["apagados"] += 1
-            except OSError as e:          # arquivo preso (antivírus): só deixa de liberar o disco
-                em.log(f"Não foi possível apagar {p_exr.name}: {e}", "warning")
-        te = time.perf_counter()
-        enc.write(out8)
-        t_enc = time.perf_counter() - te
-        tp = time.perf_counter()
-        if fr["frame"] in sample:
-            masters[fr["frame"]] = out8
-        if i % max(1, n // 8) == 0 or i == n - 1:
-            pth = keyframes_dir / f"quadro_{fr['frame']:05d}.jpg"
-            Image.fromarray(out8).save(pth, quality=92)
-            previews.append(str(pth))
-            em.preview(pth)
-        if i % 10 == 0:
-            em.stage("composicao", i / n, f"Quadro {i + 1}/{n}")
-        t_prev = time.perf_counter() - tp
-        tot["leitura"] += t_read
-        tot["composicao"] += t_comp
-        tot["codificacao"] += t_enc
-        tot["previas"] += t_prev
-        per_frame.append({"quadro": fr["frame"], "leitura_s": round(t_read, 4), "composicao_s": round(t_comp, 4),
-                          "codificacao_s": round(t_enc, 4), "reutilizado": bool(fr.get("reused")),
-                          "so_foto": src is None})
-    em.stage("video", 0.5, "Finalizando o MP4")
-    tc = time.perf_counter()
-    enc.close()
-    t_close = time.perf_counter() - tc
-    seconds = time.perf_counter() - t
-    t_encode = tot["codificacao"] + t_close
-
-    # ---- verificação do encode (decodifica e compara com os quadros mestres)
-    t = time.perf_counter()
-    check = []
-    for idx, dec in decode_frames(out_path, W, H, sample):
-        ref = masters.get(idx)
-        if ref is None:
-            continue
-        untouched = (ref == plate8).all(-1)
-        check.append({"frame": idx, "psnr_total_db": round(psnr(dec, ref), 2),
-                      "psnr_fundo_db": round(psnr(dec, plate8, untouched), 2)})
-    em.stage("video", 1.0, "Vídeo pronto")
-    changed = max((s.changed_pixels for s in stats), default=0)
-    exact_all = all(s.preserved_exact for s in stats)
-    composed = [p for p in per_frame if not p["so_foto"]]
-    return {
-        "seconds": seconds,
-        "verify_seconds": time.perf_counter() - t,
-        # composição = tudo do laço menos o envio ao FFmpeg; codificação = envio + finalização
-        "tempos": {"composicao": seconds - t_encode, "codificacao": t_encode, "leitura": tot["leitura"],
-                   "composicao_pura": tot["composicao"], "previas": tot["previas"], "preparo": t_setup,
-                   "finalizacao_mp4": t_close},
-        "previas": previews,
-        "composicao": {
-            "s_por_quadro_medio": round(sum(p["leitura_s"] + p["composicao_s"] for p in per_frame)
-                                        / max(1, len(per_frame)), 4),
-            "s_por_quadro_composto_medio": round(sum(p["leitura_s"] + p["composicao_s"] for p in composed)
-                                                 / max(1, len(composed)), 4),
-            "recorte_medio_px": round(sum(crops) / len(crops)) if crops else 0,
-            "cobertura_recorte_media": round(sum(crops) / len(crops) / (W * H), 4) if crops else 0.0,
-            "paralela": False,
-            "exr_recortado": bool((render_meta.get("exr") or {}).get("recorte", False)),
-            "exr_apagados": exr_info["apagados"],
-            "exr_bytes_apagados": exr_info["bytes"],
-            "leitura_s": round(tot["leitura"], 2),
-            "composicao_s": round(tot["composicao"], 2),
-            "previas_s": round(tot["previas"], 2),
-            "por_quadro": per_frame,
-        },
-        "preservacao": {
-            "quadros": len(stats),
-            "todos_bit_exatos_fora_dos_objetos": exact_all,
-            "preservado_exato_todos": exact_all,
-            "quadros_verificados": sum(1 for s in stats if s.preserved_exact is not None),
-            "psnr_fundo_db": min((c["psnr_fundo_db"] for c in check), default=None),
-            "max_pixels_alterados_em_um_quadro": changed,
-            "fracao_max_alterada": round(changed / plate8[..., 0].size, 4),
-            "quadros_identicos_a_foto": sum(1 for s in stats if s.changed_pixels == 0),
-        },
-        "encode": {"codec": codec, "codificador": codec, "preset": settings.preset, "crf": settings.crf,
-                   "s": round(t_encode, 2), "verificacao": check, "arquivo": str(out_path),
-                   "bytes": out_path.stat().st_size},
-    }
+    composer = StreamComposer(work, plate8, out_path, fps, seed, em, codec=codec, delete_exr=delete_exr,
+                              workers=workers, sequential=any(fr.get("mode") == "incremental" for fr in frames),
+                              n_frames=len(frames), last_use=last_use)
+    try:
+        for fr in frames:
+            composer.push(fr)
+        res = composer.finish()
+    except BaseException:
+        composer.abort()
+        raise
+    res["composicao"]["exr_recortado"] = bool((render_meta.get("exr") or {}).get("recorte", False))
+    return res
 
 
 def recompose(work_dir: str | Path, out_path: str | Path | None, em: ProgressEmitter) -> dict:
@@ -631,11 +534,14 @@ def _blender_worker_command(spec_path: Path) -> list[str]:
     return blender_worker_prefix() + [str(spec_path)]
 
 
-def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = False):
+def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = False, on_frame=None):
     """Roda o worker do Blender e devolve o ``frames.json``.
 
     Com ``with_times`` devolve também os instantes (``perf_counter`` deste processo) do
     lançamento, do evento ``worker_ready`` e do fim do processo, para a telemetria.
+    ``on_frame(entrada)`` recebe cada quadro anunciado (evento ``frame_ready``, na ordem do vídeo,
+    com o EXR já completo no disco). Se ele levantar um erro (composição falhou), o Blender é
+    encerrado na hora e o erro sobe.
     """
     env = blender_worker_env()
     cmd = _blender_worker_command(spec_path)
@@ -643,7 +549,6 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                             encoding="utf-8", errors="replace",
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    meta_path = None
     err_tail: list[str] = []
     import threading
 
@@ -655,6 +560,25 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
 
     th = threading.Thread(target=_drain_err, daemon=True)
     th.start()
+    try:
+        meta_path = _read_worker_events(proc, em, times, on_frame)
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        raise
+    proc.wait()
+    times["exit"] = time.perf_counter()
+    th.join(timeout=5)
+    if proc.returncode != 0 or not meta_path:
+        raise RuntimeError("O render 3D falhou.\n" + "".join(err_tail[-40:]))
+    meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
+    return (meta, times) if with_times else meta
+
+
+def _read_worker_events(proc, em: ProgressEmitter, times: dict, on_frame) -> str | None:
+    """Lê os eventos JSON do worker até ele fechar a saída; devolve o caminho do ``frames.json``."""
+    meta_path = None
     for line in proc.stdout:
         line = line.strip()
         if not line.startswith("{"):
@@ -664,7 +588,10 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
         except json.JSONDecodeError:
             continue
         kind = ev.get("event")
-        if kind == "worker_ready":
+        if kind == "frame_ready":
+            if on_frame is not None and isinstance(ev.get("entry"), dict):
+                on_frame(ev["entry"])
+        elif kind == "worker_ready":
             times["ready"] = time.perf_counter()
             den = ev.get("denoiser_dispositivo")
             em.log(f"Blender {ev.get('blender', '?')}: render em {ev.get('dispositivo')}"
@@ -681,10 +608,4 @@ def _run_render_worker(spec_path: Path, em: ProgressEmitter, with_times: bool = 
             em.log(ev.get("message", ""), ev.get("level", "info"))
         elif kind == "render_done":
             meta_path = ev["meta"]
-    proc.wait()
-    times["exit"] = time.perf_counter()
-    th.join(timeout=5)
-    if proc.returncode != 0 or not meta_path:
-        raise RuntimeError("O render 3D falhou.\n" + "".join(err_tail[-40:]))
-    meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
-    return (meta, times) if with_times else meta
+    return meta_path
