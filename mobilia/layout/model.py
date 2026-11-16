@@ -29,6 +29,12 @@ class PlacedItem:
     parent: str | None = None     # id do item de suporte (ex.: vaso sobre a mesa de centro)
     order: int = 0                # ordem na coreografia de montagem (0 = primeiro)
     params: dict = field(default_factory=dict)  # parâmetros de assets procedurais (cores, padrão...)
+    # entrada na animação (PT11, ``layout/entrances.py``): drop | emerge | glide | grow | slide | unroll;
+    # "" = padrão do papel. No deslize: direção do movimento no piso (unitária, referencial da sala)
+    # e distância percorrida até o repouso (m)
+    motion: str = ""
+    motion_dir: list[float] | None = None
+    motion_dist: float = 0.0
 
     @property
     def front(self) -> tuple[float, float]:

@@ -742,8 +742,16 @@ def calibrate(sc, spec: dict, room_objs: list, lights: dict, out_dir: Path) -> d
 # ============================================================================ itens
 
 
+# Corte no plano do piso (PT11a, surgir do chão): enquanto o mix de fade está ligado, todo ponto da
+# superfície abaixo de FLOOR_CLIP_Z (posição no mundo) vira transparente. Nada de móvel é
+# desenhado abaixo do piso nem projeta sombra de lá, mesmo onde o catcher do piso (que já esconde
+# o que está atrás dele) não cobre; o corte é exato no plano, sem faixa de dissolução.
+FLOOR_CLIP_Z = -0.0002
+
+
 def _wrap_fade(mat) -> None:
-    """Insere Mix(Transparente, original) controlado pela propriedade do objeto."""
+    """Insere Mix(Transparente, original) controlado pela propriedade do objeto e pelo corte do piso:
+    Fac = fade × (z_mundo > FLOOR_CLIP_Z)."""
     if mat is None or not mat.use_nodes or mat.get("mobilia_fade_wrapped"):
         return
     nt = mat.node_tree
@@ -758,9 +766,20 @@ def _wrap_fade(mat) -> None:
     attr = nt.nodes.new("ShaderNodeAttribute")
     attr.attribute_type = "OBJECT"
     attr.attribute_name = FADE_PROP
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    above = nt.nodes.new("ShaderNodeMath")
+    above.operation = "GREATER_THAN"
+    above.inputs[1].default_value = FLOOR_CLIP_Z
+    fac = nt.nodes.new("ShaderNodeMath")
+    fac.operation = "MULTIPLY"
+    nt.links.new(geo.outputs["Position"], sep.inputs[0])
+    nt.links.new(sep.outputs["Z"], above.inputs[0])
+    nt.links.new(attr.outputs["Fac"], fac.inputs[0])
+    nt.links.new(above.outputs["Value"], fac.inputs[1])
     tr = nt.nodes.new("ShaderNodeBsdfTransparent")
     mix = nt.nodes.new("ShaderNodeMixShader")
-    nt.links.new(attr.outputs["Fac"], mix.inputs["Fac"])
+    nt.links.new(fac.outputs["Value"], mix.inputs["Fac"])
     nt.links.new(tr.outputs["BSDF"], mix.inputs[1])
     nt.links.new(src, mix.inputs[2])
     nt.links.new(mix.outputs["Shader"], surf)
@@ -798,9 +817,15 @@ def fade_materials(items_rt: list[dict]) -> dict:
     return mats
 
 
+def needs_fade_mix(p: "ch.Pose") -> bool:
+    """Pose que precisa do mix: em fade-in, ou com a peça abaixo do repouso (pode cruzar o piso)."""
+    return p.fade < 1.0 or p.dz < 0.0
+
+
 def update_fade_shaders(mats: dict, f: int, fps: int) -> int:
-    """O mix transparente fica ligado só enquanto alguma peça do material está em fade-in em
-    torno do quadro f (f−1..f+1); depois o material volta ao original. Devolve quantos mudaram."""
+    """O mix transparente fica ligado só enquanto alguma peça do material está em fade-in ou abaixo
+    da pose final (surgindo do chão: o corte do piso) em torno do quadro f (f−1..f+1); depois o
+    material volta ao original. Devolve quantos mudaram."""
     changed = 0
     for m, users in mats.items():
         on = False
@@ -808,7 +833,7 @@ def update_fade_shaders(mats: dict, f: int, fps: int) -> int:
             plan = rt["plans"][part.name]
             for df in (-1, 0, 1):
                 p = plan.pose((f - 1 + df) / fps)
-                if p.visible and p.fade < 1.0:
+                if p.visible and needs_fade_mix(p):
                     on = True
                     break
             if on:
@@ -954,6 +979,13 @@ def place_root(root, item: dict) -> None:
 
 
 # ============================================================================ animação
+
+
+def part_tops(parts: list) -> dict:
+    """Topo (z no mundo, m) de cada peça na pose final: no surgir do chão cada peça começa inteira
+    abaixo do piso."""
+    bpy.context.view_layer.update()
+    return {o.name: float(_world_bbox([o])[1].z) for o in parts}
 
 
 def bake_animation(sc, items_rt: list[dict], fps: int, n_frames: int) -> None:
@@ -1308,12 +1340,19 @@ def incremental_border(sc, cam, dyn: list, margin_m: float, sun_dir=None, vertic
         if part.data.shape_keys is not None:
             mx = mathutils.Vector((mx.x, mx.y, mx.z + 0.3))       # rolo do tapete
         s = float(rt["item"].get("scale", 1.0))
+        yaw = math.radians(float(rt["item"].get("yaw_deg", 0.0)))
+        cy, sy = math.cos(yaw), math.sin(yaw)
         for p in poses:
             grow = max(p.sx, p.sy, p.sz, 1.0)
             ctr = (mn + mx) / 2
             half = (mx - mn) / 2 * grow + mathutils.Vector((0.03, 0.03, 0.03))   # inclinações pequenas
-            off = mathutils.Vector((p.dx, p.dy, p.dz)) * s
-            pts += _bbox_points(ctr - half + off, ctr + half + off, margin_m, sun_dir, vertical)
+            # dx/dy da pose estão no referencial do item (girado de yaw); o bbox está no mundo
+            # (a escala do item não entra: ``_key_pose`` divide por ela e a raiz multiplica de volta)
+            off = mathutils.Vector((cy * p.dx - sy * p.dy, sy * p.dx + cy * p.dy, p.dz))
+            lo, hi = ctr - half + off, ctr + half + off
+            # nada abaixo do piso é desenhado (surgir do chão): a região para no plano z = 0
+            lo.z, hi.z = max(lo.z, 0.0), max(hi.z, 0.0)
+            pts += _bbox_points(lo, hi, margin_m, sun_dir, vertical)
     return _project_border(sc, cam, pts)
 
 
@@ -1881,7 +1920,8 @@ def main(spec_path: str) -> None:
             tags = {p.name: (int(p.get("assembly_order", 1)), str(p.get("assembly_motion", "")))
                     for p in parts}
         place_root(root, item)
-        plans = {p.name: p for p in ch.plan_parts(item, [o.name for o in parts], tags)}
+        tops = part_tops(parts) if ch.item_motion(item) == "emerge" else None
+        plans = {p.name: p for p in ch.plan_parts(item, [o.name for o in parts], tags, tops)}
         rt = {"item": item, "root": root, "parts": parts, "plans": plans}
         if item.get("motion") == "unroll" and src["type"] == "procedural":
             try:

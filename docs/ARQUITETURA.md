@@ -343,11 +343,35 @@ o vídeo mostra exatamente essas funções.
   a pose vira **exatamente** a de repouso. Os quadros dessa cauda são iguais ao final e reaproveitados;
   o fim nominal (início + 2,2 × duração) e o início do *hold* não mudam. Na sala de teste a 1920 px:
   200 quadros renderizados a 30 fps antes, 153 a 24 fps agora.
-- Movimentos:
-  - **queda** com aceleração e toque com squash sutil (≤ 2%), acomodação por mola amortecida;
+- Movimentos (entrada por papel, `choreography.entrance_for`; o layout grava `motion`,
+  `motion_dir` e `motion_dist` de cada item no `layout.json`, PT11):
+  - **queda** com aceleração e toque com squash sutil (≤ 2%), acomodação por mola amortecida:
+    sofá, cama, mesas, rack;
+  - **surgir do chão** (`emerge`): estante, cômoda e luminária de piso sobem de baixo do piso
+    (ease-out-cubic, ultrapassagem de poucos milímetros para cima, assentamento), já opacas. O corte
+    é limpo no plano do piso, sem dissolução: o mix de fade de cada material também multiplica o
+    fator por `z_mundo > −0,2 mm` (nó Geometry → Position), ligado enquanto a pose está abaixo do
+    repouso (`needs_fade_mix`); o catcher do piso, que já esconde o que está atrás dele, é a segunda
+    garantia (os dois validados num render real, `tests/test_floor_clip.py`). A luminária monta
+    base → haste que cresce de dentro da base → cúpula que desce; malhas com portas/gavetas sobem
+    rígidas. A sombra de contato (PT10) pesa um ponto abaixo do piso pela profundidade, então não
+    aparece antes da peça;
+  - **deslizar pela lateral** (`glide`): poltronas, cadeiras, mesas laterais, criados-mudos, pufes
+    e banquetas entram de 0,5–1,0 m pela borda mais próxima da imagem (eixo horizontal da câmera no
+    piso, depois o eixo lateral da peça), flutuando 1,5 cm, ease-out-cubic, pouso suave com um
+    avanço de milímetros por inércia; fade nos primeiros 30%. Cadeiras de mesa tentam antes entrar
+    "empurradas" para a mesa (0,45 m ao longo da frente). O caminho varrido é validado no layout
+    (`layout/entrances.py`): base só em FREE/UNKNOWN, sem cruzar paredes-proxy (com as extensões
+    das quinas) nem invadir móveis de piso que entram antes; sem caminho livre, a peça cai. Corpo,
+    portas e gavetas andam rígidos; almofadas e afins assentam depois do pouso;
   - **crescimento** das plantas (ease-out-back + balanço);
-  - **deslizar** dos quadros rente à parede;
+  - **deslizar** dos quadros rente à parede (descem até o prego);
   - **desenrolar** do tapete.
+  Nenhuma entrada alonga a linha do tempo (mesmas durações por papel e mesmo fim nominal).
+  Validação em CPU (sala de teste, layout PT9, 320 px, 4 amostras, camadas + motion blur, 104 s):
+  a mesa lateral desliza rente à parede esquerda a partir da borda da imagem, a luminária surge
+  (base, haste, cúpula), a poltrona (sem caminho livre: parede e sofá) cai; os 251 quadros ficam
+  idênticos à foto fora da máscara (`docs/poc/v2/pt11_entradas_320.jpg`).
 - Fade-in: a camada 3D só fica opaca nos primeiros instantes da queda. É feito por material
   (Transparent mix por objeto), então a sombra acompanha a opacidade.
 - Montagem peça a peça: base do sofá e depois o assento; vaso da planta, terra, caule e folhas;
@@ -526,7 +550,7 @@ A melhoria sugerida por essa pesquisa — material de catcher com `Light Path �
 <trabalho>/
   plate.png               placa imutável (referência bit a bit)
   analise/                geometry.npz, segmentation.npz, room.json, grid.npy, analise_overlay.jpg
-  layout.json             itens, posições, ordem de montagem
+  layout.json             itens, posições, ordem e entrada de montagem (motion, motion_dir, motion_dist)
   scene.json              especificação completa para o Blender
   calib_mask.png          máscara da calibração de luz (255 = ajuste, 128 = limite inferior, 0 = fora)
   calib_sun_mask.png      manchas de sol da foto (ajuste do sol e aberturas de sol das janelas)

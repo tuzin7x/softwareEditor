@@ -695,8 +695,9 @@ def test_contact_shadow_fades_with_height():
 
 
 def test_contact_shadow_follows_part_motion():
-    """A silhueta segue a matriz da peça (deslize lateral): a sombra anda junto, e abaixo do piso
-    (surgir do chão) conta como encostada."""
+    """A silhueta segue a matriz da peça (deslize lateral): a sombra anda junto. Abaixo do piso
+    (surgir do chão, PT11) pesa pela profundidade: igual à mesma altura acima do piso, então a
+    sombra só aparece quando a peça chega perto do repouso."""
     from mobilia.composite import contact as ct
 
     meta = _contact_meta(footprint=(0.3, 0.3), center=(0.0, 2.6), cell=0.015)
@@ -710,7 +711,12 @@ def test_contact_shadow_follows_part_motion():
     u1 = (c1.sum(0) * np.arange(_CW)).sum() / c1.sum()
     assert u1 > u0 + 10
     below = model.occlusion(_pose(-0.2), box)
-    assert np.allclose(below, c0)
+    above = model.occlusion(_pose(0.2), box)
+    assert np.allclose(below, above)
+    assert below.max() < 0.5 * c0.max()
+    deep = model.occlusion(_pose(-1.2), box)
+    assert deep.max() < 0.02 * c0.max()
+    assert np.abs(model.occlusion(_pose(-1e-4), box) - c0).max() < 0.02 * c0.max()
 
 
 def test_contact_occlusion_restricted_equals_dense():

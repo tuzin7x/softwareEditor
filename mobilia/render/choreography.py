@@ -4,6 +4,12 @@ Um único estilo, refinado: a câmera fica travada e cada peça surge e se monta
 sequência — tapete primeiro, depois as peças grandes de trás para frente, depois
 luminárias e plantas, quadros e por fim os objetos pequenos sobre as superfícies.
 
+Entradas por papel (PT11): móveis pesados caem e assentam; estantes, cômodas e a luminária de
+piso surgem do chão (corte limpo no plano do piso, nada aparece abaixo dele); poltronas,
+cadeiras, mesas laterais e pufes deslizam pela lateral num caminho validado pelo layout
+(``layout/entrances.py``; sem caminho livre, caem); tapete desenrola; plantas crescem; quadros
+descem rente à parede; decoração pequena cai ou assenta.
+
 Cada movimento é uma função ``pose(t)`` (t em segundos desde o início da peça)
 que devolve deslocamentos relativos à pose final. O worker do Blender amostra
 essas funções em todos os quadros (keyframes lineares por quadro), então o que
@@ -165,8 +171,55 @@ def motion_settle(t: float, dur: float, height: float = 0.06) -> Pose:
     return Pose(sx=1 + sq * 0.4, sy=1 + sq * 0.4, sz=1 - sq, fade=1.0)
 
 
+# Surgir do chão (PT11a): sobe de −``depth`` até o repouso com ease-out-cubic, ultrapassa um pouco
+# e assenta (o ease-out-quint do plano fazia uma estante de 1,5 m saltar 60% da altura em 2
+# quadros: a peça nasce na velocidade máxima, logo no corte do piso). A peça já nasce opaca (fade 1): o que está abaixo do piso é cortado limpo no plano
+# z = 0 pelo render (recorte no shader + o próprio catcher do piso), nunca dissolvido.
+EMERGE_RISE = 0.65         # fração da duração até chegar ao repouso
+EMERGE_MARGIN = 0.01       # m: começa com o topo da peça este tanto abaixo do piso
+
+
+def motion_emerge(t: float, dur: float, depth: float = 0.5) -> Pose:
+    """Sobe do chão: dz de −depth a 0 (ease-out-cubic), leve ultrapassagem para cima e assentamento.
+
+    dz ≤ 0 durante a subida; a ultrapassagem só vai para cima (nunca afunda além do repouso)."""
+    if t < 0:
+        return HIDDEN
+    t_rise = dur * EMERGE_RISE
+    x = clamp01(t / t_rise)
+    dz = -depth * (1 - ease_out_cubic(x))
+    amp = min(0.012, 0.004 + 0.006 * depth)
+    over = amp * max(0.0, damped_spring(t - 0.85 * t_rise, 2.4, 0.55))
+    return Pose(dz=dz + over, fade=1.0)
+
+
+# Deslizar pela lateral (PT11b): aproximação de ``dist`` m ao longo de ``(ux, uy)`` (direção do
+# movimento, no referencial local do item), flutuando GLIDE_FLOAT m, com ease-out-cubic; pouso
+# suave e assentamento amortecido (um pequeno avanço por inércia e um quique de milímetros).
+# O fade termina nos primeiros 30% da duração. Sem giros: peças de vários objetos andam rígidas.
+GLIDE_SLIDE = 0.6          # fração da duração até chegar ao lugar
+GLIDE_FLOAT = 0.015        # m acima do piso durante o deslize
+GLIDE_FADE = 0.3           # fração da duração em que o fade termina
+
+
+def motion_glide(t: float, dur: float, ux: float = 1.0, uy: float = 0.0, dist: float = 0.8,
+                 float_h: float = GLIDE_FLOAT) -> Pose:
+    """Entra deslizando: começa ``dist`` m antes do repouso (contra a direção ``(ux, uy)``)."""
+    if t < 0:
+        return HIDDEN
+    t_slide = dur * GLIDE_SLIDE
+    x = clamp01(t / t_slide)
+    back = dist * (1 - ease_out_cubic(x))
+    # inércia: avança uns milímetros além do lugar e volta (mola amortecida a partir do pouso)
+    surge = min(0.01, 0.008 * dist) * damped_spring(t - 0.8 * t_slide, 2.2, 0.6)
+    s = surge - back
+    dz = float_h * (1 - smoothstep(0.55, 1.0, x)) + 0.002 * max(0.0, damped_spring(t - t_slide, 2.6, 0.6))
+    return Pose(dx=ux * s, dy=uy * s, dz=dz, fade=smoothstep(0.0, dur * GLIDE_FADE, t))
+
+
 MOTIONS = {"drop": motion_drop, "slide": motion_slide_down, "grow": motion_grow, "rise": motion_rise,
-           "spread": motion_spread, "unfold": motion_unfold, "settle": motion_settle}
+           "spread": motion_spread, "unfold": motion_unfold, "settle": motion_settle,
+           "emerge": motion_emerge, "glide": motion_glide}
 
 
 # ------------------------------------------------------------------ linha do tempo
@@ -226,6 +279,11 @@ class PartPlan:
             return fn(t, self.duration, self.params.get("depth", 0.06))
         if self.motion == "settle":
             return fn(t, self.duration, self.params.get("settle_height", 0.06))
+        if self.motion == "emerge":
+            return fn(t, self.duration, self.params.get("emerge_depth", 0.5))
+        if self.motion == "glide":
+            return fn(t, self.duration, self.params.get("ux", 1.0), self.params.get("uy", 0.0),
+                      self.params.get("glide_dist", 0.8), self.params.get("float", GLIDE_FLOAT))
         return fn(t, self.duration)
 
     @property
@@ -271,14 +329,54 @@ class PartPlan:
 ROLE_TIMING = {
     "rug": (1.5, "unroll"), "sofa": (1.15, "drop"), "bed": (1.2, "drop"), "armchair": (1.0, "drop"),
     "coffee_table": (0.95, "drop"), "dining_table": (1.0, "drop"), "desk": (1.0, "drop"),
-    "tv_console": (1.0, "drop"), "dresser": (1.0, "drop"), "shelf": (1.0, "drop"),
+    "tv_console": (1.0, "drop"), "dresser": (1.0, "emerge"), "shelf": (1.0, "emerge"),
     "side_table": (0.85, "drop"), "nightstand": (0.85, "drop"), "ottoman": (0.85, "drop"),
-    "dining_chair": (0.8, "drop"), "bar_stool": (0.8, "drop"), "floor_lamp": (0.9, "drop"),
+    "dining_chair": (0.8, "drop"), "bar_stool": (0.8, "drop"), "floor_lamp": (0.9, "emerge"),
     "table_lamp": (0.7, "drop"), "plant_large": (1.1, "grow"), "plant_medium": (1.0, "grow"),
     "plant_small": (0.8, "grow"), "wall_art": (0.9, "slide"), "wall_mirror": (0.9, "slide"),
     "curtain": (1.0, "slide"), "pillows": (0.7, "drop"), "throw": (0.7, "drop"), "vase": (0.6, "drop"),
     "bowl": (0.6, "drop"), "books": (0.7, "drop"), "basket": (0.65, "drop"), "kitchen_decor": (0.6, "drop"),
 }
+
+
+# Deslizam pela lateral quando o layout valida um caminho livre (``layout/entrances.py`` grava
+# ``motion = "glide"`` e a direção no item); sem isso, caem como no ROLE_TIMING.
+GLIDE_ROLES = ("armchair", "side_table", "ottoman", "nightstand", "dining_chair", "bar_stool", "desk_chair")
+# cadeiras de mesa entram "empurradas" para a mesa (ao longo da frente) antes de tentar a lateral
+PUSH_IN_ROLES = ("dining_chair", "desk_chair")
+GLIDE_DISTS = (1.0, 0.85, 0.7, 0.5)       # m: do mais longo ao mais curto, o primeiro livre vale
+PUSH_IN_DIST = 0.45
+
+
+def entrance_for(role: str, mount: str = "floor") -> str:
+    """Entrada pretendida do papel (antes da validação do caminho do deslize)."""
+    if mount == "on_top":
+        return "drop"
+    if role in GLIDE_ROLES and mount == "floor":
+        return "glide"
+    return ROLE_TIMING.get(role, (0.9, "drop"))[1]
+
+
+def item_motion(item: dict) -> str:
+    """Movimento efetivo do item: o gravado no layout (``motion``) ou o padrão do papel. O deslize
+    sem direção validada (``motion_dir``) volta a ser queda; o surgir do chão só vale no piso."""
+    m = item.get("motion") or ROLE_TIMING.get(item.get("role", ""), (0.9, "drop"))[1]
+    if m == "glide" and not item.get("motion_dir"):
+        return "drop"
+    if m == "emerge" and item.get("mount", "floor") != "floor":
+        return "drop"
+    return m
+
+
+def glide_local(item: dict) -> tuple[float, float, float]:
+    """(ux, uy, dist) do deslize no referencial local do item (o worker aplica dx/dy no espaço do
+    objeto-raiz, girado de ``yaw_deg``); ``motion_dir`` está no referencial da sala."""
+    d = item.get("motion_dir") or (1.0, 0.0)
+    n = math.hypot(float(d[0]), float(d[1])) or 1.0
+    dx, dy = float(d[0]) / n, float(d[1]) / n
+    a = math.radians(float(item.get("yaw_deg", 0.0)))
+    c, s_ = math.cos(a), math.sin(a)
+    return c * dx + s_ * dy, -s_ * dx + c * dy, float(item.get("motion_dist", GLIDE_DISTS[-1]))
 
 
 # Decoração sobre tampo/assento: cai de pouco (12 cm) e depressa. Uma pilha ou um conjunto de
@@ -317,7 +415,7 @@ def item_motion_window(item: dict) -> float:
     principal (mais as levas, para livros). Aproximação por item, sem conhecer as peças do
     modelo; o desenrolar do tapete dura exatamente ``duration``."""
     dur, role = float(item["duration"]), item["role"]
-    motion = item.get("motion", "drop")
+    motion = item_motion(dict(item, motion=item.get("motion") or "drop"))
     if motion == "unroll":
         return dur
     size_z = (item.get("size") or [0, 0, 1])[2] or 1.0
@@ -327,6 +425,11 @@ def item_motion_window(item: dict) -> float:
     if quick:
         params["fall"] = ON_TOP_FALL
     m = "spread" if motion == "spread" else motion if motion in MOTIONS else "drop"
+    if m == "emerge":
+        params["emerge_depth"] = size_z + EMERGE_MARGIN
+    elif m == "glide":
+        ux, uy, dist = glide_local(item)
+        params.update(ux=ux, uy=uy, glide_dist=dist)
     plan = PartPlan("_item", m, 0.0, dur, params, item.get("px_per_m"), item_extent(item))
     extra = (ON_TOP_WAVES - 1) * ON_TOP_STEP if role == "books" else 0.0
     return plan.settle_time + extra
@@ -346,8 +449,8 @@ def schedule_items(items: list[dict], hold_start: float = 0.8, gap_factor: float
     out = []
     windows: list[tuple[float, float]] = []          # (início, fim do movimento visível)
     for it in sorted(items, key=lambda i: i["order"]):
-        dur, motion = ROLE_TIMING.get(it["role"], (0.9, "drop"))
-        it = dict(it, duration=dur, motion=it.get("motion", motion))
+        dur, _ = ROLE_TIMING.get(it["role"], (0.9, "drop"))
+        it = dict(it, duration=dur, motion=item_motion(it))
         if max_movers:
             while True:
                 active = sorted(e for s0, e in windows if s0 <= t + 1e-9 and t + 1e-9 < e)
@@ -394,15 +497,20 @@ def part_rank(name: str) -> int:
     return 1
 
 
-def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None) -> list[PartPlan]:
+def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None,
+               part_tops: dict | None = None) -> list[PartPlan]:
     """Planeja a montagem peça a peça de um item já agendado.
 
     ``part_tags`` (opcional) vem dos assets procedurais: {nome: (assembly_order, assembly_motion)}.
     Decoração "on_top" (e qualquer conjunto de livros) cai de ``ON_TOP_DROP`` em ``ON_TOP_FALL`` s,
     em no máximo ``ON_TOP_WAVES`` levas separadas por ``ON_TOP_STEP`` s.
+    ``part_tops`` (opcional, m acima do piso na pose final): topo de cada peça, para que no surgir do
+    chão cada uma comece inteira abaixo do piso; sem ele vale a altura do item.
     """
     start, dur, role = item["start"], item["duration"], item["role"]
-    motion = item.get("motion", "drop")
+    motion = item_motion(dict(item, motion=item.get("motion") or "drop"))
+    if motion in ("emerge", "glide"):
+        return _plan_entrance(item, motion, part_names, part_tags, part_tops)
     size_z = item.get("size", [0, 0, 1])[2] or 1.0
     on_top = item.get("mount", "floor") == "on_top"
     h = drop_height(role, size_z, item.get("mount", "floor"))
@@ -456,6 +564,76 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
         if quick:
             params["fall"] = ON_TOP_FALL
         plans.append(PartPlan(n, m, round(s, 4), d, params, ppm, ext))
+    return plans
+
+
+# Peças de rank ≥ RIGID_RANK (hastes, folhas, almofadas, livros, flores) não fazem parte do
+# corpo rígido que surge ou desliza: entram depois, com o movimento de sempre, sobre ele já pousado.
+RIGID_RANK = 3
+
+
+def _plan_entrance(item: dict, motion: str, part_names: list[str], part_tags: dict | None,
+                   part_tops: dict | None) -> list[PartPlan]:
+    """Surgir do chão / deslizar (PT11), mantendo a montagem peça a peça.
+
+    Deslizar: o corpo (todas as peças estruturais, inclusive portas e gavetas) anda RÍGIDO, com o
+    mesmo deslocamento e o mesmo tempo; peças macias/decorativas assentam depois do pouso.
+    Surgir: sem etiquetas, o corpo sobe rígido (profundidade = topo do item). Com as etiquetas do
+    asset procedural (luminária de piso), a montagem vira base → haste que cresce → cúpula que desce:
+    a ordem 0 surge, peças "rise" surgem de dentro da base (crescem) e as de ordem maior descem."""
+    start, dur, role = float(item["start"]), float(item["duration"]), item["role"]
+    size_z = float((item.get("size") or [0, 0, 1])[2] or 1.0)
+    ppm, ext = item.get("px_per_m"), item_extent(item)
+    tops = part_tops or {}
+    step = min(0.32, dur * 0.42)
+
+    def top(names) -> float:
+        vals = [float(tops[n]) for n in names if n in tops]
+        return (max(vals) if vals else size_z) + EMERGE_MARGIN
+
+    if part_tags:
+        ranks = {n: int(part_tags.get(n, (1, ""))[0]) for n in part_names}
+    else:
+        ranks = {n: part_rank(n) for n in part_names}
+    plans: list[PartPlan] = []
+    if motion == "glide":
+        ux, uy, dist = glide_local(item)
+        body = [n for n in part_names if ranks[n] < RIGID_RANK or part_tags] or list(part_names)
+        params = {"ux": ux, "uy": uy, "glide_dist": dist, "size": size_z}
+        for n in part_names:
+            if n in body:
+                plans.append(PartPlan(n, "glide", start, dur, dict(params), ppm, ext))
+            else:
+                # sobre o corpo já pousado: assenta de pouca altura
+                plans.append(PartPlan(n, "settle", round(start + dur * GLIDE_SLIDE, 4), dur * 0.8,
+                                      {"settle_height": 0.06, "size": size_z}, ppm, ext))
+        return plans
+    if part_tags and any(part_tags.get(n, (0, ""))[1] in MOTIONS for n in part_names):
+        distinct = sorted(set(ranks.values()))
+        base = [n for n in part_names if ranks[n] == distinct[0]]
+        d0 = top(base)
+        for n in sorted(part_names, key=lambda k: (ranks[k], k)):
+            level = distinct.index(ranks[n])
+            tag = part_tags.get(n, (0, ""))[1]
+            s = round(start + level * step, 4)
+            if level == 0:
+                plans.append(PartPlan(n, "emerge", s, dur, {"emerge_depth": d0, "size": size_z}, ppm, ext))
+            elif tag in ("rise", "emerge", "grow"):
+                # cresce de dentro da base: sobe do piso por dentro dela
+                plans.append(PartPlan(n, "emerge", s, dur * 0.8, {"emerge_depth": top([n]), "size": size_z},
+                                      ppm, ext))
+            else:
+                # desce suave até o lugar (cúpula da luminária)
+                plans.append(PartPlan(n, "slide", s, dur * 0.8, {"dist": 0.22, "size": size_z}, ppm, ext))
+        return plans
+    body = [n for n in part_names if ranks[n] < RIGID_RANK] or list(part_names)
+    d0 = top(body)
+    for n in part_names:
+        if n in body:
+            plans.append(PartPlan(n, "emerge", start, dur, {"emerge_depth": d0, "size": size_z}, ppm, ext))
+        else:
+            plans.append(PartPlan(n, "settle", round(start + dur * EMERGE_RISE, 4), dur * 0.8,
+                                  {"settle_height": 0.06, "size": size_z}, ppm, ext))
     return plans
 
 

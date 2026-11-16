@@ -23,6 +23,7 @@ from ..analysis.room import BLOCKED, RoomModel
 from . import catalog, geom
 from .catalog import AssetSpec
 from .context import LayoutContext
+from .entrances import plan_entrances
 from .model import Layout
 from .planners import (PLANNERS, BancadaPlanner, CozinhaMesaPlanner, GroupCand, GroupPlanner)
 from .rules import (ART_ABOVE_GAP, ART_CENTER_Z, ON_TOP_ROLES, SIDE_GAP, WALL_GAP, WALL_ROLES,
@@ -620,6 +621,14 @@ class Solver:
                 ordered.insert(pos[p.parent] + 1, p)
                 pos = {q.key: i for i, q in enumerate(ordered)}
         placed = [p.to_item(i) for i, p in enumerate(ordered)]
+        # entrada de cada peça na animação (PT11): o deslize só com caminho varrido livre
+        entr = plan_entrances(ordered, ctx)
+        for it in placed:
+            e = entr.get(it.id, {})
+            it.motion = str(e.get("motion", ""))
+            if it.motion == "glide":
+                it.motion_dir = list(e["motion_dir"])
+                it.motion_dist = float(e["motion_dist"])
         sc = self.score(items)
         layout = Layout(room_type=self.room_type, style=self.profile.style, palette=self.profile.palette,
                         items=placed, score=round(sc.total, 3), notes=[])

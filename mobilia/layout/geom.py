@@ -255,3 +255,43 @@ def ensure_ccw(poly: np.ndarray) -> np.ndarray:
     x, y = poly[:, 0], poly[:, 1]
     signed = 0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
     return poly if signed >= 0 else poly[::-1].copy()
+
+
+def wall_extensions(walls: list[dict], ext: float = 0.35, step: float = 0.01,
+                    tol: float = 0.01) -> list[list[float]]:
+    """Quanto cada parede-proxy pode ser estendida além de cada ponta (fecha as quinas).
+
+    A extensão só pode passar POR TRÁS das outras paredes. Se avançasse para o lado de dentro
+    da sala diante de outra parede visível (quinas que não são de 90°), o proxy taparia os
+    móveis encostados nela (ex.: um quadro cortado pela quina).
+    """
+    out = []
+    for w in walls:
+        p0, p1 = np.asarray(w["p0"], float), np.asarray(w["p1"], float)
+        L = float(np.linalg.norm(p1 - p0))
+        d = (p1 - p0) / max(L, 1e-9)
+        ends = []
+        for base, sign in ((p0, -1.0), (p1, 1.0)):
+            allowed = 0.0
+            s = step
+            while s <= ext + 1e-9:
+                q = base + sign * d * s
+                blocked = False
+                for o in walls:
+                    if o is w:
+                        continue
+                    a, b = np.asarray(o["p0"], float), np.asarray(o["p1"], float)
+                    Lo = float(np.linalg.norm(b - a))
+                    do = (b - a) / max(Lo, 1e-9)
+                    t = float(np.dot(q - a, do))
+                    in_front = float(np.dot(q - a, np.asarray(o["normal"], float))) > tol
+                    if in_front and -tol <= t <= Lo + tol:
+                        blocked = True
+                        break
+                if blocked:
+                    break
+                allowed = s
+                s += step
+            ends.append(round(allowed, 3))
+        out.append(ends)
+    return out

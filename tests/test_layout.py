@@ -416,3 +416,92 @@ def test_art_sizes_follow_design_rules():
     small = Placement("t", "tv_console", "x", 0.6, 0.4, 0.6, 0.0, 3.0, 0.0, 0.0, "floor", None, None, {}, "")
     assert abs(S._art_sizes(small)[0][0][0] - 0.5) < 1e-6        # nunca menor que 50 cm
     assert S._art_sizes(None)                                    # parede livre: tamanhos padrão
+
+
+# ----------------------------------------------------------------------------- PT11: entradas
+def test_glide_fallback_when_blocked():
+    """Deslize pela lateral: com caminho livre, vem da borda mais próxima da imagem (1,0 m); com
+    um móvel anterior no caminho, tenta o outro lado; bloqueado dos dois lados (ou parede), cai.
+    Móveis que entram DEPOIS não bloqueiam (ainda não estão na cena)."""
+    from mobilia.layout import entrances as en
+    from mobilia.layout.state import Placement
+
+    room, grid, _ = get_room("ampla_frontal")
+    ctx = LayoutContext(room, grid)
+    r = en.camera_lateral(ctx)
+    chair = Placement("armchair_0", "armchair", "ph:ArmChair_01", 0.85, 0.77, 1.07, x=-0.9, y=3.2, yaw=180.0)
+    e = en.plan_entrances([chair], ctx)[chair.key]
+    assert e["motion"] == "glide" and e["lado"] == "esquerda" and e["motion_dist"] == 1.0   # x < 0: à esquerda
+    assert np.allclose(e["motion_dir"], r, atol=1e-3)                    # anda para a direita da imagem
+    # móvel anterior à esquerda: vem pela direita
+    left = Placement("sofa_0", "sofa", "ph:Sofa_01", 1.0, 0.8, 0.8, x=-1.95, y=3.2)
+    e = en.plan_entrances([left, chair], ctx)[chair.key]
+    assert e["motion"] == "glide" and e["lado"] == "direita"
+    assert np.allclose(e["motion_dir"], -r, atol=1e-3)
+    # dos dois lados: cai (e registra que o deslize foi bloqueado)
+    right = Placement("table_0", "side_table", "ph:side_table_01", 0.55, 0.45, 0.55, x=-0.15, y=3.2)
+    e = en.plan_entrances([left, right, chair], ctx)[chair.key]
+    assert e == {"motion": "drop", "bloqueado": "glide"}
+    # os mesmos móveis entrando depois não bloqueiam
+    assert en.plan_entrances([chair, left, right], ctx)[chair.key]["motion"] == "glide"
+    # o caminho escolhido é mesmo livre e o bloqueado não é
+    assert en.path_free(chair, r, 1.0, [], ctx)
+    assert not en.path_free(chair, r, 1.0, [left], ctx)
+    # parede: encostada na parede esquerda (x0 = −2,6) só pode vir pela direita
+    wall_chair = chair.moved(x=-2.15)
+    assert not en.path_free(wall_chair, r, 0.5, [], ctx)
+    e = en.plan_entrances([wall_chair], ctx)[chair.key]
+    assert e["motion"] == "glide" and e["lado"] == "direita"
+    # área bloqueada da grade (bancada): idem
+    room2, grid2, _ = get_room("cozinha_ilha")
+    ctx2 = LayoutContext(room2, grid2)
+    stool = Placement("bar_stool_0", "bar_stool", "ph:bar_chair_round_01", 0.48, 0.48, 0.75, x=-1.25, y=3.1)
+    r2 = en.camera_lateral(ctx2)
+    assert not en.path_free(stool, -r2, 1.0, [], ctx2)                   # a ilha (x −0,9..1,1) está no caminho
+    # papéis sem deslize nunca deslizam; estante surge, decoração cai
+    sofa = en.plan_entrances([left], ctx)[left.key]
+    assert sofa == {"motion": "drop"}
+    shelf = Placement("shelf_0", "shelf", "ph:wooden_display_shelves_01", 1.08, 0.37, 1.56, x=0.5, y=5.3)
+    assert en.plan_entrances([shelf], ctx)[shelf.key] == {"motion": "emerge"}
+
+
+@pytest.mark.parametrize("name,room_type", [("stafford", "sala"), ("ampla_frontal", "sala"),
+                                            ("ampla_frontal", "sala_jantar"), ("cozinha_ilha", "cozinha"),
+                                            ("pequena_direita", "escritorio")])
+def test_glide_paths_recorded_and_free(name, room_type):
+    """O movimento e a direção ficam no layout.json; todo deslize gravado tem caminho livre segundo
+    uma verificação independente (pontos da base varrida só em FREE/UNKNOWN, sem cruzar paredes,
+    sem sobrepor móveis de piso anteriores além do contato que já existe em repouso)."""
+    from shapely.geometry import LineString, Polygon
+
+    room, grid, _ = get_room(name)
+    lay = get_layout(name, room_type)
+    js = Layout.from_json(lay.to_json())
+    assert [(i.motion, i.motion_dir, i.motion_dist) for i in js.items] == \
+        [(i.motion, i.motion_dir, i.motion_dist) for i in lay.items]
+    assert all(i.motion for i in lay.items)
+    walls = [LineString([w.p0, w.p1]) for w in room.walls]
+    by_order = sorted(lay.items, key=lambda i: i.order)
+    n_glide = 0
+    for k, it in enumerate(by_order):
+        if it.motion != "glide":
+            assert it.motion_dir is None
+            continue
+        n_glide += 1
+        assert it.mount == "floor" and 0.45 <= it.motion_dist <= 1.0
+        d = np.asarray(it.motion_dir)
+        assert abs(np.linalg.norm(d) - 1) < 1e-3
+        prev = [Polygon(o.footprint()) for o in by_order[:k] if o.mount == "floor" and o.role != "rug"]
+        rest = Polygon(it.footprint())
+        rest_ov = [rest.intersection(q).area for q in prev]
+        for s in np.linspace(0.0, it.motion_dist, 26):
+            c = np.asarray(it.position[:2]) - d * s
+            pts = sample_obb(c[0], c[1], it.size[0], it.size[1], it.yaw_deg, step=0.025, shrink=0.012)
+            st = _states(room, grid, pts)
+            assert not np.any((st == BLOCKED) | (st == OUTSIDE)), (it.id, s)
+            fp = Polygon(sample_obb(c[0], c[1], it.size[0], it.size[1], it.yaw_deg, step=10.0, shrink=0.012)[[0, 1, 3, 2]])
+            assert not any(fp.crosses(w) for w in walls), (it.id, s)
+            for q, ov in zip(prev, rest_ov):
+                assert fp.intersection(q).area <= ov + 0.02 * 0.5, (it.id, s)
+    if (name, room_type) in (("ampla_frontal", "sala_jantar"), ("cozinha_ilha", "cozinha")):
+        assert n_glide >= 2

@@ -337,3 +337,115 @@ def test_layer_plan_transitions_fade_out_old_composition():
     for fr in frames:
         if fr.kind == "dinamico":
             assert any(fr.frame < plan.settle[k] for k in fr.layer)
+
+
+# ---------------------------------------------------------------- PT11: surgir do chão e deslizar
+def test_emerge_starts_below_floor_ends_at_rest():
+    """Surgir do chão: a peça começa inteira abaixo do piso, sobe sem nunca descer de novo (a
+    ultrapassagem é só para cima, de milímetros), já opaca (corte limpo no piso, sem dissolução),
+    e termina exatamente no repouso. A luminária de piso monta base → haste que cresce → cúpula
+    que desce; uma estante de malha com gavetas sobe rígida (mesmo plano em todas as peças)."""
+    top = 1.55
+    p = ch.PartPlan("shelf", "emerge", 0.5, 1.0, {"emerge_depth": top + ch.EMERGE_MARGIN},
+                    px_per_m=500.0, extent=(1.08, 0.37, top))
+    first = p.pose(0.5)
+    assert first.visible and first.fade == 1.0 and first.dz + top < 0     # topo ainda abaixo do piso
+    dzs = [p.pose(0.5 + k / 1000).dz for k in range(0, 2300)]
+    assert max(dzs) <= 0.012 + 1e-9 and max(dzs) > 0                    # ultrapassagem pequena, para cima
+    peak = dzs.index(max(dzs))
+    assert all(b >= a - 1e-12 for a, b in zip(dzs[:peak], dzs[1:peak + 1]))   # sobe sem recuar
+    assert p.pose(p.end + 0.01).key() == ch.REST.key() and p.settle_end <= p.end
+    # luminária: etiquetas do asset procedural, topos reais de cada peça
+    item = {"start": 2.0, "duration": 0.9, "role": "floor_lamp", "motion": "emerge", "mount": "floor",
+            "size": [0.42, 0.42, 1.62]}
+    tags = {"lamp.base": (0, "drop"), "lamp.pole": (1, "rise"), "lamp.shade": (2, "drop")}
+    tops = {"lamp.base": 0.05, "lamp.pole": 1.45, "lamp.shade": 1.62}
+    plans = {q.name: q for q in ch.plan_parts(item, list(tags), tags, tops)}
+    base, pole, shade = plans["lamp.base"], plans["lamp.pole"], plans["lamp.shade"]
+    assert base.motion == "emerge" and pole.motion == "emerge" and shade.motion == "slide"
+    assert base.start < pole.start < shade.start
+    assert base.pose(base.start).dz <= -0.05 and pole.pose(pole.start).dz <= -1.45   # inteiras sob o piso
+    assert shade.pose(shade.start + 0.05).dz > 0                         # a cúpula desce de cima
+    for q in plans.values():
+        assert q.pose(q.end + 0.01).key() == ch.REST.key()
+    # estante com gavetas (malha do Poly Haven): corpo rígido
+    shelf = {"start": 1.0, "duration": 1.0, "role": "shelf", "motion": "emerge", "mount": "floor",
+             "size": [1.077, 0.371, 1.556]}
+    names = ["shelves", "shelves_drawer_01", "shelves_drawer_02"]
+    sp = ch.plan_parts(shelf, names, None, {n: 1.556 for n in names})
+    assert {(q.motion, q.start, q.duration, q.params["emerge_depth"]) for q in sp} == {
+        ("emerge", 1.0, 1.0, 1.556 + ch.EMERGE_MARGIN)}
+    # o papel define a entrada: estante/cômoda/luminária de piso surgem; decoração nunca surge
+    assert ch.item_motion({"role": "shelf", "mount": "floor"}) == "emerge"
+    assert ch.item_motion({"role": "floor_lamp", "mount": "floor"}) == "emerge"
+    assert ch.item_motion({"role": "vase", "mount": "on_top", "motion": "emerge"}) == "drop"
+
+
+def _glide_world(item, plan, t):
+    """Deslocamento da peça no referencial da sala (o worker aplica dx/dy no espaço do item)."""
+    q = plan.pose(t)
+    a = math.radians(item.get("yaw_deg", 0.0))
+    return (math.cos(a) * q.dx - math.sin(a) * q.dy, math.sin(a) * q.dx + math.cos(a) * q.dy, q.dz, q)
+
+
+def test_glide_path_free():
+    """O deslize segue exatamente o segmento que o layout validou: começa ``motion_dist`` m antes do
+    repouso, contra ``motion_dir``, anda só ao longo dele (desvio lateral nulo, qualquer yaw), passa
+    no máximo ~1 cm do repouso (inércia), flutua 1–2 cm e termina no repouso; o fade acaba nos
+    primeiros 30%. Peças rígidas (corpo + gaveta) andam juntas; sem direção, volta a ser queda."""
+    for yaw in (0.0, 37.0, -120.0):
+        d = (math.cos(0.4), math.sin(0.4))
+        item = {"start": 1.0, "duration": 0.85, "role": "nightstand", "motion": "glide", "mount": "floor",
+                "size": [0.5, 0.5, 0.6], "yaw_deg": yaw, "motion_dir": list(d), "motion_dist": 0.85}
+        plans = ch.plan_parts(item, ["nightstand", "nightstand_drawer"])
+        assert len({(q.motion, q.start, q.duration, tuple(sorted(q.params.items()))) for q in plans}) == 1
+        plan = plans[0]
+        x0, y0, _, q0 = _glide_world(item, plan, 1.0)
+        assert math.isclose(x0, -0.85 * d[0], abs_tol=1e-9) and math.isclose(y0, -0.85 * d[1], abs_tol=1e-9)
+        assert q0.fade == 0.0
+        for k in range(0, 2000):
+            t = 1.0 + k / 1000
+            x, y, z, q = _glide_world(item, plan, t)
+            along = x * d[0] + y * d[1]
+            assert abs(-x * d[1] + y * d[0]) < 1e-9                       # só ao longo do caminho
+            assert -0.85 - 1e-9 <= along <= 0.01
+            assert -1e-9 <= z <= 0.02
+            if t - 1.0 >= 0.3 * 0.85:
+                assert q.fade == 1.0
+        assert plan.pose(plan.end + 0.01).key() == ch.REST.key()
+    # sem direção validada pelo layout: cai como antes
+    blocked = {"start": 0.0, "duration": 0.85, "role": "side_table", "motion": "glide", "mount": "floor",
+               "size": [0.55, 0.45, 0.55]}
+    assert ch.item_motion(blocked) == "drop"
+    assert {q.motion for q in ch.plan_parts(blocked, ["side_table"])} == {"drop"}
+    sched, _ = ch.schedule_items([dict(blocked, id="s", order=0)])
+    assert sched[0]["motion"] == "drop"
+
+
+def test_new_motions_keep_timeline():
+    """Com as entradas novas (poltrona e mesa lateral deslizam, luminária e estante surgem) a linha
+    do tempo da sala de teste é a mesma (mesmos inícios e mesmo fim), nenhum item espera pelo limite
+    de peças simultâneas e cada peça assenta dentro do seu fim nominal."""
+    for scale in (0.5, 1.0, 1.34):
+        items = _room_items(scale) + [{"id": "shelf_0", "role": "shelf", "size": [1.077, 0.371, 1.556],
+                                       "mount": "floor", "order": 6.5, "px_per_m": 420.0 * scale}]
+        base = [dict(it, motion="drop") if it["role"] in ("armchair", "side_table", "floor_lamp", "shelf")
+                else it for it in items]
+        new = []
+        for it in items:
+            if it["role"] in ("armchair", "side_table"):
+                it = dict(it, motion="glide", motion_dir=[0.94, 0.34], motion_dist=1.0, yaw_deg=20.0)
+            new.append(it)
+        s_old, end_old = ch.schedule_items(base)
+        s_new, end_new = ch.schedule_items(new)
+        assert math.isclose(end_new, end_old, abs_tol=1e-9)
+        assert math.isclose(end_new, _old_end(new), abs_tol=1e-9)
+        assert [i["start"] for i in s_new] == [i["start"] for i in s_old]
+        motions = {i["id"]: i["motion"] for i in s_new}
+        assert motions["armchair_0"] == "glide" and motions["floor_lamp_0"] == "emerge"
+        assert motions["shelf_0"] == "emerge"
+        for it in s_new:
+            assert ch.item_motion_window(it) <= it["duration"] * ch.SETTLE_FACTOR + 1e-9
+            for pl in ch.plan_parts(it, [it["id"]]):
+                assert pl.end == pl.start + pl.duration * ch.SETTLE_FACTOR
+                assert pl.settle_end <= pl.end + 1e-9

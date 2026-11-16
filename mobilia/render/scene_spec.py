@@ -14,6 +14,7 @@ from ..analysis.room import RoomModel
 from ..analysis.segmentation import SegmentationResult
 from ..assets.polyhaven import cached_texture, ensure_model, ensure_texture
 from ..layout import catalog
+from ..layout.geom import wall_extensions  # noqa: F401  (reexportado: worker e testes)
 from ..layout.model import Layout
 from ..photo import srgb_to_linear
 from . import choreography as ch
@@ -206,46 +207,6 @@ def sun_patch_mask(mask: np.ndarray | None, shape: tuple[int, int], out_path: Pa
         m = np.asarray(Image.fromarray(m.astype(np.uint8) * 255).resize((shape[1], shape[0]), Image.NEAREST)) > 127
     Image.fromarray(m.astype(np.uint8) * 255).save(out_path)
     return out_path
-
-
-def wall_extensions(walls: list[dict], ext: float = 0.35, step: float = 0.01,
-                    tol: float = 0.01) -> list[list[float]]:
-    """Quanto cada parede-proxy pode ser estendida além de cada ponta (fecha as quinas).
-
-    A extensão só pode passar POR TRÁS das outras paredes. Se avançasse para o lado de dentro
-    da sala diante de outra parede visível (quinas que não são de 90°), o proxy taparia os
-    móveis encostados nela (ex.: um quadro cortado pela quina).
-    """
-    out = []
-    for w in walls:
-        p0, p1 = np.asarray(w["p0"], float), np.asarray(w["p1"], float)
-        L = float(np.linalg.norm(p1 - p0))
-        d = (p1 - p0) / max(L, 1e-9)
-        ends = []
-        for base, sign in ((p0, -1.0), (p1, 1.0)):
-            allowed = 0.0
-            s = step
-            while s <= ext + 1e-9:
-                q = base + sign * d * s
-                blocked = False
-                for o in walls:
-                    if o is w:
-                        continue
-                    a, b = np.asarray(o["p0"], float), np.asarray(o["p1"], float)
-                    Lo = float(np.linalg.norm(b - a))
-                    do = (b - a) / max(Lo, 1e-9)
-                    t = float(np.dot(q - a, do))
-                    in_front = float(np.dot(q - a, np.asarray(o["normal"], float))) > tol
-                    if in_front and -tol <= t <= Lo + tol:
-                        blocked = True
-                        break
-                if blocked:
-                    break
-                allowed = s
-                s += step
-            ends.append(round(allowed, 3))
-        out.append(ends)
-    return out
 
 
 def item_px_per_m(position, size, yaw_deg: float, cam_from_room: np.ndarray, intr: dict,

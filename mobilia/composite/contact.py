@@ -11,7 +11,10 @@ vasos. Ela é somada aqui, sem segunda camada de render:
   Junto vão a câmera (intrínsecos + ``cam_to_room``) e o tamanho do quadro.
 - **Pose por quadro** (``entry["contato"]`` de cada quadro renderizado): ``[peça, fade, D(3×4)]``,
   com ``D = M_quadro · M_repouso⁻¹`` (matriz de mundo da peça). Os pontos da silhueta seguem a peça
-  em qualquer movimento (queda, giro, deslize, surgir do chão); abaixo do piso contam como no piso.
+  em qualquer movimento (queda, giro, deslize, surgir do chão). Abaixo do piso (surgindo do chão,
+  PT11) o ponto pesa pela profundidade ``|z|`` como se estivesse à mesma altura acima: a sombra de
+  contato só aparece quando a peça chega perto do repouso, nunca uma mancha da base inteira antes de
+  a peça aparecer.
 - **Campo de oclusão** ``c`` (0..1) no piso: cada ponto pesa ``fade · 1/(1 + (h/H0)²)`` e é
   desfocado por ``σ = σ0 + κ·h`` (faixas de altura): colado no piso, linha escura e nítida;
   subindo, mais fraca e mais larga. O campo é lido em cada pixel pela homografia piso→imagem.
@@ -141,7 +144,7 @@ class ContactModel:
             part = self.parts[k]
             D = np.asarray(rec[2:14], np.float64).reshape(3, 4)
             P = part.pts @ D.T
-            h = np.maximum(P[:, 2], 0.0)          # abaixo do piso (surgir do chão): no piso
+            h = np.abs(P[:, 2])                   # abaixo do piso (surgir do chão): pela profundidade
             a = fade * attenuation(h)
             keep = a > MIN_AMP
             xy.append(P[keep, :2])
