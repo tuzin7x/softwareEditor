@@ -246,8 +246,10 @@ def setup_camera(sc, spec: dict):
     cam_data.sensor_fit = "HORIZONTAL"
     cam_data.sensor_width = 36.0
     cam_data.lens = K["fx"] * cam_data.sensor_width / W
-    cam_data.shift_x = -(K["cx"] - W / 2.0) / max(W, H)
-    cam_data.shift_y = (K["cy"] - H / 2.0) / max(W, H)
+    # Com sensor_fit HORIZONTAL o Blender mede o deslocamento da lente em larguras da imagem (e não no
+    # lado maior): dividir por max(W, H) desalinharia o ponto principal em fotos em retrato.
+    cam_data.shift_x = -(K["cx"] - W / 2.0) / W
+    cam_data.shift_y = (K["cy"] - H / 2.0) / W
     cam_data.clip_start = 0.02
     cam_data.clip_end = 200.0
     M = np.asarray(spec["cam_to_room"], dtype=np.float64)
