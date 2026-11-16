@@ -132,9 +132,12 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     assert r["dispositivo"] == "CPU" and r["denoiser_dispositivo"] == "CPU" and r["optix"] is False
     assert set(r["amostras_camadas"]) == {"final", "marco", "dinamico"}
     q = r["quadros"]
-    assert q["total"] == q["renderizados"] + q["reutilizados"] + q["so_foto"] and q["reutilizados"] > 0
+    assert q["total"] == q["quadros_novos"] + q["reutilizados"] + q["so_foto"] and q["reutilizados"] > 0
     assert len(r["por_quadro"]) == q["renderizados"]
-    assert {p["camada"] for p in r["por_quadro"]} == {"dinamico", "final"}
+    # PT6: render em camadas (padrão): marcos (o final primeiro), camada dinâmica e transição
+    assert r["modo_camadas"] == "camadas" and len(r["plano_camadas"]["marcos"]) == 2
+    assert {p["camada"] for p in r["por_quadro"]} == {"dinamico", "final", "marco"}
+    assert r["por_quadro"][0]["camada"] == "final"
     for p in r["por_quadro"]:
         assert {"quadro", "camada", "area_px", "spp", "amostragem_s", "denoise_s", "gravacao_s",
                 "parede_s"} <= set(p)
@@ -148,7 +151,7 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     # PT5: composição em fluxo, durante o render; reaproveitados vêm do cache (não são recompostos)
     assert c["paralela"] is True and c["trabalhadores"] >= 1
     assert 0 < c["compostos_durante_render"] <= q["total"]
-    assert c["quadros_compostos"] == q["renderizados"] and c["quadros_cache"] == q["reutilizados"]
+    assert c["quadros_compostos"] == q["quadros_novos"] and c["quadros_cache"] == q["reutilizados"]
     assert c["quadros_so_foto"] == q["so_foto"]
     assert 0 < c["recorte_composicao_medio_px"] < 160 * 120
     assert sum(p["cache"] for p in c["por_quadro"]) == q["reutilizados"]
@@ -163,7 +166,7 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     pres = rep["preservacao"]
     assert pres["preservado_exato_todos"] is True
     assert pres["quadros_verificados"] == q["total"]
-    assert pres["verificacao"]["compostos"] == q["renderizados"] and pres["verificacao"]["raio_px"] > 0
+    assert pres["verificacao"]["compostos"] == q["quadros_novos"] and pres["verificacao"]["raio_px"] > 0
     assert set(rep["gpu"]["vram_pico_mb"]) >= {"analise", "render"}
     assert rep["foto"]["megapixels"] == pytest.approx(1920 * 1440 / 1e6, abs=1e-3)
     assert set(rep["calibracao_luz"]) >= {"rel_rms", "ganhos_canal", "fracao_mascara", "sol_ajustado"}
@@ -239,10 +242,32 @@ def test_fast_pipeline_worker_without_frame_events(tmp_path, monkeypatch):
                      quality="previa", work_dir=str(tmp_path / "job"))
     rep = json.loads(Path(pipeline.run_job(req, ProgressEmitter()).report_path).read_text(encoding="utf-8"))
     c, q = rep["composicao"], rep["render"]["quadros"]
-    assert c["compostos_durante_render"] == 0 and c["quadros_compostos"] == q["renderizados"]
+    assert c["compostos_durante_render"] == 0 and c["quadros_compostos"] == q["quadros_novos"]
     assert c["sombra_contato"]["aplicada"] is True          # do frames.json (sem eventos de quadro)
     assert rep["preservacao"]["preservado_exato_todos"] is True
     assert rep["preservacao"]["quadros_verificados"] == q["total"]
+
+
+def test_fast_pipeline_single_layer_fallback(tmp_path, monkeypatch):
+    """Chave de retorno do PT6: ``MOBILIA_CAMADAS=0`` grava ``render.camadas = false`` na cena e o
+    worker volta ao quadro único (um render por quadro novo, sem marcos), com a placa intacta."""
+    from mobilia import pipeline
+    from mobilia.jobs import JobRequest, ProgressEmitter
+
+    monkeypatch.setenv("MOBILIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(pipeline.ENV_BLENDER_WORKER, json.dumps([sys.executable, str(FAKE), "blender"]))
+    monkeypatch.setenv(pipeline.ENV_CAMADAS, "0")
+    _tiny_quality(monkeypatch, pipeline, long_edge=160, samples=8, fps=12)
+    _fake_analysis(monkeypatch, tmp_path)
+    req = JobRequest(str(FX / "photos/sala_vazia_stafford.jpg"), "sala", str(tmp_path / "v.mp4"),
+                     quality="previa", work_dir=str(tmp_path / "job"))
+    rep = json.loads(Path(pipeline.run_job(req, ProgressEmitter()).report_path).read_text(encoding="utf-8"))
+    spec = json.loads((tmp_path / "job" / "scene.json").read_text(encoding="utf-8"))
+    assert spec["render"]["camadas"] is False
+    r, q = rep["render"], rep["render"]["quadros"]
+    assert r["modo_camadas"] == "unica" and {p["camada"] for p in r["por_quadro"]} == {"dinamico", "final"}
+    assert q["renderizados"] == q["quadros_novos"] == rep["composicao"]["quadros_compostos"]
+    assert rep["preservacao"]["preservado_exato_todos"] is True
 
 
 def test_stream_failure_stops_the_job(tmp_path, monkeypatch):

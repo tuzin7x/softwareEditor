@@ -16,6 +16,12 @@ do Blender o anuncia (evento ``frame_ready``), enquanto a GPU ainda renderiza os
 - A sombra de contato (PT10, ``contact.py``) usa o modelo das silhuetas de baixo (evento ``contact``
   do worker ou ``frames.json["contact"]``, ``set_contact``) e as poses de cada quadro
   (``entry["contato"]``).
+- Render em camadas (PT6): um quadro com ``entry["base"]`` (o marco estático: ``source``, ``border``,
+  ``contato``) compõe a camada dinâmica sobre o marco já composto (``LayerAccumulator``); cada marco
+  é composto uma vez e guardado até o fim. Com ``entry["transicao"]`` (troca de marco), o quadro é a
+  mistura da composição nova com a antiga (``blend_frames``, peso ``peso`` da antiga). A
+  verificação usa a união das máscaras de influência de todas as camadas do quadro. Um EXR é
+  apagado quando nenhum quadro ainda por vir pode usá-lo (os marcos, no fim).
 - No fim, a verificação do MP4 decodifica só o início, o meio e o fim, por *seek*.
 
 O mesmo caminho serve ao ``recompor`` (todos os quadros entregues de uma vez, sem render).
@@ -35,7 +41,8 @@ import numpy as np
 from PIL import Image
 
 from ..video.encoder import EncodeSettings, VideoWriter, psnr, seek_frames
-from .compositor import CompositeSettings, Compositor, FrameStats, LayerAccumulator, load_layers, load_render_passes
+from .compositor import (CompositeSettings, Compositor, FrameStats, LayerAccumulator, StaticBase, blend_frames,
+                         load_layers, load_render_passes)
 from .contact import ContactModel
 from .grade import CGGrade
 from .verify import MARGIN_PX, TILE_PX, influence_mask, outside_mask_equal
@@ -56,6 +63,34 @@ def _key(entry: dict) -> tuple:
     b = entry.get("border")
     return (int(entry["frame"]), entry.get("source"), tuple(int(v) for v in b) if b else None,
             bool(entry.get("reused")))
+
+
+def entry_files(entry: dict) -> list[str]:
+    """EXR que a composição do quadro lê: o da camada, o do marco e os da transição."""
+    out = [entry["source"]]
+    b = entry.get("base")
+    if b:
+        out.append(b["source"])
+    t = entry.get("transicao")
+    if t:
+        out.append(t["source"])
+        if t.get("base"):
+            out.append(t["base"]["source"])
+    return list(dict.fromkeys(out))
+
+
+def _ckey(entry: dict):
+    """Chave da composição do quadro: o EXR (quadro único/marco) ou camada + marco + transição."""
+    b, t = entry.get("base"), entry.get("transicao")
+    if not b and not t:
+        return entry["source"]
+    return (entry["source"], b["source"] if b else None,
+            (t["source"], t["base"]["source"] if t.get("base") else None, float(t["peso"])) if t else None)
+
+
+def _is_milestone(entry: dict) -> bool:
+    """Quadro parado do render em camadas: o próprio marco (composto uma vez, base dos dinâmicos)."""
+    return entry.get("camada") in ("marco", "final") and not entry.get("base") and not entry.get("transicao")
 
 
 def _canon(obj) -> str:
@@ -132,8 +167,11 @@ class StreamComposer:
         self._cond = threading.Condition()
         self._items: deque[_Item] = deque()
         self._pushed: list[dict] = []
-        self._cache: dict[str, Future] = {}
-        self._last_ref: dict[str, int] = {}
+        self._cache: dict = {}                          # chave da composição -> Future
+        self._cache_files: dict = {}                    # chave -> EXR que ela lê
+        self._bases: dict[str, Future] = {}             # marco (EXR) -> Future da base composta
+        self._last_ref: dict[str, int] = {}             # EXR -> última posição que o usa
+        self._file_futs: dict[str, list[Future]] = {}   # EXR -> composições que o leem
         self._closed_src: set[str] = set()
         self._inflight = 0
         self._max_inflight = 3 * self.workers + 2       # quadros compostos à espera da escrita
@@ -196,20 +234,39 @@ class StreamComposer:
                 if self.sequential:
                     self._pool.submit(self._acc.reset)        # mesma ordem das tarefas (uma thread)
             else:
+                files = entry_files(entry)
                 if self.last_use is None:
-                    self._closed_src.update(s for s in self._cache if s != src)
-                fut = self._cache.get(src)
+                    # o worker só reaproveita o render do quadro anterior: um EXR que este quadro
+                    # não lê não volta mais (os marcos ficam até o fim)
+                    self._closed_src.update(s for s in self._last_ref if s not in files and s not in self._bases)
+                key = _ckey(entry)
+                fut = self._cache.get(key)
                 if fut is not None:
                     item = _Item(pos, entry, "cache", src, fut)
                 else:
                     while self._inflight >= self._max_inflight and self._error is None:
                         self._cond.wait()
                     self._raise_if_failed()
-                    fut = self._pool.submit(self._compose_source, entry, self._grade_fut, self._contact_fut)
-                    self._cache[src] = fut
+                    if _is_milestone(entry) and not self.sequential:
+                        fut = self._base_future(entry)
+                    else:
+                        base_fut = self._base_future(entry["base"]) if entry.get("base") else None
+                        tr = entry.get("transicao")
+                        old_fut = self._base_future(tr["base"]) if tr and tr.get("base") else None
+                        # transição para um marco: a composição nova é o próprio marco (já composto)
+                        self_fut = (self._base_future(entry) if tr and not entry.get("base")
+                                    and entry.get("camada") in ("marco", "final") else None)
+                        fut = self._pool.submit(self._compose_source, entry, self._grade_fut, self._contact_fut,
+                                                base_fut, old_fut, self_fut)
+                    self._cache[key] = fut
+                    self._cache_files[key] = files
                     self._inflight += 1
                     item = _Item(pos, entry, "novo", src, fut)
-                self._last_ref[src] = pos
+                for fl in files:
+                    self._last_ref[fl] = pos
+                    futs = self._file_futs.setdefault(fl, [])
+                    if not futs or futs[-1] is not fut:
+                        futs.append(fut)
             self._items.append(item)
             self._cond.notify_all()
 
@@ -220,13 +277,112 @@ class StreamComposer:
         self._t_plate = time.perf_counter() - t
         return comp
 
-    def _compose_source(self, entry: dict, grade_fut: Future, contact_fut: Future | None = None) -> dict:
+    def _base_future(self, desc: dict) -> Future:
+        """Composição do marco ``desc`` (``source``, ``border``, ``contato``) sobre a foto, uma vez
+        por marco (chamar com o lock). É também o quadro parado que mostra o marco."""
+        src = desc["source"]
+        fut = self._bases.get(src)
+        if fut is None:
+            fut = self._pool.submit(self._compose_base, dict(desc), self._grade_fut, self._contact_fut)
+            self._bases[src] = fut
+        return fut
+
+    def _layer(self, comp: Compositor, frame: int, desc: dict, grade, model, base=None):
+        """Lê e compõe uma camada (sobre a foto ou sobre o marco ``base``): (out8, st, alfa, origem,
+        máscara de influência, s de leitura, s de composição)."""
+        t1 = time.perf_counter()
+        contact = model.frame(desc.get("contato")) if model is not None else None
+        rgba, sh, origin = load_layers(self.frames_dir / desc["source"], desc.get("border"), (self.H, self.W),
+                                       self.shadow_feather)
+        t2 = time.perf_counter()
+        out8, st = LayerAccumulator.compose_dynamic(comp, frame, base, rgba, sh, origin, grade, contact)
+        t3 = time.perf_counter()
+        mask = influence_mask(rgba[..., 3], origin, (self.H, self.W), self.verify_radius)
+        return out8, st, rgba[..., 3], origin, mask, t2 - t1, t3 - t2
+
+    def _compose_base(self, desc: dict, grade_fut: Future, contact_fut: Future) -> dict:
+        t0 = time.perf_counter()
+        comp = self._comp_fut.result()
+        grade = grade_fut.result()
+        model = contact_fut.result()
+        t1 = time.perf_counter()
+        frame = int(desc.get("frame", 0))
+        out8, st, alpha, origin, mask, t_read, t_comp = self._layer(comp, frame, desc, grade, model)
+        out8.flags.writeable = False
+        base = StaticBase(out8, st, np.array(alpha, np.float32, copy=True), origin, desc["source"])
+        t3 = time.perf_counter()
+        ok, n_bad, d_max = outside_mask_equal(out8, self.plate8, mask)
+        t4 = time.perf_counter()
+        return {"out8": out8, "st": st, "ok": bool(ok and st.preserved_exact), "fora_mascara_px": n_bad,
+                "fora_mascara_max": d_max, "leitura_s": t_read, "composicao_s": t_comp,
+                "verificacao_s": t4 - t3, "espera_placa_s": t1 - t0, "base": base, "mask": mask}
+
+    def _compose_layered(self, entry: dict, comp: Compositor, grade, model, base_fut: Future | None,
+                         old_fut: Future | None, self_fut: Future | None = None) -> dict:
+        """Quadro do render em camadas: camada dinâmica sobre o marco (e a transição, se houver).
+        ``self_fut``: o quadro é um marco já composto (só a transição é calculada aqui)."""
+        t_read = t_comp = 0.0
+        frame = int(entry["frame"])
+        masks = []
+        bases = []
+        for bf in (base_fut, old_fut):
+            if bf is None:
+                bases.append(None)
+                continue
+            br = bf.result()
+            if not br["ok"]:
+                raise PreservationError(f"O marco {br['base'].source} mudou bytes da foto fora da máscara "
+                                        f"({br['fora_mascara_px']} pixel(s)).")
+            bases.append(br["base"])
+            masks.append(br["mask"])
+        if self_fut is not None:
+            sr = self_fut.result()
+            out8, st, mask = sr["out8"], replace(sr["st"], frame=frame), sr["mask"]
+            if not sr["ok"]:
+                raise PreservationError(f"O marco {entry['source']} mudou bytes da foto fora da máscara "
+                                        f"({sr['fora_mascara_px']} pixel(s)).")
+        else:
+            out8, st, _, _, mask, tr, tc = self._layer(comp, frame, entry, grade, model, bases[0])
+            t_read, t_comp = t_read + tr, t_comp + tc
+        masks.append(mask)
+        exact = st.preserved_exact
+        tr_desc = entry.get("transicao")
+        if tr_desc:
+            old8, st_old, _, _, mask_old, tr, tc = self._layer(comp, frame, tr_desc, grade, model, bases[1])
+            masks.append(mask_old)
+            t_read, t_comp = t_read + tr, t_comp + tc
+            tb = time.perf_counter()
+            out8 = blend_frames(out8, old8, float(tr_desc["peso"]))
+            t_comp += time.perf_counter() - tb
+            exact = exact and st_old.preserved_exact
+            st.object_pixels = max(st.object_pixels, st_old.object_pixels)
+            st.contact_pixels += st_old.contact_pixels
+        t3 = time.perf_counter()
+        union = masks[0]
+        for m in masks[1:]:
+            union = union | m
+        ok, n_bad, d_max = outside_mask_equal(out8, self.plate8, union)
+        neq = out8 != self.plate8
+        st.changed_pixels = int(np.count_nonzero(neq[..., 0] | neq[..., 1] | neq[..., 2]))
+        st.preserved_exact = bool(exact)
+        t4 = time.perf_counter()
+        return {"out8": out8, "st": st, "ok": bool(ok and exact), "fora_mascara_px": n_bad,
+                "fora_mascara_max": d_max, "leitura_s": t_read, "composicao_s": t_comp,
+                "verificacao_s": t4 - t3}
+
+    def _compose_source(self, entry: dict, grade_fut: Future, contact_fut: Future | None = None,
+                        base_fut: Future | None = None, old_fut: Future | None = None,
+                        self_fut: Future | None = None) -> dict:
         t0 = time.perf_counter()
         comp = self._comp_fut.result()
         grade = grade_fut.result()
         model = contact_fut.result() if contact_fut is not None else None
-        contact = model.frame(entry.get("contato")) if model is not None else None
         t1 = time.perf_counter()
+        if entry.get("base") or entry.get("transicao"):
+            res = self._compose_layered(entry, comp, grade, model, base_fut, old_fut, self_fut)
+            res["espera_placa_s"] = t1 - t0
+            return res
+        contact = model.frame(entry.get("contato")) if model is not None else None
         path = self.frames_dir / entry["source"]
         border = entry.get("border")
         if self.sequential:
@@ -345,25 +501,30 @@ class StreamComposer:
         self.em.preview(pth)
 
     # ------------------------------------------------------------------ EXR fora de uso
-    def _sources_done(self) -> list[tuple[str, Future]]:
-        """EXR cujo último quadro já foi escrito (chamar com o lock)."""
+    def _sources_done(self) -> list[tuple[str, list[Future]]]:
+        """EXR cujo último quadro já foi escrito e que nenhum quadro por vir lê (chamar com o lock).
+        As composições guardadas que liam um deles saem do cache."""
         done = []
-        for src in list(self._cache):
-            last = self._last_ref.get(src, 0)
+        for src in list(self._last_ref):
+            last = self._last_ref[src]
             if self.last_use is not None:
                 closed = self._written >= self.last_use.get(src, last)
             else:
                 closed = (src in self._closed_src or self._closed) and self._written >= last
             if closed:
-                done.append((src, self._cache.pop(src)))
+                done.append((src, self._file_futs.pop(src, [])))
+                del self._last_ref[src]
                 self._closed_src.discard(src)
+                for key in [k for k, fl in self._cache_files.items() if src in fl]:
+                    self._cache.pop(key, None)
+                    self._cache_files.pop(key, None)
         return done
 
-    def _release(self, done: list[tuple[str, Future]]) -> None:
+    def _release(self, done: list[tuple[str, list[Future]]]) -> None:
         if not self.delete_exr:
             return
-        for src, fut in done:
-            if not fut.done() or fut.exception() is not None or not fut.result()["ok"]:
+        for src, futs in done:
+            if any(not f.done() or f.exception() is not None or not f.result()["ok"] for f in futs):
                 continue
             p = self.frames_dir / src
             try:

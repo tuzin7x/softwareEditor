@@ -9,7 +9,8 @@ Modos:
 - ``blender <scene.json>``: imita o worker do Blender (``mobilia.render.blender_worker``): emite
   ``worker_ready``/``frame_ready``/``render_progress``/``render_done`` e grava EXRs recortados no
   border (Combined + Shadow Catcher) de um quadrado que entra em cena e para, com a telemetria por
-  quadro do worker real. ``MOBILIA_DUBLE_SEM_FLUXO=1`` imita um worker sem os eventos por quadro.
+  quadro do worker real. Com ``render.camadas`` (padrão) imita o render em camadas (PT6): marcos,
+  camada dinâmica sobre o marco e transição; ``camadas = false``, o quadro único. ``MOBILIA_DUBLE_SEM_FLUXO=1`` imita um worker sem os eventos por quadro.
 """
 import json
 import os
@@ -76,6 +77,8 @@ def _contact(spec: dict, uv) -> dict | None:
 def blender(spec_path: str) -> int:
     import numpy as np
 
+    from mobilia.render.layers import frame_counts
+
     t0 = time.perf_counter()
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     W, H = int(spec["width"]), int(spec["height"])
@@ -110,61 +113,138 @@ def blender(spec_path: str) -> int:
     contact = _contact(spec, (stop_at * (W - side) // (2 * stop_at) + side / 2, H // 3 + side + 2))
     if contact is not None:
         _emit(event="contact", **contact)
-    last = None
-    for f in range(1, n + 1):
-        if f <= 4:
-            _add_frame(frames, {"frame": f, "source": None, "border": None})
-            continue
-        x = min(f, stop_at) * (W - side) // (2 * stop_at)
-        key = (x,)
-        border = [max(0, x - 6), H // 3 - 6, min(W, x + side + 6), min(H, H // 3 + side + 6)]
-        if key == last:
-            _add_frame(frames, {"frame": f, "source": frames[-1]["source"], "border": frames[-1]["border"],
-                                "reused": True})
-            continue
-        ti = time.perf_counter()
+    layered = bool(spec["render"].get("camadas", True))
+
+    def bx(f):
+        return min(f, stop_at) * (W - side) // (2 * stop_at)
+
+    def layers(xb, with_a, with_b, catcher_a=False):
+        """Camadas de quadro inteiro: peça A parada (embaixo à direita) e peça B que desliza."""
         rgba = np.zeros((H, W, 4), np.float32)
-        rgba[H // 3:H // 3 + side, x:x + side] = (0.3, 0.2, 0.1, 1.0)
         shadow = np.ones((H, W, 3), np.float32)
-        shadow[H // 3 + side:H // 3 + side + 3, x:x + side] = 0.7
-        name = f"f_{f:05d}.exr"
+        if with_a and not catcher_a:
+            ya, xa = H // 2 + 4, W - side - 4
+            rgba[ya:ya + side // 2, xa:xa + side] = (0.15, 0.25, 0.1, 1.0)
+            shadow[ya + side // 2:ya + side // 2 + 3, xa:xa + side] = 0.75
+        if with_b:
+            rgba[H // 3:H // 3 + side, xb:xb + side] = (0.3, 0.2, 0.1, 1.0)
+            shadow[H // 3 + side:H // 3 + side + 3, xb:xb + side] = 0.7
+        return rgba, shadow
+
+    def render(name, border, camada, f, rgba, shadow, extra=None):
+        ti = time.perf_counter()
         x0, y0, x1, y1 = border
         _write_exr(out / "frames" / name, rgba[y0:y1, x0:x1], shadow[y0:y1, x0:x1])
         time.sleep(0.01)
         wall = time.perf_counter() - ti
-        camada = "dinamico" if f < stop_at else "final"
         layer_s[camada] += wall
         area = (border[2] - border[0]) * (border[3] - border[1])
-        entry = {"frame": f, "source": name, "border": border, "mode": "full", "crop": True}
-        if contact is not None:
-            D = np.eye(4)[:3]
-            D[0, 3] = (x - stop_at * (W - side) // (2 * stop_at)) * 0.005
-            entry["contato"] = [[0, 1.0] + [float(v) for v in D.ravel()]]
-        _add_frame(frames, entry)
-        por_quadro.append({"quadro": f, "camada": camada, "itens": 1, "pecas_em_movimento": int(f < stop_at),
+        por_quadro.append({"quadro": f, "camada": camada, "itens": 1, "pecas_em_movimento": int(camada == "dinamico"),
                            "area_px": area, "cobertura": round(area / (W * H), 4), "spp": 8, "amostras": 8,
                            "amostragem_s": round(wall * 0.6, 4), "denoise_s": round(wall * 0.2, 4),
                            "gravacao_s": round(wall * 0.1, 4), "sincronizacao_s": 0.0, "kernels_s": 0.0,
                            "preparo_s": 0.0, "render_s": round(wall, 4), "parede_s": round(wall, 4),
-                           "mem_mb": 12.0})
-        last = key
+                           "mem_mb": 12.0, **(extra or {})})
         _emit(event="render_progress", done=len(por_quadro), frame=f, n_frames=n, camada=camada,
               estimated_total=stop_at - 4, seconds=round(wall, 3))
+
+    def pose(xb):
+        if contact is None:
+            return None
+        D = np.eye(4)[:3]
+        D[0, 3] = (xb - bx(stop_at)) * 0.005
+        return [[0, 1.0] + [float(v) for v in D.ravel()]]
+
+    def b_border(xb):
+        return [max(0, xb - 6), H // 3 - 6, min(W, xb + side + 6), min(H, H // 3 + side + 6)]
+
+    camadas_meta = {"modo": "unica"}
+    if layered:
+        # render em camadas (PT6), como o worker real: marco 1 = peça A (parada desde o quadro 5),
+        # final = A + B (quadro 12, renderizado primeiro); quadros 5–11: camada dinâmica de B sobre
+        # o marco 1; 12–14: transição; depois o final, reaproveitado
+        a_border = [W - side - 10, H // 2 - 2, W, min(H, H // 2 + side // 2 + 10)]
+        fin_border = [max(0, bx(stop_at) - 6), H // 3 - 6, W, min(H, H // 2 + side // 2 + 10)]
+        rgba, shadow = layers(bx(stop_at), True, True)
+        render("m_00012.exr", fin_border, "final", stop_at, rgba, shadow, {"marco": "m_00012"})
+        rgba, shadow = layers(0, True, False)
+        render("m_00005.exr", a_border, "marco", 5, rgba, shadow, {"marco": "m_00005"})
+        m1 = {"source": "m_00005.exr", "border": a_border, "frame": 5}
+        mf = {"source": "m_00012.exr", "border": fin_border, "frame": stop_at}
+        if contact is not None:
+            m1["contato"] = []
+            mf["contato"] = pose(bx(stop_at))
+        camadas_meta = {"modo": "camadas", "transicao_quadros": 3, "margem_dinamica_m": 0.35,
+                        "marcos": [{"id": "m_00005", "quadro": 5, "final": False, "source": "m_00005.exr"},
+                                   {"id": "m_00012", "quadro": stop_at, "final": True, "source": "m_00012.exr"}]}
+        prev = None
+        for f in range(1, n + 1):
+            if f <= 4:
+                _add_frame(frames, {"frame": f, "source": None, "border": None})
+                continue
+            if f < stop_at:
+                xb = bx(f)
+                rgba, shadow = layers(xb, True, True, catcher_a=True)
+                name = f"f_{f:05d}.exr"
+                render(name, b_border(xb), "dinamico", f, rgba, shadow, {"base": "m_00005"})
+                entry = {"source": name, "border": b_border(xb), "mode": "full", "crop": True, "camada": "dinamico",
+                         "base": m1}
+                if contact is not None:
+                    entry["contato"] = pose(xb)
+            else:
+                entry = {"source": mf["source"], "border": fin_border, "mode": "full", "crop": True,
+                         "camada": "final"}
+                if contact is not None:
+                    entry["contato"] = mf["contato"]
+                if f < stop_at + 3:
+                    xb = bx(f)
+                    if f == stop_at:
+                        rgba, shadow = layers(xb, True, True, catcher_a=True)
+                        render("t_00012.exr", b_border(xb), "dinamico", f, rgba, shadow,
+                               {"base": "m_00005", "transicao": True})
+                    entry["transicao"] = {"source": "t_00012.exr", "border": b_border(xb), "base": m1,
+                                          "peso": round(1.0 - (f - stop_at + 1) / 4, 6)}
+                    if contact is not None:
+                        entry["transicao"]["contato"] = pose(xb)
+            if entry == prev:
+                _add_frame(frames, {"frame": f, **entry, "reused": True})
+            else:
+                _add_frame(frames, {"frame": f, **entry})
+            prev = entry
+    last = None
+    for f in range(1, n + 1) if not layered else ():
+        if f <= 4:
+            _add_frame(frames, {"frame": f, "source": None, "border": None})
+            continue
+        x = bx(f)
+        key = (x,)
+        border = b_border(x)
+        if key == last:
+            _add_frame(frames, {"frame": f, "source": frames[-1]["source"], "border": frames[-1]["border"],
+                                "reused": True})
+            continue
+        rgba, shadow = layers(x, False, True)
+        name = f"f_{f:05d}.exr"
+        camada = "dinamico" if f < stop_at else "final"
+        render(name, border, camada, f, rgba, shadow)
+        entry = {"frame": f, "source": name, "border": border, "mode": "full", "crop": True}
+        if contact is not None:
+            entry["contato"] = pose(x)
+        _add_frame(frames, entry)
+        last = key
     tempos.update(render_final=layer_s["final"], render_marcos=0.0, render_dinamico=layer_s["dinamico"],
                   laco_outros=0.0)
     meta = {"frames": frames, "calibration": calib,
             "device": "CPU", "width": W, "height": H, "removed_items": [],
             "exr": {"recorte": True, "codec": "RLE"}, "passes": ["Combined", "Shadow Catcher"],
-            "contact": contact,
+            "contact": contact, "camadas": camadas_meta,
             "timings": {"total_s": round(time.perf_counter() - t0, 1), "rendered_frames": len(por_quadro)},
             "telemetria": {"dispositivo": "CPU", "optix": False, "gpus": [], "threads": 4, "blender": "dublê",
                            "denoiser": "OPENIMAGEDENOISE", "denoiser_dispositivo": "CPU",
                            "tempos_s": tempos, "aquecimento": {"parede_s": 0.05, "kernels_s": 0.01},
                            "calibracao_renders": [], "por_quadro": por_quadro,
-                           "quadros": {"total": len(frames), "renderizados": len(por_quadro),
-                                       "reutilizados": sum(1 for fr in frames if fr.get("reused")),
-                                       "so_foto": sum(1 for fr in frames if fr.get("source") is None)},
-                           "samples_config": int(spec["render"]["samples"])}}
+                           "quadros": frame_counts(frames, len(por_quadro)),
+                           "samples_config": int(spec["render"]["samples"]), "camadas": camadas_meta}}
     # o render real ainda grava a telemetria e encerra o Blender aqui: a composição em fluxo
     # já trabalha nos quadros anunciados enquanto isso
     time.sleep(0.3)

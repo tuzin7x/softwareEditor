@@ -21,6 +21,14 @@ multiplicam só C onde A > 0, antes do casamento de nitidez. A placa e a sombra 
 SOMBRA DE CONTATO (PT10, ``contact.py``): a oclusão analítica ``c`` das silhuetas de baixo das
 peças de piso, levada à imagem pela homografia do piso, entra como ``S' = S · (1 − k·c)`` antes do
 peso da região de influência: fora dela nada muda (mesma garantia da placa).
+
+CAMADAS (PT6, ``LayerAccumulator.static_base``/``compose_dynamic``): o marco estático é composto
+sobre a foto como um quadro comum (``base = foto · S' · (1 − A) + C``). Um quadro com movimento
+compõe só a camada dinâmica sobre essa base, com a MESMA conta e a base no lugar da foto:
+``saída = base · S'_din · (1 − A_din) + C_din``. Fora da influência da camada dinâmica a saída é a
+base byte a byte; fora da influência do marco a base é a foto byte a byte: a máscara da
+verificação é a união das duas. A sombra de contato da camada dinâmica só escurece pixels em que
+a base é foto (sobre CG do marco, p. ex. o tapete, vale a sombra do render, como no quadro único).
 """
 from __future__ import annotations
 
@@ -174,22 +182,25 @@ class Compositor:
 
     def composite(self, frame: int, rgba: np.ndarray | None, shadow: np.ndarray | None,
                   border: list[int] | None, origin: tuple[int, int] | None = None,
-                  grade: CGGrade | None = None, contact=None) -> tuple[np.ndarray, FrameStats]:
+                  grade: CGGrade | None = None, contact=None,
+                  base: "StaticBase | None" = None) -> tuple[np.ndarray, FrameStats]:
         """Compõe um quadro. ``rgba``/``shadow`` são passes do Cycles (float, h×w×4 / h×w×3).
 
         Sem ``origin`` as camadas são do quadro inteiro. Com ``origin`` = (x, y) elas cobrem só um
         retângulo do quadro (p. ex. o border do render) e fora dele valem RGBA 0 e sombra 1. A
         conta é feita só em ``composition_box``; o resto do quadro é cópia da foto. ``grade``: o
         ajuste do CG da calibração (só a camada CG muda). ``contact``: a sombra de contato do quadro
-        (``contact.ContactFrame``, com ``occlusion(box)``), só dentro da região de influência."""
+        (``contact.ContactFrame``, com ``occlusion(box)``), só dentro da região de influência.
+        ``base`` (PT6): o marco estático já composto entra no lugar da foto (camada dinâmica)."""
         st = FrameStats(frame)
+        under8 = self.photo8 if base is None else base.out8
         if rgba is None:
-            return self.photo8.copy(), st
+            return under8.copy(), st
         ox, oy = (0, 0) if origin is None else (int(origin[0]), int(origin[1]))
         h, w = rgba.shape[:2]
         box = self.composition_box(rgba[..., 3], (ox, oy), border)
-        if box is None:                      # nenhum pixel de móvel: o quadro inteiro é a foto
-            return self.photo8.copy(), st
+        if box is None:                      # nenhum pixel de móvel: o quadro inteiro é a foto (base)
+            return under8.copy(), st
         x0, y0, x1, y1 = box
         if ox <= x0 and oy <= y0 and x1 <= ox + w and y1 <= oy + h:
             sl = (slice(y0 - oy, y1 - oy), slice(x0 - ox, x1 - ox))
@@ -203,23 +214,31 @@ class Compositor:
             if shadow is not None:
                 sh = np.ones((y1 - y0, x1 - x0, shadow.shape[2]), shadow.dtype)
                 sh[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0] = shadow[iy0 - oy:iy1 - oy, ix0 - ox:ix1 - ox]
-        sub = self._composite_region(st, rg, sh, border, box, grade, contact)
-        out8 = self.photo8.copy()
+        sub = self._composite_region(st, rg, sh, border, box, grade, contact, base)
+        out8 = under8.copy()
         out8[y0:y1, x0:x1] = sub
         st.box = list(box)
         return out8, st
 
     def _composite_region(self, st: FrameStats, rgba: np.ndarray, shadow: np.ndarray | None,
                           border: list[int] | None, box: list[int], grade: CGGrade | None = None,
-                          contact=None) -> np.ndarray:
+                          contact=None, base: "StaticBase | None" = None) -> np.ndarray:
         """A conta da composição no retângulo ``box`` do quadro (camadas já recortadas nele).
 
         Mesmas operações, na mesma ordem, do quadro inteiro; ``diag`` (raio de influência e
         rampa) continua sendo o do quadro inteiro. O ajuste do CG (``grade``) é por pixel e lê o
-        mapa de ganho na posição absoluta do quadro: recortar não muda nada."""
+        mapa de ganho na posição absoluta do quadro: recortar não muda nada. Com ``base`` (PT6) o
+        marco composto faz o papel da foto: mesma conversão sRGB→linear da placa, então onde a
+        base é a foto os valores são bit a bit os mesmos de uma composição sobre a foto."""
         X0, Y0, X1, Y1 = box
         sl = (slice(Y0, Y1), slice(X0, X1))
-        photo8, photo_lin = self.photo8[sl], self.photo_lin[sl]
+        base_cg = None
+        if base is None:
+            photo8, photo_lin = self.photo8[sl], self.photo_lin[sl]
+        else:
+            photo8 = base.out8[sl]
+            photo_lin = srgb_to_linear(photo8.astype(np.float32) / 255.0)
+            base_cg = base.cg_mask(box, self.s.alpha_eps)
         grain = self.plate.grain[sl] if self.plate.grain is not None else None
         A = rgba[..., 3].astype(np.float32, copy=False)
         C = rgba[..., :3].astype(np.float32, copy=False)
@@ -268,6 +287,8 @@ class Compositor:
                 cm = c > 1e-4
                 if valid is not None:
                     cm &= valid
+                if base_cg is not None:
+                    cm &= ~base_cg           # sobre CG do marco vale só a sombra do render
                 st.contact_pixels = int(np.count_nonzero(cm & (w > 0)))
                 if cm.any():
                     S = np.where(cm, S * (1.0 - k * np.clip(c, 0.0, 1.0)), S).astype(np.float32)
@@ -345,12 +366,59 @@ def feather_shadow(shadow: np.ndarray, border: list[int], H: int, W: int, feathe
     return 1.0 + (shadow - 1.0) * ws
 
 
-class LayerAccumulator:
-    """Mantém as camadas 3D de tela cheia quando o render é incremental.
+@dataclass
+class StaticBase:
+    """Marco estático já composto sobre a foto (PT6): a "foto" da camada dinâmica.
 
-    Quadros "full" substituem tudo; quadros "incremental" só re-renderizam a região das
-    peças em movimento, que é colada sobre o estado anterior com uma transição suave
-    (as duas renders mostram a mesma cena estática fora das peças em movimento).
+    ``out8`` é o quadro composto do marco (só leitura); ``alpha``/``origin`` são o alfa das
+    camadas do marco (recorte no border), de onde saem a máscara de influência da verificação e
+    os pixels de CG do marco (a sombra de contato da camada dinâmica não os escurece)."""
+
+    out8: np.ndarray
+    stats: FrameStats
+    alpha: np.ndarray | None = None
+    origin: tuple[int, int] = (0, 0)
+    source: str | None = None
+
+    def cg_mask(self, box: list[int], alpha_eps: float = 1.0 / 1024.0) -> np.ndarray:
+        """Pixels do retângulo ``box`` com CG do marco (alfa > ``alpha_eps``)."""
+        X0, Y0, X1, Y1 = (int(v) for v in box)
+        out = np.zeros((Y1 - Y0, X1 - X0), bool)
+        if self.alpha is None:
+            return out
+        ox, oy = int(self.origin[0]), int(self.origin[1])
+        h, w = self.alpha.shape[:2]
+        ix0, iy0, ix1, iy1 = max(X0, ox), max(Y0, oy), min(X1, ox + w), min(Y1, oy + h)
+        if ix1 > ix0 and iy1 > iy0:
+            out[iy0 - Y0:iy1 - Y0, ix0 - X0:ix1 - X0] = \
+                self.alpha[iy0 - oy:iy1 - oy, ix0 - ox:ix1 - ox] > alpha_eps
+        return out
+
+
+def blend_frames(new8: np.ndarray, old8: np.ndarray, w_old: float) -> np.ndarray:
+    """Transição (PT6) entre duas composições: ``new + round(w_old · (old − new))``.
+
+    Onde as duas são iguais (p. ex. a foto, fora das duas máscaras) o resultado é ``new`` byte a
+    byte; nos demais pixels é a mistura linear em 8 bits."""
+    w = float(np.clip(w_old, 0.0, 1.0))
+    if w <= 0.0:
+        return new8.copy()
+    d = old8.astype(np.int16) - new8.astype(np.int16)
+    out = new8.astype(np.int16) + np.rint(d * w).astype(np.int16)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+class LayerAccumulator:
+    """Camadas 3D de tela cheia do render incremental antigo e as operações do render em camadas.
+
+    Incremental (experimental, desligado): quadros "full" substituem tudo; quadros "incremental"
+    só re-renderizam a região das peças em movimento, que é colada sobre o estado anterior com
+    uma transição suave (as duas renders mostram a mesma cena estática fora das peças em
+    movimento).
+
+    Camadas (PT6): ``static_base`` compõe um marco sobre a foto e o guarda; ``compose_dynamic``
+    compõe a camada dinâmica de um quadro sobre um marco (``base · S_din · (1 − A_din) + C_din``).
+    As duas não mexem nos buffers do modo incremental e podem rodar em threads diferentes.
     """
 
     def __init__(self, height: int, width: int, feather_px: int = 12, shadow_feather_px: int = 0):
@@ -384,6 +452,25 @@ class LayerAccumulator:
         w4 = wgt[..., None]
         self.rgba[sl] = self.rgba[sl] * (1 - w4) + rgba[sl] * w4
         self.shadow[sl] = self.shadow[sl] * (1 - w4) + shadow[sl] * w4
+
+    # ------------------------------------------------------------------ render em camadas (PT6)
+    @staticmethod
+    def static_base(comp: "Compositor", frame: int, rgba: np.ndarray | None, shadow: np.ndarray | None,
+                    origin: tuple[int, int] | None = None, grade: CGGrade | None = None, contact=None,
+                    source: str | None = None) -> StaticBase:
+        """Compõe o marco sobre a foto (um quadro comum) e devolve a base da camada dinâmica."""
+        out8, st = comp.composite(frame, rgba, shadow, None, origin=origin, grade=grade, contact=contact)
+        out8.flags.writeable = False          # base compartilhada por vários quadros: só leitura
+        alpha = None if rgba is None else np.array(rgba[..., 3], np.float32, copy=True)
+        return StaticBase(out8, st, alpha, (0, 0) if origin is None else (int(origin[0]), int(origin[1])),
+                          source)
+
+    @staticmethod
+    def compose_dynamic(comp: "Compositor", frame: int, base: StaticBase | None, rgba: np.ndarray | None,
+                        shadow: np.ndarray | None, origin: tuple[int, int] | None = None,
+                        grade: CGGrade | None = None, contact=None) -> tuple[np.ndarray, FrameStats]:
+        """Camada dinâmica sobre o marco ``base`` (None = sobre a foto: quadro único)."""
+        return comp.composite(frame, rgba, shadow, None, origin=origin, grade=grade, contact=contact, base=base)
 
 
 def read_render_passes(exr_path: str) -> tuple[np.ndarray, np.ndarray | None]:

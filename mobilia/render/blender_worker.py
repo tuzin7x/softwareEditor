@@ -15,7 +15,11 @@ Monta a cena 3D a partir da especificação gerada pelo pipeline:
 - móveis (glTF Poly Haven ou procedurais) normalizados e animados peça a peça;
 - render quadro a quadro em EXR multicamada (Combined RGBA + Shadow Catcher), com
   região de render (border) restrita aos móveis, EXR recortado nessa região e
-  reaproveitamento de quadros estáticos.
+  reaproveitamento de quadros estáticos;
+- render em camadas (PT6, padrão; ``render.camadas = false`` volta ao quadro único): marcos
+  estáticos com muitas amostras (o quadro final primeiro) e, nos quadros com movimento, só a
+  camada dinâmica — as peças fora do marco vigente — com as peças do marco como *shadow catcher*
+  (``render_layered``; o plano é ``render/layers.py::plan_layers``).
 
 Eventos JSON (uma linha por evento) vão para a saída padrão.
 """
@@ -1189,13 +1193,16 @@ def contact_model(items_rt: list[dict], spec: dict) -> tuple[dict | None, list]:
     return meta, refs
 
 
-def contact_poses(refs: list, f: int, fps: int) -> list:
+def contact_poses(refs: list, f: int, fps: int, keys=None) -> list:
     """Poses das peças de piso visíveis no quadro f (a cena já em ``frame_set(f)``):
-    ``[peça, fade, D 3×4]`` com D = M_quadro · M_repouso⁻¹."""
+    ``[peça, fade, D 3×4]`` com D = M_quadro · M_repouso⁻¹. ``keys``: só essas peças (nomes dos
+    objetos; a camada de um quadro no render em camadas)."""
     from mobilia.composite import contact as ct
 
     out = []
     for k, (rt, part, inv_rest) in enumerate(refs):
+        if keys is not None and part.name not in keys:
+            continue
         pose = rt["plans"][part.name].pose((f - 1) / fps)
         if not pose.visible or pose.fade <= ct.MIN_AMP:
             continue
@@ -1258,10 +1265,14 @@ def dynamic_parts(items_rt: list[dict], f: int, fps: int) -> list:
     return out
 
 
-def _bbox_points(mn, mx, margin_m: float, sun_dir=None) -> list:
+def _bbox_points(mn, mx, margin_m: float, sun_dir=None, vertical: bool = False) -> list:
     pts = [mathutils.Vector((x, y, z)) for x in (mn.x, mx.x) for y in (mn.y, mx.y) for z in (mn.z, mx.z)]
     pts += [mathutils.Vector((x, y, 0.0)) for x in (mn.x - margin_m, mx.x + margin_m)
             for y in (mn.y - margin_m, mx.y + margin_m)]
+    if vertical:
+        # sombra na parede acima da peça (quadros, luminárias, peças junto à parede)
+        pts += [mathutils.Vector((x, y, mx.z + margin_m)) for x in (mn.x - margin_m, mx.x + margin_m)
+                for y in (mn.y - margin_m, mx.y + margin_m)]
     if sun_dir is not None and sun_dir[2] > 0.05:
         # pegada da sombra do sol no piso (projeção dos cantos superiores ao longo de -sol)
         for x in (mn.x, mx.x):
@@ -1285,9 +1296,10 @@ def _project_border(sc, cam, pts) -> tuple[float, float, float, float] | None:
     return (max(0.0, min(xs) - pad), max(0.0, min(ys) - pad), min(1.0, max(xs) + pad), min(1.0, max(ys) + pad))
 
 
-def incremental_border(sc, cam, dyn: list, margin_m: float, sun_dir=None):
+def incremental_border(sc, cam, dyn: list, margin_m: float, sun_dir=None, vertical: bool = False):
     """Região da tela que precisa ser re-renderizada: peças em movimento nas poses de
-    f−1, f e f+1 (cobre a posição anterior, apagando-a) + margem de sombra."""
+    f−1, f e f+1 (cobre a posição anterior, apagando-a) + margem de sombra (no piso, na direção
+    do sol e, com ``vertical``, também acima da peça)."""
     pts = []
     for rt, part, poses in dyn:
         mn, mx = part["_rest_bbox_min"], part["_rest_bbox_max"]
@@ -1300,15 +1312,17 @@ def incremental_border(sc, cam, dyn: list, margin_m: float, sun_dir=None):
             ctr = (mn + mx) / 2
             half = (mx - mn) / 2 * grow + mathutils.Vector((0.03, 0.03, 0.03))   # inclinações pequenas
             off = mathutils.Vector((p.dx, p.dy, p.dz)) * s
-            pts += _bbox_points(ctr - half + off, ctr + half + off, margin_m, sun_dir)
+            pts += _bbox_points(ctr - half + off, ctr + half + off, margin_m, sun_dir, vertical)
     return _project_border(sc, cam, pts)
 
 
-def compute_border(sc, cam, items_rt: list[dict], margin_m: float) -> tuple[float, float, float, float] | None:
+def compute_border(sc, cam, items_rt: list[dict], margin_m: float,
+                   keys=None) -> tuple[float, float, float, float] | None:
+    """Região de render de todas as peças visíveis (ou só das ``keys``, p. ex. as de um marco)."""
     pts = []
     for rt in items_rt:
         for part in rt["parts"]:
-            if part.hide_render:
+            if part.hide_render or (keys is not None and part.name not in keys):
                 continue
             mn, mx = _world_bbox([part])
             for x in (mn.x, mx.x):
@@ -1427,6 +1441,248 @@ def frame_layer(items_rt: list[dict], f: int, fps: int, dyn: list, final_sig: tu
 def visible_items(items_rt: list[dict], f: int, fps: int) -> int:
     return sum(1 for rt in items_rt
                if any(rt["plans"][p.name].pose((f - 1) / fps).visible for p in rt["parts"]))
+
+
+# ============================================================================ render em camadas (PT6)
+# Visibilidade por raio (não é animada, ao contrário de ``hide_render``, que tem keyframes): uma
+# peça fora do render atual some para a câmera, para as sombras e para a luz rebatida.
+RAY_VISIBILITY = ("visible_camera", "visible_diffuse", "visible_glossy", "visible_transmission",
+                  "visible_volume_scatter", "visible_shadow")
+
+
+def set_layer_roles(items_rt: list[dict], show, catchers=frozenset()) -> int:
+    """Papel de cada peça no próximo render: em ``show`` (ou ``show`` None: todas) é CG normal; em
+    ``catchers`` (as peças do marco num quadro dinâmico) fica na cena como *shadow catcher*: esconde
+    o que passa atrás dela, recebe a sombra e a luz rebatida das peças novas e continua projetando
+    sombra e rebatendo luz nelas; as demais somem de todos os raios. Devolve quantas mudaram."""
+    changed = 0
+    for rt in items_rt:
+        for part in rt["parts"]:
+            k = part.name
+            cat = k in catchers
+            on = show is None or k in show or cat
+            diff = False
+            for a in RAY_VISIBILITY:
+                if hasattr(part, a) and getattr(part, a) != on:
+                    setattr(part, a, on)
+                    diff = True
+            if bool(part.is_shadow_catcher) != cat:
+                part.is_shadow_catcher = cat
+                diff = True
+            changed += diff
+    return changed
+
+
+def layer_parts(items_rt: list[dict]) -> list:
+    """Peças da cena para ``layers.plan_layers`` (nome do objeto, item, plano, desenrolar)."""
+    out = []
+    for rt in items_rt:
+        ur = rt.get("unroll_range")
+        for part in rt["parts"]:
+            out.append(lay.LayerPart(part.name, str(rt["item"]["id"]), rt["plans"][part.name],
+                                     tuple(ur) if ur else None))
+    return out
+
+
+def layer_border(sc, cam, items_rt: list[dict], keys, f: int, fps: int, margin_m: float, sun_dir=None):
+    """Região da camada dinâmica do quadro f: as peças ``keys`` nas poses de f−1, f e f+1 (desfoque
+    de movimento) + margem de contato no piso e acima delas + projeção da sombra do sol."""
+    dyn = []
+    for rt in items_rt:
+        for part in rt["parts"]:
+            if part.name in keys:
+                plan = rt["plans"][part.name]
+                dyn.append((rt, part, [plan.pose((f - 1 + df) / fps) for df in (-1, 0, 1)]))
+    return incremental_border(sc, cam, dyn, margin_m, sun_dir, vertical=True) if dyn else None
+
+
+def _layer_render_count(plan, only: set) -> int:
+    """Renders previstos do plano (marcos usados + camadas novas), para a barra de progresso."""
+    n, prev = 0, set()
+    used = set()
+    for fr in plan.frames:
+        if only and fr.frame not in only:
+            continue
+        cur = set()
+        if fr.kind == "dinamico":
+            cur.add(fr.sig)
+            used.add(fr.base)
+        elif fr.kind == "estatico":
+            used.add(fr.base)
+        if fr.trans:
+            cur.add(fr.trans[2])
+            used.add(fr.trans[0])
+        n += len(cur - prev)
+        prev = cur
+    return n + len({u for u in used if u})
+
+
+def render_layered(sc, cam, spec: dict, items_rt: list[dict], meta: dict, contact_refs: list, fade_mats: dict,
+                   pass_out: dict, out_dir: Path, spl: dict, amin: dict, sun_dir, only: set) -> dict:
+    """Render em camadas (PT6). Marcos primeiro (o quadro final antes de todos: é também a medida
+    de desempenho do PT7), depois os quadros do vídeo em ordem, cada um anunciado já pronto.
+
+    Entradas do ``frames.json``: o quadro parado é o EXR do marco (``camada`` "marco"/"final"); o
+    quadro com movimento tem o EXR da camada dinâmica e ``base`` (o marco: EXR, border, poses de
+    contato); na troca de marco, ``transicao`` traz a composição antiga (camada + marco anteriores)
+    e o ``peso`` dela. Um render cuja assinatura (marco + poses das peças da camada) é a do quadro
+    anterior é reaproveitado."""
+    rs = spec["render"]
+    fps, n_frames = int(rs["fps"]), int(rs["n_frames"])
+    W, H = spec["width"], spec["height"]
+    crop = bool(rs.get("crop_to_border", True))
+    margin = float(rs.get("border_margin_m", 0.6))
+    dmargin = float(rs.get("dynamic_margin_m", lay.DYNAMIC_MARGIN_M))
+    xfade = int(rs.get("crossfade_frames", lay.CROSSFADE_FRAMES))
+    t_plan = time.perf_counter()
+    groups = [m["itens"] for m in ch.milestones([it for it in spec["items"] if "start" in it])]
+    plan = lay.plan_layers(layer_parts(items_rt), fps, n_frames, groups, xfade)
+    t_plan = time.perf_counter() - t_plan
+    frames = [fr for fr in plan.frames if not only or fr.frame in only]
+    used = {fr.base for fr in frames if fr.kind != "foto"} | {fr.trans[0] for fr in frames if fr.trans}
+    mss = [m for m in plan.milestones if m.id in used]
+    order = sorted(mss, key=lambda m: (not m.final, m.frame))       # o quadro final primeiro
+    total = _layer_render_count(plan, only)
+    por_quadro: list[dict] = []
+    layer_s = {"final": 0.0, "marco": 0.0, "dinamico": 0.0}
+    done = 0
+
+    def _render(name: str, border, camada: str, f: int, extra: dict) -> tuple[list | None, dict]:
+        nonlocal done
+        t_it = time.perf_counter()
+        pb = bd.pixel_border(border, W, H) if border is not None else None
+        if pb is None:
+            return None, {}
+        border_px, b = pb
+        sc.render.use_border = True
+        sc.render.use_crop_to_border = crop
+        sc.render.border_min_x, sc.render.border_min_y, sc.render.border_max_x, sc.render.border_max_y = b
+        spp = int(spl[camada])
+        sc.cycles.samples = spp
+        sc.cycles.adaptive_min_samples = min(spp, int(amin.get(camada, lay.adaptive_min(camada, spp))))
+        fades = update_fade_shaders(fade_mats, f, fps)
+        t_prep = time.perf_counter() - t_it
+        st = render_frame(sc, out_dir / "frames" / name, pass_out)
+        done += 1
+        area = max(0, border_px[2] - border_px[0]) * max(0, border_px[3] - border_px[1])
+        wall = time.perf_counter() - t_it
+        layer_s[camada] += wall
+        por_quadro.append({"quadro": f, "camada": camada, **extra, "area_px": area,
+                           "cobertura": round(area / max(1, W * H), 4), "spp": int(sc.cycles.samples),
+                           "spp_min": int(sc.cycles.adaptive_min_samples), "materiais_fade_trocados": fades,
+                           "amostras": st.get("amostras"), "amostragem_s": st.get("amostragem_s"),
+                           "denoise_s": st.get("denoise_s"), "gravacao_s": st.get("gravacao_s"),
+                           "sincronizacao_s": st.get("sincronizacao_s"), "kernels_s": st.get("kernels_s"),
+                           "preparo_s": round(t_prep, 4), "render_s": st.get("parede_s"),
+                           "parede_s": round(wall, 4), "mem_mb": st.get("mem_mb")})
+        emit(event="render_progress", done=done, frame=f, n_frames=n_frames, camada=camada,
+             estimated_total=max(total, done), seconds=round(st.get("parede_s") or 0.0, 2))
+        return border_px, st
+
+    # ---- marcos (bases estáticas)
+    descs: dict[str, dict | None] = {}
+    for m in order:
+        sc.frame_set(m.frame)
+        bpy.context.view_layer.update()
+        set_layer_roles(items_rt, m.parts)
+        b = compute_border(sc, cam, items_rt, margin, keys=m.parts)
+        border_px, _ = _render(m.source, b, m.layer, m.frame,
+                               {"marco": m.id, "itens": len(m.itens), "pecas": len(m.parts),
+                                "pecas_em_movimento": 0})
+        if border_px is None:
+            descs[m.id] = None                 # nada do marco aparece na imagem: base = a foto
+            continue
+        d = {"source": m.source, "border": border_px, "frame": m.frame, "camada": m.layer}
+        if contact_refs:
+            d["contato"] = contact_poses(contact_refs, m.frame, fps, keys=m.parts)
+        descs[m.id] = d
+    meta["camadas"] = {
+        "modo": "camadas", "transicao_quadros": xfade, "margem_dinamica_m": dmargin, "plano_s": round(t_plan, 4),
+        "marcos": [{"id": m.id, "quadro": m.frame, "final": m.final, "implicito": m.implicit,
+                    "itens": m.itens, "pecas": len(m.parts), "source": (descs.get(m.id) or {}).get("source"),
+                    "border": (descs.get(m.id) or {}).get("border")} for m in sorted(mss, key=lambda m: m.frame)]}
+
+    def _base(mid):
+        d = descs.get(mid) if mid else None
+        return None if d is None else {k: d[k] for k in ("source", "border", "frame", "contato") if k in d}
+
+    # ---- quadros do vídeo, em ordem
+    prev_renders: dict = {}
+    prev_entry: dict | None = None
+    for fr in frames:
+        f = fr.frame
+        cur: dict = {}
+        if fr.kind == "foto":
+            add_frame(meta, {"frame": f, "source": None, "border": None})
+            prev_renders, prev_entry = {}, None
+            continue
+        need_set = fr.kind == "dinamico" or fr.trans is not None
+        if need_set:
+            sc.frame_set(f)
+            bpy.context.view_layer.update()
+
+        def _dyn(mid, keys, sig, prefix):
+            """Render (ou reaproveitamento) da camada ``keys`` sobre o marco ``mid``."""
+            if sig in prev_renders:
+                cur[sig] = prev_renders[sig]
+                return cur[sig]
+            if sig in cur:
+                return cur[sig]
+            base_m = plan.milestone(mid)
+            # peças do marco como catcher mesmo se o marco não aparece na imagem (ainda fazem sombra)
+            cats = base_m.parts if base_m is not None else frozenset()
+            set_layer_roles(items_rt, keys, cats)
+            b = layer_border(sc, cam, items_rt, keys, f, fps, dmargin, sun_dir)
+            name = f"{prefix}_{f:05d}.exr"
+            moving = sum(1 for k in keys if f < plan.settle.get(k, 0))
+            border_px, _ = _render(name, b, "dinamico", f, {"base": mid, "pecas": len(keys),
+                                                            "pecas_em_movimento": moving,
+                                                            "transicao": prefix == "t"})
+            rec = None if border_px is None else {
+                "source": name, "border": border_px,
+                "contato": contact_poses(contact_refs, f, fps, keys=keys) if contact_refs else None}
+            cur[sig] = rec
+            return rec
+
+        if fr.kind == "estatico":
+            d = descs.get(fr.base)
+            entry = None if d is None else {"frame": f, "source": d["source"], "border": d["border"],
+                                            "mode": "full", "crop": crop, "camada": d["camada"]}
+            if entry is not None and d.get("contato") is not None:
+                entry["contato"] = d["contato"]
+        else:
+            rec = _dyn(fr.base, fr.layer, fr.sig, "f")
+            if rec is None:                     # a camada não aparece na imagem: o quadro é o marco
+                d = descs.get(fr.base) if fr.base else None
+                entry = None if d is None else {"frame": f, "source": d["source"], "border": d["border"],
+                                                "mode": "full", "crop": crop, "camada": d["camada"],
+                                                **({"contato": d["contato"]} if d.get("contato") else {})}
+            else:
+                entry = {"frame": f, "source": rec["source"], "border": rec["border"], "mode": "full",
+                         "crop": crop, "camada": "dinamico", "base": _base(fr.base)}
+                if rec.get("contato") is not None:
+                    entry["contato"] = rec["contato"]
+        if entry is not None and fr.trans is not None:
+            omid, okeys, osig, w_old = fr.trans
+            orec = _dyn(omid, okeys, osig, "t")
+            if orec is not None:
+                entry["transicao"] = {"source": orec["source"], "border": orec["border"], "base": _base(omid),
+                                      "peso": float(w_old)}
+                if orec.get("contato") is not None:
+                    entry["transicao"]["contato"] = orec["contato"]
+        if entry is None:
+            add_frame(meta, {"frame": f, "source": None, "border": None})
+            prev_renders, prev_entry = cur, None
+            continue
+        body = {k: v for k, v in entry.items() if k != "frame"}
+        if prev_entry is not None and body == prev_entry:
+            add_frame(meta, {"frame": f, **body, "reused": True})
+        else:
+            add_frame(meta, entry)
+        prev_entry = body
+        prev_renders = cur
+    set_layer_roles(items_rt, None)
+    return {"por_quadro": por_quadro, "layer_s": layer_s, "done": done, "total": total}
 
 
 def main(spec_path: str) -> None:
@@ -1553,21 +1809,12 @@ def main(spec_path: str) -> None:
     sun_spec = spec["lighting"].get("sun")
     sun_dir = sun_spec["direction"] if sun_spec else None
     only = set(spec["render"].get("only_frames") or [])
-    to_render = [f for f in range(1, n_frames + 1) if any_visible(items_rt, f, fps) and (not only or f in only)]
-    final_sig = frame_signature(items_rt, n_frames, fps)
-    # amostras por camada (final > marco > dinâmico), com rampa antes dos quadros parados
     rs = spec["render"]
+    # render em camadas (PT6) é o padrão; ``render.camadas = false`` (ou o incremental antigo) volta
+    # ao quadro único: a cena inteira em todo quadro com movimento
+    layered = bool(rs.get("camadas", True)) and not incremental
     spl = lay.clamp_layers(rs.get("samples_layers"), int(rs["samples"]))
     amin = rs.get("adaptive_min_samples") or lay.ADAPTIVE_MIN
-    planned, prev_sig = [], None
-    for f in to_render:
-        sig = frame_signature(items_rt, f, fps)
-        if sig != prev_sig:
-            planned.append((f, frame_layer(items_rt, f, fps, dynamic_parts(items_rt, f, fps), final_sig)))
-        prev_sig = sig
-    spp_plan = dict(zip((f for f, _ in planned),
-                        lay.frame_samples([c for _, c in planned], spl,
-                                          int(rs.get("sample_ramp_frames", lay.RAMP_FRAMES)))))
     fade_mats = fade_materials(items_rt)
     pass_out = {"node": setup_pass_output(sc, out_dir / "frames")}
     meta["passes"] = [n for n, _ in PASS_OUTPUTS] if pass_out["node"] is not None else "todos"
@@ -1576,7 +1823,27 @@ def main(spec_path: str) -> None:
     done = 0
     t_render = time.time()
     t_loop = time.perf_counter()
-    for f in range(1, n_frames + 1):
+    if layered:
+        res = render_layered(sc, cam, spec, items_rt, meta, contact_refs, fade_mats, pass_out, out_dir, spl, amin,
+                             sun_dir, only)
+        por_quadro, layer_s, done = res["por_quadro"], res["layer_s"], res["done"]
+        frames_iter = []
+    else:
+        meta["camadas"] = {"modo": "unica"}
+        to_render = [f for f in range(1, n_frames + 1) if any_visible(items_rt, f, fps) and (not only or f in only)]
+        final_sig = frame_signature(items_rt, n_frames, fps)
+        # amostras por camada (final > marco > dinâmico), com rampa antes dos quadros parados
+        planned, prev_sig = [], None
+        for f in to_render:
+            sig = frame_signature(items_rt, f, fps)
+            if sig != prev_sig:
+                planned.append((f, frame_layer(items_rt, f, fps, dynamic_parts(items_rt, f, fps), final_sig)))
+            prev_sig = sig
+        spp_plan = dict(zip((f for f, _ in planned),
+                            lay.frame_samples([c for _, c in planned], spl,
+                                              int(rs.get("sample_ramp_frames", lay.RAMP_FRAMES)))))
+        frames_iter = range(1, n_frames + 1)
+    for f in frames_iter:
         if only and f not in only:
             continue
         if not any_visible(items_rt, f, fps):
@@ -1653,11 +1920,10 @@ def main(spec_path: str) -> None:
         "aquecimento": warm,
         "calibracao_renders": (calib or {}).get("renders", []),
         "por_quadro": por_quadro,
-        "quadros": {"total": len(frames), "renderizados": done,
-                    "reutilizados": sum(1 for fr in frames if fr.get("reused")),
-                    "so_foto": sum(1 for fr in frames if fr.get("source") is None)},
+        "quadros": lay.frame_counts(frames, done),
         "samples_config": int(spec["render"]["samples"]),
         "samples_camadas": spl,
+        "camadas": meta.get("camadas"),
         "passes": meta["passes"],
         "exr": meta["exr"],
     }

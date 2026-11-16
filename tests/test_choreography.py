@@ -241,3 +241,99 @@ def test_timeline_length_unchanged():
     for it in sched:
         for pl in ch.plan_parts(it, [it["id"]]):
             assert pl.end == pl.start + pl.duration * 2.2
+
+
+# ---------------------------------------------------------------- PT6: marcos do render em camadas
+def _layer_parts(sched, fps):
+    """Peças sintéticas dos itens agendados (como o worker monta para ``layers.plan_layers``)."""
+    from mobilia.render import layers as lay
+
+    parts = []
+    for it in sched:
+        n = 3 if it["role"] in ("books", "plant_medium") else 2
+        names = [f"{it['id']}.p{i}" for i in range(n)]
+        tags = {nm: (i, "drop") for i, nm in enumerate(names)} if it["role"] == "books" else None
+        ur = None
+        plans = ch.plan_parts(it, names, tags)
+        if it.get("motion") == "unroll":
+            f0, f1 = max(1, round(it["start"] * fps)), round((it["start"] + it["duration"]) * fps)
+            ur = (f0, f1)
+            plans = [ch.PartPlan(p.name, "rise", it["start"], 0.25, {"depth": 0.0}) for p in plans]
+        parts += [lay.LayerPart(p.name, it["id"], p, ur) for p in plans]
+    return parts
+
+
+def test_milestones_cover_all_items():
+    """Marcos da coreografia (PT6): 3–5 na sala de teste, em ordem, cada um contém o anterior, todo
+    item aparece em algum e o último (o quadro final) tem todos. No plano do worker, toda peça
+    entra num marco, cada quadro dinâmico tem uma base já assentada e só renderiza peças fora
+    dela, e o fim do vídeo é o marco final."""
+    from mobilia.render import layers as lay
+
+    sched, end = ch.schedule_items(_room_items())
+    ms = ch.milestones(sched)
+    ids = {it["id"] for it in sched}
+    assert 3 <= len(ms) <= len(ch.MILESTONE_CLASSES)
+    assert [m["t"] for m in ms] == sorted(m["t"] for m in ms)
+    for a, b in zip(ms, ms[1:]):
+        assert set(a["itens"]) < set(b["itens"]) and b["t"] - a["t"] >= ch.MILESTONE_MIN_GAP
+    assert set(ms[-1]["itens"]) == ids and set().union(*(m["itens"] for m in ms)) == ids
+    assert {c for m in ms for c in m["classes"]} == {ch.item_class(it) for it in sched}
+    # o plano do render em camadas (Python puro, o worker só executa)
+    fps = 24
+    n = int(math.ceil(ch.timeline_length(end) * fps))
+    parts = _layer_parts(sched, fps)
+    plan = lay.plan_layers(parts, fps, n, [m["itens"] for m in ms])
+    keys = {p.key for p in parts}
+    assert set().union(*(m.parts for m in plan.milestones)) == keys
+    final = [m for m in plan.milestones if m.final]
+    assert len(final) == 1 and final[0].parts == keys and final[0] is plan.milestones[-1]
+    assert 3 <= len(plan.milestones) <= len(ms) + 1
+    by_id = {m.id: m for m in plan.milestones}
+    for fr in plan.frames:
+        if fr.kind == "foto":
+            continue
+        base = by_id.get(fr.base)
+        if base is not None:
+            assert base.frame <= fr.frame
+            assert all(plan.settle[k] <= fr.frame for k in base.parts)       # base sempre parada
+            assert not (fr.layer & base.parts)
+        if fr.kind == "estatico":
+            assert base is not None and not fr.layer
+    tail = [fr for fr in plan.frames if fr.frame > final[0].frame + lay.CROSSFADE_FRAMES]
+    assert tail and all(fr.kind == "estatico" and fr.base == final[0].id and not fr.trans for fr in tail)
+
+
+def test_layer_plan_transitions_fade_out_old_composition():
+    """Na troca de marco, ``CROSSFADE_FRAMES`` quadros levam a composição antiga (marco anterior +
+    a camada dele, com as mesmas peças visíveis) com peso decrescente; nenhum quadro dinâmico deixa
+    uma peça parada fora do marco por uma pausa inteira (vira marco implícito)."""
+    from mobilia.render import layers as lay
+
+    sched, end = ch.schedule_items(_room_items())
+    fps = 24
+    n = int(math.ceil(ch.timeline_length(end) * fps))
+    parts = _layer_parts(sched, fps)
+    plan = lay.plan_layers(parts, fps, n, [m["itens"] for m in ch.milestones(sched)])
+    frames = plan.frames
+    switches = [i for i in range(1, len(frames)) if frames[i].kind != "foto" and frames[i - 1].kind != "foto"
+                and frames[i].base != frames[i - 1].base]
+    assert switches
+    for i in switches:
+        ws = []
+        for j in range(lay.CROSSFADE_FRAMES):
+            fr = frames[i + j]
+            assert fr.trans is not None and fr.trans[0] == frames[i - 1].base
+            old_base = plan.milestone(fr.trans[0])
+            ob = old_base.parts if old_base else frozenset()
+            new_base = plan.milestone(fr.base)
+            # as duas composições mostram as mesmas peças
+            assert fr.trans[1] | ob == fr.layer | (new_base.parts if new_base else frozenset())
+            ws.append(fr.trans[3])
+        assert ws == sorted(ws, reverse=True) and 0 < ws[-1] < ws[0] < 1
+        assert frames[i + lay.CROSSFADE_FRAMES].trans is None or \
+            frames[i + lay.CROSSFADE_FRAMES].base != frames[i].base
+    # pausas sem movimento nunca ficam com peça parada na camada dinâmica
+    for fr in frames:
+        if fr.kind == "dinamico":
+            assert any(fr.frame < plan.settle[k] for k in fr.layer)

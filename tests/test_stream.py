@@ -375,3 +375,140 @@ def test_stream_contact_shadow_like_recompose(tmp_path, capture):
     with pytest.raises(RuntimeError, match="sombra de contato"):
         sc.finish(meta)
     sc.abort()
+
+
+# ---------------------------------------------------------------- PT6: render em camadas
+def _write_layers(path, rgba, sh, border):
+    import OpenEXR
+
+    x0, y0, x1, y1 = border
+    ch = {f"Combined.{c}": np.ascontiguousarray(rgba[y0:y1, x0:x1, i].astype(np.float16)) for i, c in enumerate("RGBA")}
+    ch.update({f"Shadow Catcher.{c}": np.ascontiguousarray(sh[y0:y1, x0:x1, i].astype(np.float16))
+               for i, c in enumerate("RGB")})
+    with OpenEXR.File({"compression": OpenEXR.RLE_COMPRESSION, "type": OpenEXR.scanlineimage}, ch) as f:
+        f.write(str(path))
+
+
+def _layered_job(tmp_path):
+    """Como o worker em camadas: marco 1 (peça A parada), camada dinâmica da peça B sobre ele,
+    marco final (A + B) e a transição de 3 quadros (camada antiga reaproveitada)."""
+    plate8 = np.random.default_rng(3).integers(0, 256, size=(H, W, 3), dtype=np.uint8)
+    d = tmp_path / "render" / "frames"
+    d.mkdir(parents=True)
+
+    def obj(ax=True, bx=None):
+        rgba = np.zeros((H, W, 4), np.float32)
+        sh = np.ones((H, W, 3), np.float32)
+        if ax:
+            rgba[44:60, 66:88] = [0.2, 0.3, 0.1, 1.0]
+            sh[60:64, 64:90] = 0.7
+        if bx is not None:
+            rgba[20:34, bx:bx + 16] = [0.3, 0.1, 0.1, 1.0]
+            sh[34:38, bx - 2:bx + 18] = 0.6
+        return rgba, sh
+
+    ba, bfin = [56, 36, 96, 70], [8, 12, 96, 70]
+    _write_layers(d / "m_00002.exr", *obj(True, None), ba)
+    _write_layers(d / "m_00006.exr", *obj(True, 40), bfin)
+    for f, x in ((2, 12), (3, 20), (4, 30), (5, 38)):
+        _write_layers(d / f"f_{f:05d}.exr", *obj(False, x), [x - 8, 12, x + 26, 44])
+    _write_layers(d / "t_00006.exr", *obj(False, 40), [32, 12, 66, 44])
+    m1 = {"source": "m_00002.exr", "border": ba, "frame": 2}
+    mf = {"source": "m_00006.exr", "border": bfin, "frame": 6}
+    frames = [{"frame": 1, "source": None, "border": None}]
+    for f, x in ((2, 12), (3, 20), (4, 30), (5, 38)):
+        frames.append({"frame": f, "source": f"f_{f:05d}.exr", "border": [x - 8, 12, x + 26, 44], "mode": "full",
+                       "crop": True, "camada": "dinamico", "base": m1})
+    tr = {"source": "t_00006.exr", "border": [32, 12, 66, 44], "base": m1}
+    for f in (6, 7, 8):
+        frames.append({"frame": f, **{k: v for k, v in mf.items() if k != "frame"}, "mode": "full", "crop": True,
+                       "camada": "final", "transicao": {**tr, "peso": round(1 - (f - 5) / 4, 6)}})
+    fin = {"source": "m_00006.exr", "border": bfin, "mode": "full", "crop": True, "camada": "final"}
+    frames += [{"frame": 9, **fin}, {"frame": 10, **fin, "reused": True}]
+    return plate8, {"exr": {"recorte": True, "codec": "RLE"}, "frames": frames}
+
+
+def _layered_reference(tmp_path, plate8, meta):
+    """Referência direta com ``LayerAccumulator.static_base``/``compose_dynamic`` + ``blend_frames``."""
+    from mobilia.composite.compositor import Compositor, LayerAccumulator, blend_frames, load_layers
+
+    comp = Compositor(plate8, seed=7)
+    feather = max(16, int(0.04 * float(np.hypot(W, H))))
+    d = tmp_path / "render" / "frames"
+
+    def layer(desc):
+        return load_layers(d / desc["source"], desc["border"], (H, W), feather)
+
+    def base(desc):
+        rgba, sh, o = layer(desc)
+        return LayerAccumulator.static_base(comp, 0, rgba, sh, o)
+
+    out = []
+    for fr in meta["frames"]:
+        if fr["source"] is None:
+            out.append(_md5(plate8))
+            continue
+        b = base(fr["base"]) if fr.get("base") else None
+        rgba, sh, o = layer(fr)
+        o8, _ = LayerAccumulator.compose_dynamic(comp, fr["frame"], b, rgba, sh, o)
+        if fr.get("transicao"):
+            t = fr["transicao"]
+            rgba, sh, oo = layer(t)
+            old8, _ = LayerAccumulator.compose_dynamic(comp, fr["frame"], base(t["base"]), rgba, sh, oo)
+            o8 = blend_frames(o8, old8, t["peso"])
+        out.append(_md5(o8))
+    return out
+
+
+def test_layered_stream_matches_reference_and_deletes_exr(tmp_path, capture):
+    """Render em camadas no fluxo e no ``recompor``: mesmos bytes da referência direta, cada marco
+    composto uma vez (base de vários quadros e quadro parado), transição misturada, quadro
+    reaproveitado do cache, verificação pela união das máscaras e todos os EXR apagados no fim
+    (os marcos só depois do último quadro que os usa)."""
+    from mobilia import pipeline
+    from mobilia.composite.stream import StreamComposer
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _layered_job(tmp_path)
+    ref = _layered_reference(tmp_path, plate8, meta)
+    assert len(set(ref)) == 9                               # transição: 3 quadros diferentes
+    capture["composite"] = 0
+    res = pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7, ProgressEmitter(), workers=3)
+    assert capture["frames"] == ref
+    # 2 marcos + 4 camadas + 3 transições (só a antiga: a nova é o marco final já composto)
+    assert capture["composite"] == 9
+    c = res["composicao"]
+    assert (c["quadros_compostos"], c["quadros_cache"], c["quadros_so_foto"]) == (8, 1, 1)
+    assert res["preservacao"]["preservado_exato_todos"] and res["preservacao"]["quadros_verificados"] == 10
+    # fluxo (render em andamento), apagando os EXR: mesmos bytes
+    capture["frames"].clear()
+    sc = StreamComposer(tmp_path, plate8, tmp_path / "w.mp4", 12, 7, ProgressEmitter(), streaming=True,
+                        delete_exr=True, workers=2, n_frames=len(meta["frames"]))
+    for fr in meta["frames"]:
+        sc.push(dict(fr))
+    res = sc.finish(meta)
+    assert capture["frames"] == ref
+    assert res["composicao"]["exr_apagados"] == 7
+    assert not list((tmp_path / "render" / "frames").glob("*.exr"))
+
+
+def test_layered_stream_catches_byte_outside_union_mask(tmp_path, monkeypatch):
+    """Um byte da foto mudado longe das duas camadas (marco e dinâmica) derruba o quadro."""
+    from mobilia import pipeline
+    from mobilia.composite.compositor import Compositor
+    from mobilia.composite.stream import PreservationError
+    from mobilia.jobs import ProgressEmitter
+
+    plate8, meta = _layered_job(tmp_path)
+    orig = Compositor.composite
+
+    def bad(self, frame, *a, **kw):
+        out, st = orig(self, frame, *a, **kw)
+        if frame == 4 and kw.get("base") is not None:
+            out = out.copy()
+            out[H - 1, 0, 0] ^= 1                       # canto oposto: fora de qualquer influência
+        return out, st
+
+    monkeypatch.setattr(Compositor, "composite", bad)
+    with pytest.raises(PreservationError, match="quadro 4"):
+        pipeline.compose_video(tmp_path, plate8, meta, tmp_path / "v.mp4", 12, 7, ProgressEmitter(), workers=2)

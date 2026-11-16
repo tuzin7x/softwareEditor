@@ -461,3 +461,65 @@ def plan_parts(item: dict, part_names: list[str], part_tags: dict | None = None)
 
 def timeline_length(end_anim: float, hold_end: float = 2.5) -> float:
     return end_anim + hold_end
+
+
+# ------------------------------------------------------------------ marcos do render em camadas (PT6)
+# Classes da coreografia, na ordem em que costumam assentar. Cada classe completa vira um "marco":
+# um render estático (muitas amostras) de tudo o que já assentou, que serve de base para os quadros
+# com movimento seguintes (só as peças ainda não incluídas na base são renderizadas de novo).
+MILESTONE_CLASSES = ("grandes", "mesas", "laterais", "decoracao", "parede")
+_CLASS_BY_ROLE = {
+    "rug": "grandes", "sofa": "grandes", "bed": "grandes", "armchair": "grandes", "tv_console": "grandes",
+    "dresser": "grandes", "shelf": "grandes",
+    "coffee_table": "mesas", "side_table": "mesas", "dining_table": "mesas", "desk": "mesas",
+    "nightstand": "mesas",
+    "wall_art": "parede", "wall_mirror": "parede", "curtain": "parede",
+}
+MILESTONE_MIN_GAP = 0.3     # s: marcos mais próximos que isso viram um só (o mais tarde)
+
+
+def item_class(item: dict) -> str:
+    """Classe do item para os marcos: móveis grandes, mesas, peças laterais, decoração, parede."""
+    role = str(item.get("role", ""))
+    if item.get("mount") == "on_top" or role in SMALL_ROLES:
+        return "decoracao"
+    return _CLASS_BY_ROLE.get(role, "laterais")
+
+
+def item_settle_end(item: dict) -> float:
+    """Instante (s) aproximado em que o item agendado para de mudar na imagem."""
+    return float(item["start"]) + item_motion_window(item)
+
+
+def milestones(schedule: list[dict], min_gap: float = MILESTONE_MIN_GAP) -> list[dict]:
+    """Marcos estáticos do render em camadas a partir dos itens agendados (``schedule_items``).
+
+    Um marco por classe da coreografia (``MILESTONE_CLASSES``), no instante em que o último item
+    da classe assenta; o marco contém TODOS os itens assentados até ali (de qualquer classe), então
+    a lista é crescente e o último marco tem todos os itens (é o quadro final, o *hold*). Marcos a
+    menos de ``min_gap`` s um do outro são fundidos no mais tarde. Devolve
+    ``[{"t": s, "classes": [...], "itens": [ids]}]`` em ordem de tempo. O worker converte cada
+    marco no primeiro quadro em que todas as peças dos seus itens estão em repouso exato."""
+    if not schedule:
+        return []
+    ends = {str(it["id"]): item_settle_end(it) for it in schedule}
+    by_class: dict[str, float] = {}
+    for it in schedule:
+        c = item_class(it)
+        by_class[c] = max(by_class.get(c, 0.0), ends[str(it["id"])])
+    t_all = max(ends.values())
+    times = sorted((t, c) for c, t in by_class.items())
+    out: list[dict] = []
+    for t, c in times:
+        if out and t - out[-1]["t"] < min_gap:
+            out[-1]["t"] = t
+            out[-1]["classes"].append(c)
+        else:
+            out.append({"t": t, "classes": [c]})
+    if t_all - out[-1]["t"] > 1e-9:            # nunca acontece (o último é o máximo), por garantia
+        out.append({"t": t_all, "classes": []})
+    out[-1]["t"] = t_all
+    for m in out:
+        m["itens"] = sorted(i for i, e in ends.items() if e <= m["t"] + 1e-9)
+        m["t"] = round(m["t"], 4)
+    return out

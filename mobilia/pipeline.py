@@ -22,7 +22,7 @@ from PIL import Image
 from . import __version__
 from .config import AppConfig
 from .hardware import choose_profile, detect_hardware
-from .render.layers import samples_by_layer
+from .render.layers import frame_counts, samples_by_layer
 from .jobs import JobRequest, JobResult, ProgressEmitter
 from .photo import load_photo
 from .telemetry import (ENV_T_CLIQUE, ETAPAS, Stopwatch, VramMonitor, env_time, stages_sum, torch_peak_mb,
@@ -35,8 +35,17 @@ ENV_BLENDER_WORKER = "MOBILIA_BLENDER_WORKER"
 ENV_MANTER_EXR = "MOBILIA_MANTER_EXR"
 
 
+# "0" volta ao render de quadro único (chave de retorno do PT6; o padrão é o render em camadas)
+ENV_CAMADAS = "MOBILIA_CAMADAS"
+
+
 def keep_exr() -> bool:
     return os.environ.get(ENV_MANTER_EXR, "").strip().lower() in ("1", "true", "sim", "yes")
+
+
+def layered_render() -> bool:
+    """Render em camadas (PT6) ligado, a menos que ``MOBILIA_CAMADAS`` desligue."""
+    return os.environ.get(ENV_CAMADAS, "1").strip().lower() not in ("0", "false", "nao", "não", "no")
 
 
 def _quality(req: JobRequest, prof) -> dict:
@@ -246,7 +255,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
                                 texture_res=q["texture_res"], hold_start=hold_start, hold_end=hold_end,
                                 motion_blur=q["motion_blur"], seed=req.seed,
                                 sun=sun.to_dict() if sun is not None else None, occluders=occ,
-                                sun_mask=sun_diag.get("patch_mask") if sun is not None else None)
+                                sun_mask=sun_diag.get("patch_mask") if sun is not None else None,
+                                layered=layered_render())
         em.stage("assets", 1.0, f"{len(spec['items'])} modelos prontos")
         dl = min(float(net["s"]), time.perf_counter() - t)
         sw.add("download", dl)
@@ -359,6 +369,7 @@ def _blender_stages(sw: Stopwatch, tele: dict, proc: dict) -> None:
 
 def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, render_meta, comp, first,
                   download, vram, vram_torch) -> dict:
+    from .composite.stream import entry_files
     from .telemetry import summarize_render
 
     tele = render_meta.get("telemetria") or {}
@@ -366,10 +377,8 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
     por_quadro = tele.get("por_quadro") or []
     summ = summarize_render(por_quadro, W, H)
     frames = render_meta.get("frames") or []
-    quadros = tele.get("quadros") or {
-        "total": len(frames), "renderizados": len({f.get("source") for f in frames if f.get("source")}),
-        "reutilizados": sum(1 for f in frames if f.get("reused")),
-        "so_foto": sum(1 for f in frames if f.get("source") is None)}
+    quadros = tele.get("quadros") or frame_counts(frames, len({s for f in frames if f.get("source")
+                                                               for s in entry_files(f)}))
     calib = render_meta.get("calibration")
     gpu = hw.best_gpu
     calib_view = calibration_report(calib)
@@ -415,6 +424,9 @@ def _build_report(req, stamp, original, plate, q, hw, prof, room, layout, sun, r
             "orcamento": {"previsto_s": None, "spp_dinamico": None, "spp_marcos": None, "escala_cg": None,
                           "motivo": "controle de orçamento ainda não ativo"},
             "camadas": summ["camadas"],
+            # PT6: render em camadas (marcos + camada dinâmica) ou quadro único (``render.camadas``)
+            "modo_camadas": (render_meta.get("camadas") or tele.get("camadas") or {"modo": "unica"}).get("modo"),
+            "plano_camadas": render_meta.get("camadas") or tele.get("camadas"),
             "cobertura_recorte_media": summ["cobertura_recorte_media"],
             "aquecimento": tele.get("aquecimento"),
             "tempos_worker_s": tele.get("tempos_s"),
@@ -489,13 +501,14 @@ def compose_video(work: Path, plate8: np.ndarray, render_meta: dict, out_path: P
     verificação do MP4 por *seek*. Mede por quadro a leitura dos EXR, a composição, a verificação
     e o envio ao codificador (``composicao.por_quadro``).
     """
-    from .composite.stream import StreamComposer
+    from .composite.stream import StreamComposer, entry_files
 
     em.stage("composicao", 0.0, "Compondo sobre a foto original")
     frames_dir = work / "render" / "frames"
     frames = render_meta["frames"]
-    # último quadro que usa cada EXR (quadros reaproveitados apontam para o EXR anterior)
-    last_use = {fr["source"]: i + 1 for i, fr in enumerate(frames) if fr.get("source")}
+    # último quadro que usa cada EXR (quadros reaproveitados apontam para o EXR anterior; no render
+    # em camadas, o marco e a camada da transição também contam)
+    last_use = {s: i + 1 for i, fr in enumerate(frames) if fr.get("source") for s in entry_files(fr)}
     missing = [s for s in last_use if not (frames_dir / s).exists()]
     if missing:
         raise FileNotFoundError(

@@ -75,8 +75,8 @@ As amostras são **por camada de quadro** (`render/layers.py`, gravadas em `scen
 `render.samples_layers`): `final` é a cena completa em repouso (o *hold*, que nunca perde amostras),
 `marco` um quadro parado com parte dos itens e `dinamico` um quadro com alguma peça em movimento (o
 desfoque de movimento esconde o ruído residual). A amostragem adaptativa tem limiar 0,02 e mínimo
-explícito (8 nos dinâmicos, 32 nos parados). Enquanto cada quadro ainda é a cena inteira (antes do
-render em camadas), os 3 quadros dinâmicos logo antes de um quadro parado sobem as amostras em
+explícito (8 nos dinâmicos, 32 nos parados). No modo de quadro único (chave de retorno do render em
+camadas, abaixo), os 3 quadros dinâmicos logo antes de um quadro parado sobem as amostras em
 progressão geométrica, para o ruído não "pular" na entrada do *hold*. Vídeo final a 24 fps.
 
 **Gestão de VRAM:** nunca há dois modelos na GPU ao mesmo tempo. MoGe-2 → libera → OneFormer → libera →
@@ -84,9 +84,50 @@ Blender roda em **outro processo** (a VRAM do PyTorch já foi devolvida). Em GPU
 o denoiser (guiado por albedo e normal) roda na GPU: OIDN quando o Cycles acha uma GPU compatível,
 senão o do OptiX; só sem GPU de render ele fica na CPU.
 
+**Render em camadas (PT6, padrão):** o plano é Python puro (`render/layers.py::plan_layers`), o
+worker só o executa (`blender_worker.render_layered`).
+- **Marcos estáticos:** um por classe da coreografia (`choreography.milestones`: móveis grandes,
+  mesas, peças laterais, decoração, parede; marcos a menos de 0,3 s viram um só). O marco é o
+  primeiro quadro em que todas as peças da classe estão em repouso exato e contém **todas** as
+  peças já assentadas até ali. O último é o quadro final (*hold*), renderizado **primeiro**, com as
+  amostras do final; os outros com as de `marco`. Toda pausa sem movimento cujo conjunto parado não
+  é um marco vira um marco implícito. Cada marco usa o border de todas as suas peças (o mesmo do
+  quadro único), nada de recorte por item.
+- **Camada dinâmica:** num quadro com movimento só são renderizadas as peças fora do marco vigente
+  (as que se mexem e as que já pararam depois dele), no recorte delas (poses de f−1, f, f+1 + margem
+  de 0,35 m no piso e acima + projeção da sombra do sol), com as amostras de `dinamico` e desfoque de
+  movimento. As peças do marco ficam na cena como *shadow catcher* (`set_layer_roles`): escondem a
+  peça nova atrás delas, recebem a sombra e a luz rebatida dela e continuam sombreando e
+  iluminando a peça nova. As demais somem de todos os raios (visibilidade por raio, que não é
+  animada). Renders com a mesma assinatura (marco + poses das peças da camada) do quadro anterior
+  são reaproveitados.
+- **Transição:** na troca de marco, 3 quadros misturam a composição antiga (marco anterior + a
+  camada dele, com as mesmas peças visíveis) com a nova, peso 3/4, 1/2, 1/4, para o ruído das peças
+  que entram no marco não "pular". Custa um render da camada antiga por troca (reaproveitado nas
+  pausas).
+- Validação em CPU (sala de teste, layout PT9, 480 px, 32 amostras nos marcos e 8 na camada
+  dinâmica): 5 marcos, 148 renders dinâmicos e 13 da transição. O recorte médio da camada dinâmica
+  caiu de 71% (quadro único) para 45% da imagem e o tempo de amostragem total caiu 19% (o resto, na
+  CPU, é o custo fixo por quadro do denoiser). Os 251 quadros saíram byte a byte iguais à foto fora
+  da união das máscaras; nos pixels de CG a diferença média para o quadro único ficou ≤ 1,5/255 (as
+  peças paradas têm 32 amostras em vez de 8), sem emendas nas bordas dos recortes
+  (`docs/poc/v2/pt6_camadas_vs_unico_480.jpg`).
+- **Aproximações (documentadas):** (1) no pixel de borda em que uma peça do marco está NA FRENTE da
+  peça nova, a parte coberta pelo marco vira mistura com a foto (efeito "over" de 1 px); (2) o reflexo
+  da peça nova numa superfície brilhante do marco entra só como a razão de luz do catcher (cinza);
+  (3) a sombra de contato analítica da camada dinâmica multiplica a do marco (produto, não união) e
+  só escurece pixels em que o marco é foto (sobre o tapete vale a sombra do render, como no quadro
+  único); (4) peças paradas depois do marco vigente continuam na camada dinâmica, com as amostras
+  dela, até o marco seguinte.
+- **Chave de retorno:** `render.camadas = false` no `scene.json` (ou `MOBILIA_CAMADAS=0` no motor)
+  volta ao quadro único: a cena inteira em todo quadro com movimento. Depuração com `only_frames`
+  funciona nos dois modos (no de camadas renderiza só os marcos que esses quadros usam).
+
 **Render incremental (experimental, desligado):** re-renderizar só a região das peças em movimento
-reduziu a área renderizada em ~14% na cena de teste. Mas sombras suaves junto à parede ultrapassam a
-região e deixaram emendas sutis, então a qualidade venceu e o modo fica desligado (`render.incremental`).
+colando sobre o quadro anterior reduziu a área renderizada em ~14% na cena de teste. Mas sombras
+suaves junto à parede ultrapassam a região e deixaram emendas sutis, então o modo fica desligado
+(`render.incremental`; ligado, ele desliga o render em camadas). O render em camadas não acumula
+quadros: cada quadro é marco + camada dele, e a sombra da camada é cortada com rampa nas bordas.
 
 **Otimizações de render (implementadas):**
 - *border* por quadro: só a região da tela ocupada pelos móveis (+ margem de sombra) é renderizada;
@@ -297,6 +338,13 @@ renderiza os quadros seguintes: depois do último render sobra só a "cauda".
   NVENC usa as mesmas opções do encode (preset, AQ temporal...) e roda numa thread durante a análise.
 - Se o worker não anunciar os quadros (versão antiga), tudo é composto no fim a partir do
   `frames.json`; se os anúncios não baterem com o arquivo, o trabalho para com erro.
+- **Camadas (PT6):** o marco é composto uma vez sobre a foto (`LayerAccumulator.static_base`) e
+  guardado até o fim; um quadro dinâmico compõe a camada sobre ele com a MESMA conta
+  (`compose_dynamic`: `base · S'_din · (1 − A_din) + C_din`, a base no lugar da foto, mesma conversão
+  sRGB→linear). A verificação usa a **união** das máscaras de influência do marco e da camada (e das
+  duas da transição). A transição mistura em 8 bits (`blend_frames`): onde as duas composições são
+  iguais, os bytes não mudam. Os EXR dos marcos são apagados no fim (ou depois do último quadro
+  que os usa, no `recompor`).
 - `recompor` usa o mesmo caminho com todos os quadros de uma vez: na sala de teste a 960 × 720 (251
   quadros, 176 EXR), 55 s → 9 s em 4 núcleos de CPU, com os mesmos quadros mestres.
 - `report.json`: `composicao` (`paralela`, `trabalhadores`, `compostos_durante_render`, `cauda_s`,
@@ -439,10 +487,12 @@ A melhoria sugerida por essa pesquisa — material de catcher com `Light Path �
   calib_sun_mask.png      manchas de sol da foto (ajuste do sol e aberturas de sol das janelas)
   render/calib_*.exr      renders da sala vazia da calibração (emissão, janelas, ambiente, sol)
   render/calib_pred.npy   predição da sala vazia com a luz final (base do ajuste do CG)
-  render/frames/*.exr     camadas 3D (Combined + Shadow Catcher) por quadro renderizado, recortadas
-                          no border; apagadas depois da composição (MOBILIA_MANTER_EXR=1 mantém)
-  render/frames.json      mapa quadro → render/border/reuso (+ poses da sombra de contato) + calibração
-                          + silhuetas de contato + telemetria do worker
+  render/frames/*.exr     camadas 3D (Combined + Shadow Catcher) por render, recortadas no border:
+                          m_* marcos, f_* camada dinâmica, t_* camada antiga da transição;
+                          apagadas depois da composição (MOBILIA_MANTER_EXR=1 mantém)
+  render/frames.json      mapa quadro → render/border/reuso, marco de base e transição (+ poses da
+                          sombra de contato) + calibração + silhuetas de contato + plano de camadas
+                          (`camadas`) + telemetria do worker
   quadros/*.jpg           prévias de quadros compostos
   report.json             preservação, PSNR do encode, telemetria completa (tempos, GPU, render)
   encode.log, interface.log  registros do FFmpeg e da saída do motor (vão no zip de diagnóstico)

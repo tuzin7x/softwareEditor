@@ -867,3 +867,259 @@ def test_worker_contact_model_records_floor_parts(tmp_path):
         lift.append(float((moved[:, 2] - pts[:, 2]).mean()))
         assert abs(lift[-1] - res["dz"][r[0]]) < 0.01, (lift[-1], res["dz"][r[0]])
     assert max(lift) > 0.05
+
+
+# ---------------------------------------------------------------- PT6: render em camadas
+def _two_objects(H, W):
+    """Duas peças separadas (A parada, B "dinâmica"), cada uma com a sua sombra suave no piso."""
+    rgba_a = np.zeros((H, W, 4), np.float32)
+    rgba_b = np.zeros((H, W, 4), np.float32)
+    rgba_a[100:150, 40:110] = (0.25, 0.12, 0.06, 1.0)
+    rgba_a[99, 40:110] = (0.1, 0.05, 0.02, 0.45)
+    rgba_b[110:160, 200:280] = (0.08, 0.2, 0.3, 1.0)
+    rgba_b[109, 200:280] = (0.03, 0.08, 0.12, 0.5)
+    yy, xx = np.mgrid[0:H, 0:W]
+    sh_a = 1.0 - 0.55 * np.exp(-(((yy - 152) / 5.0) ** 2 + ((xx - 75) / 30.0) ** 2))
+    sh_b = 1.0 - 0.55 * np.exp(-(((yy - 162) / 5.0) ** 2 + ((xx - 240) / 34.0) ** 2))
+    return (rgba_a, np.repeat(sh_a[..., None], 3, -1).astype(np.float32),
+            rgba_b, np.repeat(sh_b[..., None], 3, -1).astype(np.float32))
+
+
+def _layer_plate(H, W, seed=4):
+    rng = np.random.default_rng(seed)
+    plate = rng.integers(0, 256, size=(H, W, 3), dtype=np.uint8)
+    ramp = (np.arange(95, H) - 95)[:, None, None] // 20
+    plate[95:] = np.clip(np.array([175, 158, 138])[None, None, :] + ramp, 0, 255).astype(np.uint8)
+    return plate
+
+
+def test_layered_equals_single_layer_when_static():
+    """Sem movimento, marco (peça A) + camada dinâmica (peça B) reproduzem o quadro único (A e B no
+    mesmo render) dentro de 1/255, com o grão e a nitidez da câmera ligados; com a camada
+    dinâmica vazia o resultado é o próprio marco, byte a byte."""
+    from mobilia.composite.compositor import LayerAccumulator
+
+    H, W = 240, 320
+    plate = _layer_plate(H, W)
+    rgba_a, sh_a, rgba_b, sh_b = _two_objects(H, W)
+    for sharp in (0.0, 0.7):
+        comp = Compositor(plate)
+        comp.plate.blur_sigma_px = sharp
+        single, st1 = comp.composite(9, rgba_a + rgba_b, sh_a * sh_b, None)
+        base = LayerAccumulator.static_base(comp, 9, rgba_a, sh_a, source="m_00009.exr")
+        layered, st2 = LayerAccumulator.compose_dynamic(comp, 9, base, rgba_b, sh_b)
+        d = np.abs(single.astype(np.int16) - layered.astype(np.int16))
+        assert d.max() <= 1, (sharp, int(d.max()))
+        assert st1.preserved_exact and st2.preserved_exact
+        # o marco sozinho é um quadro comum (mesmos bytes de uma composição só de A)
+        only_a, _ = comp.composite(9, rgba_a, sh_a, None)
+        assert np.array_equal(base.out8, only_a)
+        # camada dinâmica vazia: o quadro é o marco
+        empty, _ = LayerAccumulator.compose_dynamic(comp, 10, base, np.zeros_like(rgba_b), np.ones_like(sh_b))
+        assert np.array_equal(empty, base.out8)
+        # e sem marco a camada dinâmica é o quadro único dela
+        alone, _ = LayerAccumulator.compose_dynamic(comp, 9, None, rgba_b, sh_b)
+        assert np.array_equal(alone, comp.composite(9, rgba_b, sh_b, None)[0])
+
+
+def test_layered_plate_bit_exact():
+    """A camada dinâmica sobre o marco: fora da máscara de influência dela a saída é o marco byte a
+    byte; fora da UNIÃO das máscaras (marco ∪ dinâmica) é a foto byte a byte (a máscara só do
+    dinâmico não basta: a verificação a acusaria). Com camadas recortadas (``origin``) e com a
+    peça dinâmica na frente da parada e sombreando-a, o resultado é o mesmo."""
+    from mobilia.composite.compositor import LayerAccumulator
+    from mobilia.composite.verify import MARGIN_PX, influence_mask, outside_mask_equal
+
+    H, W = 240, 320
+    plate = _layer_plate(H, W, seed=5)
+    comp = Compositor(plate)
+    radius = comp.influence_px + MARGIN_PX
+    rgba_a, sh_a, rgba_b, sh_b = _two_objects(H, W)
+    # B passa na frente de A (cobre parte dela) e projeta sombra sobre ela (catcher no render)
+    rgba_b[120:150, 90:200] = (0.08, 0.2, 0.3, 1.0)
+    sh_b[100:150, 40:90] *= 0.8
+    base = LayerAccumulator.static_base(comp, 3, rgba_a, sh_a)
+    out, st = LayerAccumulator.compose_dynamic(comp, 3, base, rgba_b, sh_b)
+    m_a = influence_mask(rgba_a[..., 3], (0, 0), (H, W), radius)
+    m_b = influence_mask(rgba_b[..., 3], (0, 0), (H, W), radius)
+    assert st.preserved_exact
+    assert outside_mask_equal(out, base.out8, m_b) == (True, 0, 0)
+    assert outside_mask_equal(out, plate, m_a | m_b) == (True, 0, 0)
+    assert (~(m_a | m_b)).any()
+    ok_b, n_bad, _ = outside_mask_equal(out, plate, m_b)
+    assert not ok_b and n_bad > 0                       # o marco está fora da máscara do dinâmico
+    # a sombra de B escureceu a peça A do marco (onde B não a cobre)
+    assert out[105:118, 45:85].mean() < base.out8[105:118, 45:85].mean() - 3
+    # camadas recortadas no border (como vêm do EXR): mesmos bytes
+    bx = [180, 95, 300, 175]
+    x0, y0, x1, y1 = bx
+    rg = np.zeros_like(rgba_b)
+    sb = np.ones_like(sh_b)
+    rg[y0:y1, x0:x1] = rgba_b[y0:y1, x0:x1]
+    sb[y0:y1, x0:x1] = sh_b[y0:y1, x0:x1]
+    full, _ = LayerAccumulator.compose_dynamic(comp, 4, base, rg, sb)
+    crop, _ = LayerAccumulator.compose_dynamic(comp, 4, base, rgba_b[y0:y1, x0:x1].copy(),
+                                               sh_b[y0:y1, x0:x1].copy(), origin=(x0, y0))
+    assert np.array_equal(full, crop)
+    # o marco é só leitura: nenhuma composição dinâmica pode mexer nele
+    with pytest.raises(ValueError):
+        base.out8[0, 0, 0] = 1
+
+
+def test_blend_frames_keeps_equal_pixels():
+    """Transição entre marcos: onde as duas composições coincidem (a foto) os bytes não mudam."""
+    from mobilia.composite.compositor import blend_frames
+
+    rng = np.random.default_rng(6)
+    a = rng.integers(0, 256, size=(20, 30, 3), dtype=np.uint8)
+    b = a.copy()
+    b[5:10, 5:12] = rng.integers(0, 256, size=(5, 7, 3), dtype=np.uint8)
+    for w in (0.0, 0.25, 0.5, 0.75, 1.0):
+        o = blend_frames(a, b, w)
+        same = (a == b).all(-1)
+        assert np.array_equal(o[same], a[same])
+    assert np.array_equal(blend_frames(a, b, 0.0), a) and np.array_equal(blend_frames(a, b, 1.0), b)
+    mid = blend_frames(a, b, 0.5).astype(int)
+    assert np.abs(mid - (a.astype(int) + b.astype(int)) / 2).max() <= 0.5 + 1e-9
+
+
+def test_contact_shadow_of_dynamic_layer_skips_milestone_cg():
+    """A sombra de contato da camada dinâmica só escurece pixels em que o marco é foto: sobre o CG
+    do marco (p. ex. o tapete) vale a sombra do render, como no quadro único."""
+    from mobilia.composite.compositor import LayerAccumulator
+
+    H, W = 240, 320
+    plate = _layer_plate(H, W, seed=7)
+    comp = Compositor(plate, CompositeSettings(grain_strength=0.0))
+    comp.plate.blur_sigma_px = 0.0
+    rug = np.zeros((H, W, 4), np.float32)
+    rug[150:200, 60:160] = (0.3, 0.1, 0.1, 1.0)
+    base = LayerAccumulator.static_base(comp, 1, rug, np.ones((H, W, 3), np.float32))
+    obj = np.zeros((H, W, 4), np.float32)
+    obj[120:160, 100:200] = (0.1, 0.1, 0.1, 1.0)
+
+    class _C:                       # oclusão de contato uniforme 1 em todo o recorte
+        def occlusion(self, box, where=None):
+            return np.ones((box[3] - box[1], box[2] - box[0]), np.float32)
+
+    out, st = LayerAccumulator.compose_dynamic(comp, 2, base, obj, np.ones((H, W, 3), np.float32), contact=_C())
+    assert st.contact_pixels > 0
+    on_rug = (slice(162, 170), slice(70, 95))
+    on_floor = (slice(162, 170), slice(170, 195))
+    assert np.array_equal(out[on_rug], base.out8[on_rug])
+    assert out[on_floor].mean() < plate[on_floor].mean() - 10
+
+
+_LAYER_SCRIPT = r'''
+import json, sys
+from pathlib import Path
+import bpy
+from mobilia.render import blender_worker as bw
+
+out = Path(sys.argv[1])
+W, H, spp = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+bpy.ops.wm.read_factory_settings(use_empty=True)
+sc = bpy.context.scene
+sc.render.engine = "CYCLES"
+sc.cycles.device = "CPU"
+sc.cycles.samples = spp
+sc.cycles.use_denoising = True
+sc.cycles.seed = 3
+sc.render.film_transparent = True
+sc.render.resolution_x, sc.render.resolution_y = W, H
+sc.view_settings.view_transform = "Standard"
+sc.view_layers[0].cycles.use_pass_shadow_catcher = True
+im = sc.render.image_settings
+im.media_type = "MULTI_LAYER_IMAGE"
+im.color_depth = "32"
+
+def mat(c):
+    m = bpy.data.materials.new("m")
+    m.use_nodes = True
+    m.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (*c, 1)
+    return m
+
+bpy.ops.mesh.primitive_plane_add(size=20)
+floor = bpy.context.object
+floor.data.materials.append(mat((0.6, 0.6, 0.6)))
+floor.is_shadow_catcher = True
+bpy.ops.mesh.primitive_cube_add(size=1, location=(-0.2, 0.3, 0.5))
+a = bpy.context.object
+a.name = "A_corpo"
+a.scale = (1.4, 0.8, 1.0)
+a.data.materials.append(mat((0.7, 0.25, 0.2)))
+bpy.ops.mesh.primitive_uv_sphere_add(radius=0.35, location=(0.55, -0.55, 0.35))
+b = bpy.context.object
+b.name = "B_bola"
+b.data.materials.append(mat((0.2, 0.3, 0.75)))
+bpy.ops.object.light_add(type="SUN", rotation=(0.7, 0.35, 0.4))
+bpy.context.object.data.energy = 3
+bpy.ops.object.camera_add(location=(0, -6, 3.2), rotation=(1.12, 0, 0))
+sc.camera = bpy.context.object
+w = bpy.data.worlds.new("w")
+sc.world = w
+w.use_nodes = True
+w.node_tree.nodes["Background"].inputs[1].default_value = 0.4
+rts = [{"item": {"id": "A"}, "parts": [a]}, {"item": {"id": "B"}, "parts": [b]}]
+
+def render(name):
+    sc.render.filepath = str(out / name)
+    bpy.ops.render.render(write_still=True)
+
+bw.set_layer_roles(rts, None)
+render("unico.exr")
+bw.set_layer_roles(rts, frozenset({"A_corpo"}))                          # marco: só A
+render("marco.exr")
+n = bw.set_layer_roles(rts, frozenset({"B_bola"}), frozenset({"A_corpo"}))   # camada de B, A catcher
+render("dinamico.exr")
+print("RESULT:" + json.dumps({"trocas": n, "catcher": bool(a.is_shadow_catcher), "cam_b": bool(b.visible_camera)}))
+'''
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(__import__("importlib").util.find_spec("bpy") is None, reason="bpy não está instalado")
+def test_layered_blender_matches_single_render(tmp_path):
+    """Cycles real (320 px): marco (peça A) + camada dinâmica (peça B com A como *shadow catcher*)
+    compostos reproduzem o render único das duas peças: diferença média < 2/255 nos pixels de CG e
+    das sombras, zero fora da máscara de influência (a foto)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    from mobilia.composite.compositor import LayerAccumulator, read_render_passes
+    from mobilia.composite.verify import MARGIN_PX, influence_mask
+
+    W, H = 320, 240
+    repo = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run([sys.executable, "-c", textwrap.dedent(_LAYER_SCRIPT), str(tmp_path), str(W), str(H), "64"],
+                          cwd=repo, env=env, capture_output=True, text=True, timeout=900)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT:")]
+    assert proc.returncode == 0 and lines, proc.stderr[-3000:]
+    res = json.loads(lines[-1][len("RESULT:"):])
+    assert res == {"trocas": 2, "catcher": True, "cam_b": True}
+    yy, xx = np.mgrid[0:H, 0:W]
+    plate = np.stack([120 + 60 * yy / H, 110 + 50 * xx / W, 100 + 0 * xx], -1).astype(np.uint8)
+    comp = Compositor(plate)
+    one = read_render_passes(tmp_path / "unico.exr")
+    ma = read_render_passes(tmp_path / "marco.exr")
+    dy = read_render_passes(tmp_path / "dinamico.exr")
+    single, _ = comp.composite(1, one[0], one[1], None)
+    base = LayerAccumulator.static_base(comp, 1, ma[0], ma[1])
+    layered, st = LayerAccumulator.compose_dynamic(comp, 1, base, dy[0], dy[1])
+    assert st.preserved_exact
+    radius = comp.influence_px + MARGIN_PX
+    mask = influence_mask(ma[0][..., 3], (0, 0), (H, W), radius) | influence_mask(dy[0][..., 3], (0, 0), (H, W), radius)
+    assert np.array_equal(layered[~mask], plate[~mask]) and np.array_equal(single[~mask], plate[~mask])
+    touched = (single != plate).any(-1) | (layered != plate).any(-1)
+    d = np.abs(single.astype(np.int16) - layered.astype(np.int16))[touched]
+    assert touched.sum() > 0.05 * W * H
+    assert d.mean() < 2.0, d.mean()
+    # a sombra de B sobre A aparece no composto em camadas (A do marco escurece onde B a sombreia)
+    sh_on_a = (dy[1].mean(-1) < 0.9) & (ma[0][..., 3] > 0.99)
+    assert sh_on_a.any()
+    assert layered[sh_on_a].mean() < base.out8[sh_on_a].mean()

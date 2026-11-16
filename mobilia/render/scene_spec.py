@@ -18,7 +18,8 @@ from ..layout.model import Layout
 from ..photo import srgb_to_linear
 from . import choreography as ch
 from .border import EXR_CODEC
-from .layers import ADAPTIVE_MIN, ADAPTIVE_THRESHOLD, RAMP_FRAMES, clamp_layers
+from .layers import (ADAPTIVE_MIN, ADAPTIVE_THRESHOLD, CROSSFADE_FRAMES, DYNAMIC_MARGIN_M, RAMP_FRAMES,
+                     clamp_layers)
 
 
 _RUG_DESIGNS = ("liso", "borda", "filete", "listras", "borda_dupla")    # = materials.RUG_DESIGNS
@@ -278,7 +279,7 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                      hold_start: float = 0.8, hold_end: float = 2.5, motion_blur: bool = True,
                      seed: int = 7, calibrate: bool = True, threads: int = 0, sun: dict | None = None,
                      occluders: tuple | None = None, sun_mask: np.ndarray | None = None,
-                     photo_emission: bool = True) -> dict:
+                     photo_emission: bool = True, layered: bool = True) -> dict:
     H, W = plate8.shape[:2]
     intr = room.intr().scaled(W, H)
     stats = surface_stats(plate8, seg)
@@ -353,7 +354,10 @@ def build_scene_spec(room: RoomModel, layout: Layout, plate8: np.ndarray, plate_
                    "motion_blur": motion_blur, "shutter": 0.5, "seed": seed, "threads": threads,
                    "out_dir": str(work_dir / "render"), "border_margin_m": 0.6, "calib_width": 240,
                    # EXR de cada quadro: só o retângulo renderizado, compressão rápida (render/border.py)
-                   "crop_to_border": True, "exr_codec": EXR_CODEC},
+                   "crop_to_border": True, "exr_codec": EXR_CODEC,
+                   # render em camadas (PT6): marcos estáticos + camada dinâmica; false = quadro único
+                   "camadas": bool(layered), "crossfade_frames": CROSSFADE_FRAMES,
+                   "dynamic_margin_m": DYNAMIC_MARGIN_M},
     }
     (work_dir / "scene.json").write_text(json.dumps(spec, ensure_ascii=False, indent=1), encoding="utf-8")
     return spec
