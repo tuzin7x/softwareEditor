@@ -263,7 +263,7 @@ class Compositor:
         if contact is not None and k > 0 and obj.any():
             # sombra de contato analítica (PT10): entra antes do peso da influência, que a zera
             # fora da vizinhança dos móveis
-            c = contact.occlusion(box)
+            c = contact.occlusion(box, w > 0)             # fora da influência o peso a zera
             if c is not None:
                 cm = c > 1e-4
                 if valid is not None:

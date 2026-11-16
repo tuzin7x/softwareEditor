@@ -184,26 +184,57 @@ class ContactModel:
             occ = 1.0 - (1.0 - occ) * (1.0 - grid)
         return np.clip(occ, 0.0, 1.0), (float(lo[0]), float(lo[1]), g)
 
-    def occlusion(self, poses, box) -> np.ndarray | None:
-        """Oclusão ``c`` (float32, h×w) nos pixels do retângulo ``box`` = [x0, y0, x1, y1]."""
+    def occlusion(self, poses, box, where: np.ndarray | None = None) -> np.ndarray | None:
+        """Oclusão ``c`` (float32, h×w) nos pixels do retângulo ``box`` = [x0, y0, x1, y1].
+
+        Só os pixels que podem cair na grade do campo são calculados: o retângulo da imagem que
+        contém a projeção da grade (com uma célula de folga) e, com ``where`` (bool h×w, p. ex. a
+        região de influência), só os pixels marcados. Nos demais ``c`` = 0; onde é calculado, o
+        valor é o mesmo da conta no recorte inteiro (amostragem bilinear ponto a ponto)."""
         ff = self.floor_field(poses)
         if ff is None:
             return None
         field, (gx0, gy0, g) = ff
         X0, Y0, X1, Y1 = (int(v) for v in box)
-        u = np.arange(X0, X1, dtype=np.float64) + 0.5
-        v = np.arange(Y0, Y1, dtype=np.float64) + 0.5
+        out = np.zeros((max(0, Y1 - Y0), max(0, X1 - X0)), np.float32)
+        # retângulo da imagem que contém a grade projetada (todos os cantos à frente da câmera:
+        # a imagem de um retângulo do piso é um quadrilátero convexo); senão, o recorte inteiro
+        ny, nx = field.shape
+        cx_ = (gx0 - g, gx0 + nx * g)
+        cy_ = (gy0 - g, gy0 + ny * g)
+        corners = np.array([[x, y, 1.0] for x in cx_ for y in cy_]) @ self.Hf.T
+        sx0, sy0, sx1, sy1 = X0, Y0, X1, Y1
+        if (corners[:, 2] > 1e-9).all():
+            uv = corners[:, :2] / corners[:, 2:]
+            umin, vmin = np.floor(uv.min(0)) - 2
+            umax, vmax = np.ceil(uv.max(0)) + 2
+            sx0, sx1 = int(np.clip(umin, X0, X1)), int(np.clip(umax, X0, X1))
+            sy0, sy1 = int(np.clip(vmin, Y0, Y1)), int(np.clip(vmax, Y0, Y1))
+        if sx1 <= sx0 or sy1 <= sy0:
+            return out
+        sub = (slice(sy0 - Y0, sy1 - Y0), slice(sx0 - X0, sx1 - X0))
+        if where is not None:
+            iy, ix = np.nonzero(np.asarray(where, bool)[sub])
+            if not iy.size:
+                return out
+            uu, vv = ix + (sx0 + 0.5), iy + (sy0 + 0.5)
+        else:
+            uu, vv = (a.ravel() for a in np.meshgrid(np.arange(sx0, sx1, dtype=np.float64) + 0.5,
+                                                     np.arange(sy0, sy1, dtype=np.float64) + 0.5))
         Hi = self.Hinv
-        uu, vv = np.meshgrid(u, v)
-        q = Hi[:, 0, None, None] * uu + Hi[:, 1, None, None] * vv + Hi[:, 2, None, None]
+        q = Hi[:, 0, None] * uu + Hi[:, 1, None] * vv + Hi[:, 2, None]
         front = q[2] > 1e-12                      # raio do pixel desce até o piso à frente da câmera
         wz = np.where(front, q[2], 1.0)
         x, y = q[0] / wz, q[1] / wz
         cx, cy = (x - gx0) / g, (y - gy0) / g
         cx = np.where(front, cx, -10.0)
-        out = ndimage.map_coordinates(field, [cy.ravel(), cx.ravel()], order=1, mode="constant", cval=0.0)
-        out = out.reshape(uu.shape)
-        return np.where(front, np.clip(out, 0.0, 1.0), 0.0).astype(np.float32)
+        val = ndimage.map_coordinates(field, [cy, cx], order=1, mode="constant", cval=0.0)
+        val = np.where(front, np.clip(val, 0.0, 1.0), 0.0).astype(np.float32)
+        if where is not None:
+            out[sub][iy, ix] = val
+        else:
+            out[sub] = val.reshape(sy1 - sy0, sx1 - sx0)
+        return out
 
 
 class ContactFrame:
@@ -213,8 +244,8 @@ class ContactFrame:
         self.model = model
         self.poses = poses
 
-    def occlusion(self, box) -> np.ndarray | None:
-        return self.model.occlusion(self.poses, box)
+    def occlusion(self, box, where: np.ndarray | None = None) -> np.ndarray | None:
+        return self.model.occlusion(self.poses, box, where)
 
 
 def pose_record(k: int, fade: float, D) -> list:

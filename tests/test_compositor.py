@@ -713,6 +713,60 @@ def test_contact_shadow_follows_part_motion():
     assert np.allclose(below, c0)
 
 
+def test_contact_occlusion_restricted_equals_dense():
+    """O campo só é lido no retângulo da grade projetada e, com ``where``, só nos pixels marcados
+    (o compositor passa a região de influência): nesses pixels o valor é exatamente o da leitura
+    densa de cada pixel do recorte; nos demais, 0. A composição com e sem a restrição é igual."""
+    from scipy import ndimage
+
+    from mobilia.composite import contact as ct
+
+    meta = _contact_meta(footprint=(0.3, 0.3), center=(0.2, 2.4), cell=0.015)
+    model = ct.ContactModel(meta, (2 * _CH, 2 * _CW))
+    rng = np.random.default_rng(3)
+    for dz in (0.0, 0.2, 0.5):
+        poses = _pose(dz)
+        field, (gx0, gy0, g) = model.floor_field(poses)
+        for box in ([0, 0, 2 * _CW, 2 * _CH], [37, 101, 251, 240], [0, 0, 30, 20]):
+            X0, Y0, X1, Y1 = box
+            uu, vv = np.meshgrid(np.arange(X0, X1) + 0.5, np.arange(Y0, Y1) + 0.5)
+            q = np.einsum("ij,jhw->ihw", model.Hinv, np.stack([uu, vv, np.ones_like(uu)]))
+            front = q[2] > 1e-12
+            wz = np.where(front, q[2], 1.0)
+            cx = np.where(front, (q[0] / wz - gx0) / g, -10.0)
+            cy = (q[1] / wz - gy0) / g
+            ref = ndimage.map_coordinates(field, [cy, cx], order=1, mode="constant", cval=0.0)
+            ref = np.where(front, np.clip(ref, 0.0, 1.0), 0.0).astype(np.float32)
+            c = model.occlusion(poses, box)
+            assert np.array_equal(c, ref)
+            where = rng.random(ref.shape) < 0.4
+            cw = model.occlusion(poses, box, where)
+            assert np.array_equal(cw, np.where(where, ref, 0.0))
+            if box[0] == 0 and box[2] > 100 and dz == 0.0:
+                assert (c > 0.01).any() and (ref == 0).mean() > 0.5   # campo local: o corte economiza
+    # na composição o resultado é o mesmo de ler o campo no recorte inteiro
+    plate8 = np.repeat(np.repeat(_floor_plate(), 2, 0), 2, 1)
+    rgba = np.zeros((2 * _CH, 2 * _CW, 4), np.float32)
+    corners = 2 * _project(meta, [[x, y, 0.0] for x in (0.05, 0.35) for y in (2.25, 2.55)])
+    x0, y0 = np.floor(corners.min(0)).astype(int)
+    x1, _ = np.ceil(corners.max(0)).astype(int)
+    rgba[y0 - 20:y0 + 3, x0:x1, :3] = 0.3
+    rgba[y0 - 20:y0 + 3, x0:x1, 3] = 1.0
+
+    class _Dense:
+        def __init__(self, fr):
+            self.fr = fr
+
+        def occlusion(self, box, where=None):
+            return self.fr.occlusion(box)
+
+    comp = Compositor(plate8, CompositeSettings(grain_strength=0.0))
+    fr = model.frame(_pose())
+    a, sa = comp.composite(2, rgba, None, None, contact=_Dense(fr))
+    b, sb = comp.composite(2, rgba, None, None, contact=fr)
+    assert sb.contact_pixels > 0 and sa.contact_pixels == sb.contact_pixels and np.array_equal(a, b)
+
+
 _CONTACT_SCRIPT = r'''
 import json, sys
 import bpy, mathutils
