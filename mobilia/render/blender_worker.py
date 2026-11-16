@@ -1201,9 +1201,14 @@ def render_frame(sc, path: Path, out: dict) -> dict:
     if fo is None:
         return timed_render(sc, write_still=True)
     fo.file_name = path.stem
+    # um quadro de uma execução anterior na mesma pasta não pode passar por "gravado agora"
+    # (o write_still sempre sobrescrevia; o nó pode falhar em silêncio)
+    path.unlink(missing_ok=True)
+    t0 = time.time() - 2.0                    # folga para a resolução do mtime (FAT/NTFS)
     st = timed_render(sc, write_still=False)
     if not path.exists():
-        cands = sorted(path.parent.glob(path.stem + "*.exr"), key=lambda q: q.stat().st_mtime)
+        cands = sorted((q for q in path.parent.glob(path.stem + "*.exr") if q.stat().st_mtime >= t0),
+                       key=lambda q: q.stat().st_mtime)
         if cands:
             cands[-1].replace(path)
         else:
