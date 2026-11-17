@@ -187,3 +187,28 @@ def test_render_mode_b_rejects_odd_size(room, tmp_path):
     st2 = L.LayerStack((st.photo_shape[0] - 1, st.photo_shape[1]), st.plate[:-1], st.layers, st.front)
     with pytest.raises(ValueError, match="pares"):
         VB.render_mode_b(st2, ch, photo[:-1], res.mask[:-1], tmp_path / "z.mp4")
+
+
+def test_render_mode_b_audit_close_failure_leaves_no_mp4(room, tmp_path, monkeypatch):
+    # o MP4 fecha (e é renomeado) antes do MKV: se o MKV falha no close, o MP4 já pronto também tem de sair
+    monkeypatch.setenv(E.ENV_CODEC, "libx264")
+    photo, res, st, ch, v = room
+
+    def boom(self):
+        raise RuntimeError("FFmpeg falhou (simulado)")
+
+    monkeypatch.setattr(E.LosslessWriter, "close", boom)
+    with pytest.raises(RuntimeError, match="simulado"):
+        VB.render_mode_b(st, ch, photo, res.mask, tmp_path / "w.mp4", audit_mkv=tmp_path / "w.mkv",
+                         backend="numpy", choreo_stats=v)
+    assert not list(tmp_path.iterdir())
+
+
+def test_render_mode_b_rejects_broken_mp4(room, tmp_path, monkeypatch):
+    # MP4 decodificado muito longe da placa/foto (codificador com defeito) não é entregue
+    monkeypatch.setenv(E.ENV_CODEC, "libx264")
+    photo, res, st, ch, v = room
+    monkeypatch.setattr(E, "psnr", lambda a, b, mask=None: 12.0)
+    with pytest.raises(RuntimeError, match="PSNR"):
+        VB.render_mode_b(st, ch, photo, res.mask, tmp_path / "v.mp4", backend="numpy", choreo_stats=v)
+    assert not list(tmp_path.iterdir())

@@ -22,6 +22,9 @@ from ..video import encoder as E
 from . import compose as K
 
 QUEUE_FRAMES = 4          # quadros em trânsito entre a composição e os FFmpeg (memória: 4 × 8 MB a 1920×1440)
+# piso de PSNR do 1º/último quadro do MP4 decodificado contra placa/foto. x264/NVENC normais dão 45–50 dB; abaixo
+# disto o codificador estragou o vídeo (matriz de cor errada, quadro verde/preto, deslocamento) e o MP4 não sai.
+MIN_PSNR_MP4 = 30.0
 
 
 class _Sink(threading.Thread):
@@ -76,17 +79,19 @@ def render_mode_b(stack, ch, photo: np.ndarray, removal_mask: np.ndarray, out_mp
     ver = ModeBVerifier(photo, stack, removal_mask, ch.n_frames)
     writers = []
     log = (lambda name: None if log_dir is None else Path(log_dir) / name)
-    if out_mp4 is not None:
-        writers.append(E.VideoWriter(out_mp4, W, H, ch.fps, s, log_path=log("encode_modo_b.log")))
-    if audit_mkv is not None:
-        writers.append(E.LosslessWriter(audit_mkv, W, H, ch.fps, log_path=log("encode_auditoria.log")))
-    sink = _Sink(writers) if writers else None
-    if sink:
-        sink.start()
+    sink = None
     hashes: list[bytes] = []
     t_comp = t_ver = 0.0
     n = 0
     try:
+        # dentro do try: se o 2º FFmpeg não abre, o 1º é abortado (sem processo órfão nem arquivo parcial)
+        if out_mp4 is not None:
+            writers.append(E.VideoWriter(out_mp4, W, H, ch.fps, s, log_path=log("encode_modo_b.log")))
+        if audit_mkv is not None:
+            writers.append(E.LosslessWriter(audit_mkv, W, H, ch.fps, log_path=log("encode_auditoria.log")))
+        sink = _Sink(writers) if writers else None
+        if sink:
+            sink.start()
         it = K.master_frames(stack, ch, photo, comp, with_placements=True)
         while True:
             t0 = time.perf_counter()
@@ -125,6 +130,8 @@ def render_mode_b(stack, ch, photo: np.ndarray, removal_mask: np.ndarray, out_mp
             sink.join(timeout=10)
         for w in writers:
             w.abort()
+        # o close do MP4 pode ter dado certo e o do MKV falhado: o MP4 já renomeado também sai
+        _unlink(out_mp4, audit_mkv)
         raise
     t_total = time.perf_counter() - t_all
     out = {"video_modo_b": {
@@ -139,8 +146,11 @@ def render_mode_b(stack, ch, photo: np.ndarray, removal_mask: np.ndarray, out_mp
             if 1 not in got or n not in got:
                 raise RuntimeError("o MP4 não devolveu o 1º/último quadro na decodificação")
             p0, p1 = E.psnr(got[1], stack.plate), E.psnr(got[n], photo)
-            out["video_modo_b"]["psnr_mp4"] = {"quadro0_vs_placa": round(min(p0, 99.0), 2),
-                                               "ultimo_vs_foto": round(min(p1, 99.0), 2)}
+            out["video_modo_b"]["psnr_mp4"] = {"quadro0_vs_placa": round(float(min(p0, 99.0)), 2),
+                                               "ultimo_vs_foto": round(float(min(p1, 99.0)), 2)}
+            if min(p0, p1) < MIN_PSNR_MP4:
+                raise RuntimeError(f"MP4 decodificado longe dos quadros mestres (PSNR {min(p0, p1):.1f} dB < "
+                                   f"{MIN_PSNR_MP4:.0f} dB): o codificador estragou o vídeo")
         if audit_mkv is not None:
             k = 0
             for idx, fr in E.decode_lossless(audit_mkv, W, H):
@@ -151,11 +161,15 @@ def render_mode_b(stack, ch, photo: np.ndarray, removal_mask: np.ndarray, out_mp
                 raise ModeBVerificationError(f"MKV de auditoria com {k} quadros, esperados {len(hashes)}")
             out["video_modo_b"]["auditoria_mkv"] = {"quadros_identicos": k, "codec": "libx264rgb qp0"}
     except BaseException:
-        for p in (out_mp4, audit_mkv):
-            if p is not None:
-                Path(p).unlink(missing_ok=True)
+        _unlink(out_mp4, audit_mkv)
         raise
     return out
+
+
+def _unlink(*paths) -> None:
+    for p in paths:
+        if p is not None:
+            Path(p).unlink(missing_ok=True)
 
 
 __all__ = ["render_mode_b", "ModeBVerificationError"]
