@@ -42,7 +42,7 @@ def test_ensure_local_separates_network_time(monkeypatch):
     assert weights.NET_STATS["repos"] == 1 and weights.NET_STATS["s"] > 0
     calls.clear()
     assert weights.ensure_local(seg) == 0.0 and calls == []          # já no cache: sem rede
-    weights.prefetch_models()
+    weights.prefetch_models(v3=False)   # os pesos V3 têm teste próprio (test_weights_v3.py)
     assert [c[1] for c in calls] == weights.model_repos() + [weights.ONEFORMER_METADATA[0]]
 
 

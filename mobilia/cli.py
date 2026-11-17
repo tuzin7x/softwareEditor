@@ -125,12 +125,17 @@ def _cmd_prefetch(a) -> int:
     both = not (a.modelos or a.ativos)
     failed: list[str] = []
     if a.modelos or both:
-        from .analysis.weights import prefetch_models
+        from .analysis.weights import WeightsError, prefetch_models
 
         span = 0.6 if both else 1.0
-        prefetch_models(lambda f, repo: emit({"event": "progress", "stage": "modelos",
-                                              "fraction": round(span * f, 3),
-                                              "message": f"Baixando modelo de IA {repo}"}))
+        try:
+            prefetch_models(lambda f, repo: emit({"event": "progress", "stage": "modelos",
+                                                  "fraction": round(span * f, 3),
+                                                  "message": f"Baixando modelo de IA {repo}"}))
+        except WeightsError as e:  # peso bloqueado, ausente ou corrompido: mensagem já em português
+            emit({"event": "log", "level": "error", "message": str(e)})
+            print(str(e), file=sys.stderr, flush=True)
+            return 2
     if a.ativos or both:
         res = tuple(r.strip() for r in a.res.split(",") if r.strip()) or ("2k",)
         off = 0.6 if both else 0.0

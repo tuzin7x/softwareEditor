@@ -227,7 +227,105 @@ def nvenc_available(ffmpeg_exe: str, codec_args: list[str] | None = None) -> boo
         return False
 
 
+# ----------------------------------------------------------------------------- perfis da V3
+# PLANO_V3 §5.3. O modo B sem SDXL (OneFormer + SAM 2.1 + big-lama, um modelo por vez, pico
+# ~2–3 GB) roda em qualquer GPU NVIDIA e, mais devagar, na CPU: é o perfil padrão. O SDXL (refino
+# da sala vazia no modo B e, depois, o modo A novo) pede ~6,7–7,2 GB: com menos VRAM livre usa
+# ``enable_model_cpu_offload`` (exige RAM ≥ 16 GB) e abaixo de ~5 GB fica desligado. Números de
+# VRAM e de tempo da GPU são ESTIMATIVAS (não medidos nesta máquina sem GPU).
+
+PERFIL_B_SEM_SDXL = "B sem SDXL"
+PERFIL_B_COM_SDXL = "B com SDXL"
+PERFIL_A = "A"
+SDXL_VRAM_FULL_MB = 7000      # VRAM livre para o SDXL inteiro na GPU
+SDXL_VRAM_MIN_MB = 5000       # abaixo disto o SDXL não roda (nem com offload)
+SDXL_RAM_OFFLOAD_GB = 16.0    # offload para a RAM precisa de folga no sistema
+
+
+@dataclass
+class PerfilV3:
+    nome: str                 # "B sem SDXL" | "B com SDXL" | "A"
+    modo: str                 # "A" (foto vazia) | "B" (foto mobiliada)
+    dispositivo: str          # "cuda" | "cpu"
+    sdxl: bool                # o SDXL entra neste trabalho
+    sdxl_offload: bool        # SDXL com ``enable_model_cpu_offload``
+    motor_a: str | None       # modo A: "v2" (motor 3D atual) | "sdxl" (PT-V3-9); None no modo B
+    motivo: str
+    avisos: list[str] = field(default_factory=list)
+
+
+def vram_free_mb() -> int | None:
+    """VRAM livre agora (``torch.cuda.mem_get_info``), ou None sem CUDA."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        free, _total = torch.cuda.mem_get_info()
+        return int(free // 2**20)
+    except Exception:
+        return None
+
+
+def sdxl_capacity(rep: HardwareReport) -> tuple[bool, bool, str]:
+    """(cabe, com_offload, motivo) do SDXL nesta máquina, pela VRAM livre (ou total) e pela RAM."""
+    gpu = rep.best_gpu
+    if gpu is None or not rep.torch_cuda:
+        return False, False, "sem GPU NVIDIA utilizável"
+    free = gpu.vram_free_mb if gpu.vram_free_mb is not None else gpu.vram_total_mb
+    free = min(free, gpu.vram_total_mb)
+    if free >= SDXL_VRAM_FULL_MB:
+        return True, False, f"{free} MB de VRAM livre"
+    if gpu.vram_total_mb < SDXL_VRAM_MIN_MB or free < SDXL_VRAM_MIN_MB:
+        return False, False, f"VRAM insuficiente para o SDXL ({free} MB livres; mínimo {SDXL_VRAM_MIN_MB})"
+    if rep.ram_gb is None or rep.ram_gb < SDXL_RAM_OFFLOAD_GB:
+        return False, False, (f"{free} MB de VRAM livre pedem offload para a RAM, mas a RAM do sistema "
+                              f"({rep.ram_gb or '?'} GB) é menor que {SDXL_RAM_OFFLOAD_GB:.0f} GB")
+    return True, True, f"{free} MB de VRAM livre: SDXL com offload para a RAM"
+
+
+def choose_profile_v3(rep: HardwareReport, modo: str = "B", sdxl_instalado: bool | None = None,
+                      sdxl_ligado: bool = True) -> PerfilV3:
+    """Perfil da V3 para a foto (``modo`` "A" = vazia, "B" = mobiliada) nesta máquina.
+
+    ``sdxl_instalado`` None consulta os pesos (hoje sempre falso: o SDXL ainda não é baixado).
+    ``sdxl_ligado`` é a opção do usuário. Sem SDXL o modo B usa só o LaMa e o modo A, o motor v2."""
+    if modo not in ("A", "B"):
+        raise ValueError(f"modo inválido: {modo!r}")
+    if sdxl_instalado is None:
+        from .analysis.weights import sdxl_installed
+
+        sdxl_instalado = sdxl_installed()
+    cuda = rep.best_gpu is not None and rep.torch_cuda
+    dev = "cuda" if cuda else "cpu"
+    cabe, offload, por_que = sdxl_capacity(rep)
+    avisos: list[str] = []
+    if not cuda:
+        avisos.append("Sem GPU NVIDIA: o processamento roda na CPU e fica bem mais lento.")
+    usa = cabe and sdxl_instalado and sdxl_ligado
+    if not sdxl_ligado:
+        por_que = "SDXL desligado nas opções"
+    elif not sdxl_instalado:
+        por_que = "pesos do SDXL não instalados"
+    if modo == "A":
+        return PerfilV3(PERFIL_A, "A", dev, usa, usa and offload, "sdxl" if usa else "v2",
+                        "Foto vazia: modo A " + ("com SDXL" if usa else f"no motor 3D atual ({por_que})"), avisos)
+    if usa:
+        return PerfilV3(PERFIL_B_COM_SDXL, "B", dev, True, offload, None,
+                        f"Foto mobiliada: sala vazia por LaMa + refino SDXL ({por_que})", avisos)
+    return PerfilV3(PERFIL_B_SEM_SDXL, "B", dev, False, False, None,
+                    f"Foto mobiliada: sala vazia só com LaMa ({por_que})", avisos)
+
+
+def sysmem_fallback_suspected(step_s: float, expected_s: float, factor: float = 4.0) -> bool:
+    """Sonda do *sysmem fallback* do driver NVIDIA no Windows: sem OOM, a GPU passa a usar a RAM e
+    fica de 5 a 20× mais lenta. Um passo da sonda ``factor`` vezes mais lento que o esperado para a
+    GPU indica isso (vai para o ``report.json``; o chamador desliga o SDXL ou liga o offload)."""
+    return expected_s > 0 and step_s > factor * expected_s
+
+
 if __name__ == "__main__":
     r = detect_hardware()
     print(r.to_json())
     print(choose_profile(r))
+    print(choose_profile_v3(r))

@@ -28,6 +28,9 @@ no cliente). Uma licença pode mudar: reconfira antes de cada versão do instala
 Observações:
 - O big-lama do protótipo veio de um *release* do GitHub de terceiros (pacote `Sanster/models`). No produto, o
   arquivo vem do **espelho próprio** com SHA-256 (PT-V3-1), e a licença aplicável é a Apache-2.0 do LaMa.
+  Estado do PT-V3-1: `mobilia/analysis/weights.py` fixa o SHA-256 do `big-lama.pt` (TorchScript) e do
+  `model.safetensors` do SAM 2.1 (revisão fixada). O espelho entra pela variável `MOBILIA_ESPELHO_PESOS`
+  (tentado antes da origem oficial); enquanto o espelho próprio não existe, a origem é o *release* acima.
 - O OneFormer e o LaMa foram treinados em ADE20K e Places2 (datasets de pesquisa). O risco residual é baixo e
   o produto atual já o carrega (PLANO_V3 §5.1).
 
