@@ -380,6 +380,11 @@ def build_units(stack: L.LayerStack, hard: Sequence[np.ndarray], front: np.ndarr
             if j is not None:
                 sup.setdefault(i, j)
     for i, j in sup.items():
+        if i not in stack.supports and stack.layers[i].label == "sink" and front[j, i]:
+            # cuba embutida: a borda da bancada (ou do tampo da ilha) cobre a cuba de verdade. Tirar a aresta
+            # deixava a cuba escalar ou subir dentro do furo com a placa à vista. Entram juntas, como bloco rígido.
+            dsu.union(i, j)
+            continue
         if i not in stack.supports and front[j, i] and front is not stack.front:
             front[j, i] = False                      # planejado assentado: a base não "cobre" a bancada
         if front[i, j]:
@@ -800,29 +805,10 @@ def _plan_units(stack, hard, bands, units, after, roles, ch) -> tuple[list[Entra
     return ents, n_builtin
 
 
-def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Choreography:
-    """Planeja a coreografia da pilha (ordem, estilo, amplitude, tempos) e mede o "pixel oculto visível"."""
+def _plan_variant(stack, hard, bands, units, after, roles, ch):
+    """Unidades acíclicas + estilos + fusão de "surge" com quem cobre, para uma relação de oclusão."""
     H, W = stack.photo_shape
-    ch = Choreography(fps, (H, W), [], HOLD_START, 0, 0)
-    ch._soft = max(4.0, SOFT_FRAC * math.hypot(H, W))
     n = len(stack.layers)
-    if n == 0:
-        ch.n_anim = int(math.ceil(HOLD_START * fps))
-        ch.n_frames = ch.n_anim + int(math.ceil(HOLD_END * fps))
-        ch.warnings.append("nenhuma peça para entrar (foto vazia: usar o modo A)")
-        return ch
-    hard = _abs_hard(stack)
-    bands = cut_bands(stack, hard)
-    front0 = stack.front.copy()
-    units, after, roles = build_units(stack, hard, front0)
-    seated = not np.array_equal(front0, stack.front)
-    if seated:
-        stack = dataclasses.replace(stack, front=front0)      # cópia rasa: só a relação de oclusão muda
-        bands = cut_bands(stack, hard)
-    front, broken = break_cycles(stack, hard, bands, units, after)
-    if broken:
-        stack = dataclasses.replace(stack, front=front)
-        bands = cut_bands(stack, hard)
     units, cycles = acyclic_units(stack, units, after)
     ents, n_builtin = _plan_units(stack, hard, bands, units, after, roles, ch)
     # Peça que só poderia surgir de uma vez: tenta entrar como bloco rígido junto com quem a cobre (manta + poltrona
@@ -857,6 +843,46 @@ def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Ch
                 break
         if not improved:
             break
+    return stack, bands, units, ents, n_builtin, merged, cycles
+
+
+def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Choreography:
+    """Planeja a coreografia da pilha (ordem, estilo, amplitude, tempos) e mede o "pixel oculto visível"."""
+    H, W = stack.photo_shape
+    ch = Choreography(fps, (H, W), [], HOLD_START, 0, 0)
+    ch._soft = max(4.0, SOFT_FRAC * math.hypot(H, W))
+    n = len(stack.layers)
+    if n == 0:
+        ch.n_anim = int(math.ceil(HOLD_START * fps))
+        ch.n_frames = ch.n_anim + int(math.ceil(HOLD_END * fps))
+        ch.warnings.append("nenhuma peça para entrar (foto vazia: usar o modo A)")
+        return ch
+    hard = _abs_hard(stack)
+    bands = cut_bands(stack, hard)
+    front0 = stack.front.copy()
+    units, after, roles = build_units(stack, hard, front0)
+    units0 = [list(u) for u in units]
+    seated = not np.array_equal(front0, stack.front)
+    if seated:
+        stack = dataclasses.replace(stack, front=front0)      # cópia rasa: só a relação de oclusão muda
+        bands = cut_bands(stack, hard)
+    front, broken = break_cycles(stack, hard, bands, units, after)
+    stack_b, bands_b = stack, bands
+    if broken:
+        stack_b = dataclasses.replace(stack, front=front)
+        bands_b = cut_bands(stack_b, hard)
+    stack, bands, units, ents, n_builtin, merged, cycles = _plan_variant(stack_b, hard, bands_b, units, after,
+                                                                         roles, ch)
+    if broken:
+        # A aresta "mais fraca" do ciclo pode ser verdadeira (vaso do aparador na frente do braço do sofá que cobre
+        # o aparador): tirá-la mostra o recorte do vaso no sofá. O bloco rígido é seguro nas duas leituras; fica
+        # com ele quando não piora (não surge mais peça de uma vez).
+        alt = _plan_variant(dataclasses.replace(stack, front=front0), hard, cut_bands(
+            dataclasses.replace(stack, front=front0), hard), units0, after, roles, ch)
+        pops = lambda es: sum(e.style == "surgir" for e in es)          # noqa: E731
+        if pops(alt[3]) <= pops(ents):
+            stack, bands, units, ents, n_builtin, merged, cycles = alt
+            broken = 0
     units_of = {i: u for u, mem in enumerate(units) for i in mem}
     small = {k: all(stack.layers[i].label in L.SMALL_LABELS for i in e.members) for k, e in enumerate(ents)}
     # --- encaixa o total em 7–10 s (até 12 s com muitos planejados)

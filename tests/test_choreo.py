@@ -235,3 +235,66 @@ def test_fixture_acceptance(room_fixture, name):
             e = next(e for e in ch.entrances if i in e.members)
             if q.alpha_mul is not None and e.style != "desenrolar":
                 assert set(np.unique(q.alpha_mul)) <= {0.0, 1.0}
+
+
+# ------------------------------------------------------------------------------------- revisão PT-V3-6
+def _hidden_with(st, ch, front):
+    """"Pixel oculto visível" medido com outra relação de oclusão (a original, sem arestas tiradas)."""
+    import dataclasses
+    hard = ch._hard
+    bands = C.cut_bands(dataclasses.replace(st, front=front), hard)
+    tot = 0
+    for f in range(0, ch.n_anim, 2):
+        pl = C.placements_at(ch, st, f)
+        for i in pl:
+            e = next(e for e in ch.entrances if i in e.members)
+            tot += C.uncovered(st, hard, bands, i, pl, (e.clip, e.profile) if e.clip else None)
+    return tot
+
+
+def test_undermount_sink_enters_with_its_countertop():
+    """A borda da bancada cobre a cuba de verdade: a cuba não pode escalar/subir sozinha dentro do furo."""
+    rects = [
+        ("cabinet", 150, 220, 60, 300, (200, 190, 170), "planejado"),
+        ("countertop", 120, 150, 50, 310, (60, 60, 60), "planejado"),
+        ("sink", 126, 146, 140, 220, (235, 235, 240), "planejado"),     # a parte que aparece no furo
+    ]
+    photo, res, st = _build(rects)
+    sink = next(k for k, l in enumerate(st.layers) if l.label == "sink")
+    top = next(k for k, l in enumerate(st.layers) if l.label == "countertop")
+    st.front[top, sink], st.front[sink, top] = True, False          # a bancada cobre a borda da cuba
+    front = st.front.copy()
+    ch = C.plan(st)
+    assert _ent(st, ch, "sink") is _ent(st, ch, "countertop")
+    assert C.verify(st, ch)["oculto_visivel_px"] == 0
+    assert _hidden_with(st, ch, front) == 0
+
+
+def test_true_cycle_edge_is_not_dropped_when_block_is_as_good():
+    """Ciclo real (vaso do aparador na frente do sofá, sofá na frente do aparador): tirar a aresta mais fraca
+    mostrava o recorte do vaso no sofá; o bloco rígido é seguro nas duas leituras."""
+    rects = [
+        ("table", 120, 170, 20, 90, (200, 200, 210), "solto"),
+        ("sofa", 110, 220, 70, 300, (180, 30, 30), "solto"),
+        ("plant", 80, 140, 60, 100, (30, 160, 30), "solto"),
+    ]
+    photo, res, st = _build(rects)
+    front = st.front.copy()
+    ch = C.plan(st)
+    assert C.verify(st, ch)["oculto_visivel_px"] == 0
+    assert _hidden_with(st, ch, front) == 0
+
+
+def test_small_piece_ties_at_bottom_edge_go_in_front():
+    """Manta jogada no encosto que desce até a borda da foto junto com a poltrona: sem relação nenhuma, a poltrona
+    entrava com um buraco no formato da manta. A peça pequena fica na frente."""
+    rects = [
+        ("armchair", 120, 240, 100, 300, (230, 230, 225), "solto"),
+        ("blanket", 140, 240, 160, 220, (120, 120, 130), "solto"),
+    ]
+    photo, res, st = _build(rects)
+    hard = C._abs_hard(st)
+    front, _ = L.occlusion_graph([l.label for l in st.layers], hard, None)
+    a = next(k for k, l in enumerate(st.layers) if l.label == "armchair")
+    b = next(k for k, l in enumerate(st.layers) if l.label == "blanket")
+    assert front[b, a] and not front[a, b]

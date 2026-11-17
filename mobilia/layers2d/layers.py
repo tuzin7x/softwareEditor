@@ -210,6 +210,15 @@ def occlusion_graph(labels: Sequence[str], hard: Sequence[np.ndarray], depth: np
                     front[i, j] = True
                 elif bottom[j] > bottom[i] + 0.01 * H:
                     front[j, i] = True
+            if not (front[i, j] or front[j, i]):
+                # empate (as duas descem até a borda de baixo da foto, ou profundidade ambígua): a peça pequena
+                # (manta jogada no encosto, almofada) fica na frente da grande. Sem relação nenhuma, a coreografia
+                # não via o recorte da manta no sofá e o sofá entrava com um buraco no formato dela.
+                si, sj = labels[i] in SMALL_LABELS, labels[j] in SMALL_LABELS
+                if si and not sj:
+                    front[i, j] = True
+                elif sj and not si:
+                    front[j, i] = True
     for i, lab in enumerate(labels):
         if lab in RUG_LABELS or lab in WALL_HUNG_LABELS:
             for j in range(n):

@@ -288,9 +288,12 @@ visível": pontos logo além da borda da peça que pertencem a quem está na fre
 após o movimento eles têm de cair fora do quadro ou sob outra peça presente).
 
 - **Unidades:** a peça pequena apoiada noutra entra junto com o apoio (almofada + sofá); a bancada assentada
-  na base pousa depois dela (a aresta "base na frente da bancada" sai da cópia local de `front`); ciclos de
-  oclusão quebram na aresta mais fraca ou viram bloco rígido; peça que só poderia "surgir" tenta entrar em bloco
-  com quem a cobre (manta + poltrona deslizando da borda).
+  na base pousa depois dela (a aresta "base na frente da bancada" sai da cópia local de `front`), mas a cuba
+  embutida entra junto com a bancada/ilha que cobre a borda dela; ciclos de oclusão viram bloco rígido (seguro em
+  qualquer leitura da oclusão) e só quebram na aresta mais fraca quando o bloco faria mais peças surgirem de uma
+  vez; peça que só poderia "surgir" tenta entrar em bloco com quem a cobre (manta + poltrona deslizando da borda).
+  A medida só enxerga cortes contra quem está "na frente": por isso `occlusion_graph` não deixa sem relação a peça
+  pequena encostada numa grande quando as duas descem até a borda da foto (a pequena fica na frente).
 - **Ordem:** de frente para trás (a de trás começa só depois de quem a cobre pousar). Entre as livres: tapete
   livre, planejados (base/ilha/eletros/louças → bancada → aéreos/coifa), soltos (os mais perto primeiro),
   quadros e decoração.
