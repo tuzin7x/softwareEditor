@@ -80,14 +80,16 @@ def ensure_local(repo_id: str) -> float:
     return dt
 
 
-def prefetch_models(progress: Callable[[float, str], None] | None = None, v3: bool = True) -> None:
+def prefetch_models(progress: Callable[[float, str], None] | None = None, v3: bool = True,
+                    sdxl: bool = False) -> None:
     """Baixa (ou confere no cache) todos os pesos usados pela análise. Idempotente.
 
-    ``v3``: inclui os pesos do modo B (SAM 2.1 e big-lama, com SHA-256 conferido)."""
+    ``v3``: inclui os pesos do modo B (SAM 2.1 e big-lama, com SHA-256 conferido). ``sdxl``: inclui o refino SDXL
+    da sala vazia (+7,4 GB; perfil "B com SDXL")."""
     from huggingface_hub import hf_hub_download, snapshot_download
 
     repos = model_repos()
-    v3w = V3_WEIGHTS if v3 else ()
+    v3w = (V3_WEIGHTS if v3 else ()) + (SDXL_WEIGHTS if sdxl else ())
     n = len(repos) + 1 + len(v3w)
     for i, repo in enumerate(repos):
         if progress:
@@ -109,7 +111,7 @@ def prefetch_models(progress: Callable[[float, str], None] | None = None, v3: bo
 #
 # Espelho configurável: ``MOBILIA_ESPELHO_PESOS`` (URL base) é tentado antes da origem oficial dos
 # arquivos avulsos (``<espelho>/<nome do arquivo>``). Para os repositórios do Hugging Face vale o
-# padrão da biblioteca, ``HF_ENDPOINT``. O SDXL (perfil "B com SDXL") ainda não entra aqui.
+# padrão da biblioteca, ``HF_ENDPOINT``. Os pesos do SDXL (perfil "B com SDXL") ficam em ``SDXL_WEIGHTS``, no fim.
 
 ENV_MIRROR = "MOBILIA_ESPELHO_PESOS"
 
@@ -357,16 +359,79 @@ def big_lama_path(offline: bool = False) -> Path:
     return ensure_file_weight(LAMA_WEIGHT, offline=offline)
 
 
-# SDXL (perfil "B com SDXL" e modo A novo): só a sinalização por enquanto (PT-V3-4/9 incluem os pesos).
-SDXL_WEIGHTS: tuple = ()
+# ============================================================================ SDXL (perfil "B com SDXL")
+# Refino da sala vazia do modo B (PT-V3-4) e, depois, o modo A novo (PT-V3-9). Só as variantes fp16 em pastas do
+# diffusers (``from_pretrained``; o ``from_single_file`` do diffusers 0.35 quebra com o transformers 5). Revisões e
+# SHA-256 conferidos em 17/11/2026 contra a API do Hugging Face (campo ``lfs.sha256``) e no arquivo baixado.
+SDXL_GEN_WEIGHT = HubWeight(
+    key="sdxl_gerador", repo_id="SG161222/RealVisXL_V5.0_Lightning",
+    revision="f4454158cedaab9f0688c199561d6c92525f3a85",
+    allow_patterns=("model_index.json", "scheduler/scheduler_config.json", "unet/config.json",
+                    "unet/diffusion_pytorch_model.fp16.safetensors"),
+    sha256={"unet/diffusion_pytorch_model.fp16.safetensors":
+            "1143cd2aaf65d24af34b5699d090aed724f6c0978c2ec5a5f56821ccb36260ce"},
+    label="RealVisXL V5.0 Lightning (refino da sala vazia)", licenca="OpenRAIL++")
+
+# Codificadores de texto: só para calcular os embeddings de um prompt ainda sem cache (o vocabulário do prompt da
+# sala vazia é fixo; o pacote do cliente pode levar os embeddings prontos e dispensar estes 1,6 GB).
+SDXL_TEXT_WEIGHT = HubWeight(
+    key="sdxl_texto", repo_id="SG161222/RealVisXL_V5.0_Lightning",
+    revision="f4454158cedaab9f0688c199561d6c92525f3a85",
+    allow_patterns=("tokenizer/merges.txt", "tokenizer/special_tokens_map.json", "tokenizer/tokenizer_config.json",
+                    "tokenizer/vocab.json", "tokenizer_2/merges.txt", "tokenizer_2/special_tokens_map.json",
+                    "tokenizer_2/tokenizer_config.json", "tokenizer_2/vocab.json", "text_encoder/config.json",
+                    "text_encoder/model.fp16.safetensors", "text_encoder_2/config.json",
+                    "text_encoder_2/model.fp16.safetensors"),
+    sha256={"text_encoder/model.fp16.safetensors":
+            "0a873801e35a008b17e228189a83a8b41e068ffe7bde7c1105e8c6e947758bc5",
+            "text_encoder_2/model.fp16.safetensors":
+            "dfa429b268cd3f6297927f1fd3eacac04781b17ab4caa97892a461ff41400a5e"},
+    label="codificadores de texto do SDXL (prompts)", licenca="OpenRAIL++")
+
+# VAE do SDXL corrigido para fp16 (o VAE original transborda em fp16 na GPU).
+SDXL_VAE_WEIGHT = HubWeight(
+    key="sdxl_vae", repo_id="madebyollin/sdxl-vae-fp16-fix",
+    revision="207b116dae70ace3637169f1ddd2434b91b3a8cd",
+    allow_patterns=("config.json", "diffusion_pytorch_model.safetensors"),
+    sha256={"diffusion_pytorch_model.safetensors":
+            "1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c"},
+    label="VAE do SDXL (fp16-fix)", licenca="MIT")
+
+SDXL_CN_DEPTH_WEIGHT = HubWeight(
+    key="sdxl_controlnet_profundidade", repo_id="diffusers/controlnet-depth-sdxl-1.0-small",
+    revision="daf3835d036574dff7c158882e8e77b75b024ee5",
+    allow_patterns=("config.json", "diffusion_pytorch_model.fp16.safetensors"),
+    sha256={"diffusion_pytorch_model.fp16.safetensors":
+            "6f23c58fd632f52238a7b35ebdc02f9f596fd13dbaa121f9b37b9f4689c2b1e9"},
+    label="ControlNet de profundidade do SDXL", licenca="OpenRAIL++")
+
+SDXL_WEIGHTS: tuple = (SDXL_GEN_WEIGHT, SDXL_TEXT_WEIGHT, SDXL_VAE_WEIGHT, SDXL_CN_DEPTH_WEIGHT)
+# sem estes o refino não roda; os codificadores de texto só faltam para um prompt sem embedding em cache
+SDXL_REQUIRED: tuple = (SDXL_GEN_WEIGHT, SDXL_VAE_WEIGHT, SDXL_CN_DEPTH_WEIGHT)
 
 
-def sdxl_installed() -> bool:
-    """Os pesos do SDXL estão no disco e conferem. Hoje sempre falso (ainda não são baixados)."""
-    if not SDXL_WEIGHTS:
+def sdxl_repos() -> list[str]:
+    return sorted({w.repo_id for w in SDXL_WEIGHTS})
+
+
+def sdxl_dirs(offline: bool = False) -> dict[str, Path]:
+    """Pastas locais (diffusers) do gerador, do VAE e do ControlNet, com o SHA-256 conferido."""
+    return {"gerador": ensure_hub_weight(SDXL_GEN_WEIGHT, offline),
+            "vae": ensure_hub_weight(SDXL_VAE_WEIGHT, offline),
+            "controlnet": ensure_hub_weight(SDXL_CN_DEPTH_WEIGHT, offline)}
+
+
+def sdxl_text_dir(offline: bool = False) -> Path:
+    return ensure_hub_weight(SDXL_TEXT_WEIGHT, offline)
+
+
+def sdxl_installed(required: tuple | None = None) -> bool:
+    """Os pesos obrigatórios do SDXL estão no disco e conferem (sem rede)."""
+    req = SDXL_REQUIRED if required is None else required
+    if not req:
         return False
     try:
-        for w in SDXL_WEIGHTS:
+        for w in req:
             ensure_weight(w, offline=True)
         return True
     except WeightsError:

@@ -109,12 +109,22 @@ GPU. Quase todas as fotos continuarão reprovadas pelo portão.
 1. **Sala vazia ruim na maioria das fotos** (as 2 daqui e 33 de 39 fotos mobiliadas da rodada de robustez): névoa, fantasma de
    móvel, piso inventado com material errado sob tapetes grandes, pedaços de parede "soltos". É o gargalo; o
    próximo passo é o refino SDXL (PT-V3-4), que precisa da GPU para ser avaliado.
-2. **Grafo de oclusão sem relação entre peças grandes encostadas com a mesma profundidade** (mesa × cadeira):
-   a peça de trás entra antes com o buraco da da frente, e a verificação não acusa (item 1 acima).
-3. **Tapete desenrola embaixo de móveis já pousados** quando os móveis cobrem o tapete (ordem de frente para trás).
-4. **"Surgir no lugar"** (aparece de uma vez) para o sofá principal da foto típica.
+2. ~~**Grafo de oclusão sem relação entre peças grandes encostadas com a mesma profundidade**~~ **(corrigido
+   depois desta avaliação)**: quando a profundidade empata, o dono do contorno (envoltória convexa local), a peça
+   pequena, a base nas colunas da borda comum e o tamanho decidem; toda borda comum tem ordem. Na fixture da Nice a
+   mesa entra junto com as duas cadeiras da frente (bloco rígido). Uma verificação **independente do grafo**
+   (`choreo.verify_independent`, regra 5b do `ModeBVerifier`) acusa o defeito antigo (75 300 px na fixture com as
+   relações mesa × cadeira tiradas) e o `plan` replaneja para 0.
+3. ~~**Tapete desenrola embaixo de móveis já pousados**~~ **(corrigido)**: o tapete é completado por baixo dos móveis
+   (envoltória convexa, preenchimento por espelho da estampa) e desenrola antes de eles pousarem, nas 2 fixtures.
+4. ~~**"Surgir no lugar"** para o sofá principal~~ **(corrigido nas fixtures)**: o sofá sobe do chão em bloco com a
+   mesa lateral que o cobre; 0 "surgir" nas 2 fixtures.
 5. **Nota do portão** sem teto chega a 90 em placa ruim; as reprovadas ficam todas em 59.
-6. Quadros de parede que tocam o topo deslizam de cima (é proposital, mas parece "cair do teto").
+6. ~~Quadros de parede que tocam o topo deslizam de cima~~ **(corrigido)**: crescem no lugar presos ao topo (ou
+   deslizam pelo lado).
+
+As correções 2, 3, 4 e 6 foram medidas nas fixtures com placa Telea (sem SAM) e em cenas sintéticas; os vídeos e as
+notas acima são de antes delas e não foram refeitos.
 
 ## O que validar na RTX 5070 Laptop do usuário
 

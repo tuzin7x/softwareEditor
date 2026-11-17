@@ -98,7 +98,8 @@ class ModeBVerifier:
     2. último quadro ``array_equal`` à foto (na resolução do vídeo);
     3. em TODO quadro, fora de (máscara de remoção ∪ caixa das peças em movimento), quadro == foto;
     4. placa == foto fora da máscara de remoção;
-    5. pixel oculto visível = 0 (medido por ``choreo.verify``; o resultado entra em :meth:`finish`);
+    5. pixel oculto visível = 0 (medido por ``choreo.verify``; o resultado entra em :meth:`finish`), também na
+       verificação independente do grafo de oclusão (5b, ``choreo.verify_independent``);
     6. anti-morph: fora de (região dinâmica ∪ caixas em movimento do quadro e do anterior) nada muda entre
        quadros consecutivos;
     7. o relatório (:meth:`finish`) registra os números para o ``report.json``.
@@ -166,11 +167,19 @@ class ModeBVerifier:
     def finish(self, choreo_stats: dict | None = None) -> dict:
         if self.n != self.n_frames:
             self._fail(f"{self.n} quadros verificados, esperados {self.n_frames}")
-        hidden = None
+        hidden = hidden_ind = None
         if choreo_stats is not None:
             hidden = int(choreo_stats.get("oculto_visivel_px", 0))
             if hidden:
                 self._fail(f"regra 5: {hidden} pixels de parte oculta ficaram visíveis")
+            # 5b: a mesma regra medida SEM o grafo de oclusão da coreografia (``choreo.verify_independent``)
+            if "oculto_independente_px" in choreo_stats:
+                hidden_ind = int(choreo_stats.get("oculto_independente_px", 0))
+                if hidden_ind:
+                    pares = ", ".join(f"{d['peca']} antes de {d['coberta_por']}"
+                                      for d in choreo_stats.get("oculto_independente_pares", [])[:3])
+                    self._fail(f"regra 5b: {hidden_ind} pixels de corte à vista pela verificação independente"
+                               + (f" ({pares})" if pares else ""))
         H, W = self.shape
         return {"verificacao_modo_b": {
             "ok": not self.failures, "quadros": self.n,
@@ -179,6 +188,7 @@ class ModeBVerifier:
             "placa_fora_mascara_px": int(self.plate_outside_px),
             "fora_mascara_max_niveis": int(self.max_outside),
             "morph_px": int(self.morph_px), "oculto_visivel_px": hidden,
+            "oculto_independente_px": hidden_ind,
             "mascara_remocao_pct": round(100.0 * float(self.mask.sum()) / (H * W), 3),
             "caixa_movel_max_pct": round(self.max_moving_pct, 3),
             "falhas": list(self.failures[:20])}}

@@ -232,10 +232,16 @@ def test_gate_falls_back_to_keeping_builtins(monkeypatch):
     monkeypatch.setattr(rp, "redetected_furniture", fake_found)
     r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
                              redetect=fake_redetect)
-    assert r.kept_builtins and not r.quality.redetected   # (o Telea alisa o grão: a nota pode reprovar por textura)
-    assert not r.mask[built & ~rp._dil(loose, 30)].any()
-    assert any("planejados mantidos" in w for w in r.warnings)
-    assert r.report()["placa"]["planejados_mantidos"] is True
+    names = [t["estrategia"] for t in r.info["tentativas"]]
+    assert names[:2] == ["crua_por_plano", "planejados_mantidos"]    # a crua reprovou: tenta manter os planejados
+    assert not r.quality.redetected
+    rep = r.report()["placa"]
+    assert rep["planejados_mantidos"] is r.kept_builtins
+    if r.kept_builtins:                                  # mantidos: dito no relatório e no aviso
+        assert not r.mask[built & ~rp._dil(loose, 30)].any()
+        assert any("planejados mantidos" in w for w in r.warnings) and rep["cobertura"]["planejados_mantidos"]
+    else:                                                # uma alternativa crua aprovou: tudo removido
+        assert r.quality.ok and rep["cobertura"]["tudo_removido"]
 
 
 def _inst_set(insts):
@@ -260,9 +266,7 @@ def test_keep_builtins_reason_thresholds():
     assert "reconstruiria 45%" in rp.keep_builtins_reason(_inst_set([sofa, shelf]), (H, W))
 
 
-def test_gate_keeps_large_builtins_from_the_first_attempt(monkeypatch):
-    """Cozinha planejada de ponta a ponta: a sala crua nem é tentada (a parede atrás seria inventada), mesmo que
-    a nota dela pudesse aprovar."""
+def _big_builtin_scene():
     room = _room()
     img, groups, box = _render(room)
     H, W = groups.shape
@@ -271,13 +275,39 @@ def test_gate_keeps_large_builtins_from_the_first_attempt(monkeypatch):
     built = np.zeros((H, W), bool)
     built[100:240, 200:440] = True                     # 19% da foto
     insts = [_piece(loose, "solto", "chair"), _piece(built, "planejado", "cabinet")]
+    return room, img, groups, loose, built, insts
+
+
+def test_gate_tries_raw_room_first_even_with_large_builtins(monkeypatch):
+    """§3.6 (rodada 1 de correções): no modo B os planejados também saem; a sala crua é sempre a 1ª tentativa e o
+    risco ("planejados cobrem 19%") só vai para o relatório. Se a crua aprova, entrega a crua."""
+    room, img, groups, loose, built, insts = _big_builtin_scene()
     monkeypatch.setattr(rp, "redetected_furniture", lambda *a, **k: [])
+    r = rp.build_plate_gated(img, _inst_set(insts), SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                             redetect=lambda p: (None, None), alternatives=False)
+    assert r.info["tentativas"][0]["estrategia"] == "crua_por_plano"
+    rep = r.report()["placa"]
+    assert "planejados cobrem" in rep["risco_planejados"] and rep["planejados_por_padrao"] is None
+    if not r.kept_builtins:
+        assert r.mask[built & ~rp._dil(loose, 30)].all()
+        assert rep["cobertura"]["tudo_removido"] is True
+    else:                                               # crua reprovada: o motivo é dito, nunca em silêncio
+        assert rep["cobertura"]["planejados_mantidos"] == ["cabinet"] and rep["cobertura"]["motivo"]
+        assert any("planejados mantidos" in w for w in r.warnings)
+
+
+def test_gate_keeps_large_builtins_first_when_configured(monkeypatch):
+    """Comportamento antigo, por configuração: planejados grandes ficam já na 1ª tentativa."""
+    room, img, groups, loose, built, insts = _big_builtin_scene()
+    monkeypatch.setattr(rp, "redetected_furniture", lambda *a, **k: [])
+    monkeypatch.setattr(rp, "KEEP_BUILTINS_FIRST", True)
     r = rp.build_plate_gated(img, _inst_set(insts), SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
                              redetect=lambda p: (None, None), alternatives=False)
     assert r.kept_builtins
     assert [t["estrategia"] for t in r.info["tentativas"]] == ["planejados_mantidos"]
     assert not r.mask[built & ~rp._dil(loose, 30)].any()
     assert "planejados cobrem" in r.report()["placa"]["planejados_por_padrao"]
+    assert r.report()["placa"]["cobertura"]["planejados_mantidos"] == ["cabinet"]
     assert any("por padrão" in w for w in r.warnings)
 
 
@@ -566,3 +596,19 @@ def test_extend_wall_panels_continues_panel_down_to_the_floor():
     assert (plate[100:] == before[100:]).all()           # o piso não muda
     assert (plate[60:100, 30:40] == 230).all()           # nem a parede fora das colunas do painel
     assert (plate[~mask] == before[~mask]).all()
+
+
+def test_wall_hung_piece_shadow_band_is_on_the_wall():
+    """Quadro na parede: a faixa de sombra da moldura é procurada na parede (antes só no piso)."""
+    room = _room()
+    img, groups, box = _render(room)
+    H, W = groups.shape
+    art = np.zeros((H, W), bool)
+    art[100:150, 200:280] = True
+    core = rp.core_mask([_piece(art, "solto", "painting")], (H, W))
+    cand = rp.effect_candidates([_piece(art, "solto", "painting")], groups, core)
+    below = np.zeros((H, W), bool)
+    below[155:160, 210:270] = True                     # parede logo abaixo da moldura
+    assert (cand & below).sum() > 0.8 * below.sum()
+    cand_chair = rp.effect_candidates([_piece(art, "solto", "chair")], groups, core)
+    assert (cand & ~cand_chair).sum() > 0                # a peça pendurada tem faixa maior na parede

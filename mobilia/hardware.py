@@ -231,14 +231,20 @@ def nvenc_available(ffmpeg_exe: str, codec_args: list[str] | None = None) -> boo
 # PLANO_V3 §5.3. O modo B sem SDXL (OneFormer + SAM 2.1 + big-lama, um modelo por vez, pico
 # ~2–3 GB) roda em qualquer GPU NVIDIA e, mais devagar, na CPU: é o perfil padrão. O SDXL (refino
 # da sala vazia no modo B e, depois, o modo A novo) pede ~6,7–7,2 GB: com menos VRAM livre usa
-# ``enable_model_cpu_offload`` (exige RAM ≥ 16 GB) e abaixo de ~5 GB fica desligado. Números de
+# ``enable_model_cpu_offload`` (exige RAM ≥ 16 GB) e abaixo de ~6,5 GB fica desligado. Números de
 # VRAM e de tempo da GPU são ESTIMATIVAS (não medidos nesta máquina sem GPU).
+# Por que 6,5 GB (correção da revisão de código, rodada 2): o ``enable_model_cpu_offload`` leva o UNet
+# INTEIRO para a GPU de uma vez (fp16 registrado: 5,14 GB = 4,9 GiB, ``LICENCAS_V3.md``), mais o
+# ControlNet small (~0,3 GB) e as ativações da remoção de ruído a ~1024 px com CFG (lote 2, ~1–1,2 GB,
+# estimado). O mínimo antigo (5 GB) deixava passar uma GPU em que o UNet não cabe: OOM a cada tentativa
+# ou, no Windows, o *sysmem fallback* do driver (sem erro, 5–20× mais lento). Para sobrar VRAM na GPU de
+# 8 GB, o modo B tira a LaMa e o OneFormer da GPU enquanto o SDXL gera (``pipeline_b.VramSwap``).
 
 PERFIL_B_SEM_SDXL = "B sem SDXL"
 PERFIL_B_COM_SDXL = "B com SDXL"
 PERFIL_A = "A"
 SDXL_VRAM_FULL_MB = 7000      # VRAM livre para o SDXL inteiro na GPU
-SDXL_VRAM_MIN_MB = 5000       # abaixo disto o SDXL não roda (nem com offload)
+SDXL_VRAM_MIN_MB = 6500       # abaixo disto o SDXL não roda (UNet inteiro + ControlNet + ativações; estimado)
 SDXL_RAM_OFFLOAD_GB = 16.0    # offload para a RAM precisa de folga no sistema
 
 

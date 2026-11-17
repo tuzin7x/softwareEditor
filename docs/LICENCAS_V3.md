@@ -44,8 +44,26 @@ Observações:
 | VAE | `madebyollin/sdxl-vae-fp16-fix` | MIT | https://huggingface.co/madebyollin/sdxl-vae-fp16-fix |
 | ControlNet de profundidade | `diffusers/controlnet-depth-sdxl-1.0-small` | OpenRAIL++ | https://huggingface.co/diffusers/controlnet-depth-sdxl-1.0-small |
 
-Nenhum desses pesos entra no pacote enquanto o modo B sem SDXL for o entregável. Os *text encoders* não vão
-para o cliente (embeddings pré-calculados no build).
+**Estado do PT-V3-4 (17/11/2026):** o refino SDXL da sala vazia (`mobilia/gen/sdxl.py`) usa o RealVisXL V5.0
+Lightning (UNet único, já com os passos Lightning: dispensa a LoRA), o VAE fp16-fix e o ControlNet depth small.
+Só as variantes **fp16** em pastas do diffusers, revisão fixada e SHA-256 conferido no registro de pesos
+(`mobilia/analysis/weights.py`, `SDXL_WEIGHTS`); hashes conferidos contra a API do Hugging Face e no arquivo
+baixado:
+
+| Peso | Repositório @ revisão | Arquivo | SHA-256 | Tamanho |
+|---|---|---|---|---|
+| UNet (gerador) | `SG161222/RealVisXL_V5.0_Lightning` @ `f4454158cedaab9f0688c199561d6c92525f3a85` | `unet/diffusion_pytorch_model.fp16.safetensors` | `1143cd2aaf65d24af34b5699d090aed724f6c0978c2ec5a5f56821ccb36260ce` | 5,14 GB |
+| Text encoder 1 | idem | `text_encoder/model.fp16.safetensors` | `0a873801e35a008b17e228189a83a8b41e068ffe7bde7c1105e8c6e947758bc5` | 0,25 GB |
+| Text encoder 2 | idem | `text_encoder_2/model.fp16.safetensors` | `dfa429b268cd3f6297927f1fd3eacac04781b17ab4caa97892a461ff41400a5e` | 1,39 GB |
+| VAE fp16-fix (MIT) | `madebyollin/sdxl-vae-fp16-fix` @ `207b116dae70ace3637169f1ddd2434b91b3a8cd` | `diffusion_pytorch_model.safetensors` | `1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c` | 0,33 GB |
+| ControlNet depth small | `diffusers/controlnet-depth-sdxl-1.0-small` @ `daf3835d036574dff7c158882e8e77b75b024ee5` | `diffusion_pytorch_model.fp16.safetensors` | `6f23c58fd632f52238a7b35ebdc02f9f596fd13dbaa121f9b37b9f4689c2b1e9` | 0,32 GB |
+
+Total ≈ 7,4 GB. O VAE próprio do RealVisXL e o checkpoint único de 6,9 GB não são baixados. Os *text encoders*
+só são carregados para calcular os embeddings de um prompt ainda sem cache (o vocabulário do prompt da sala vazia
+é fixo); o pacote do cliente pode levar os embeddings prontos e dispensar esses 1,6 GB (ainda não feito). Não
+usados: SDXL-inpainting 0.1 e a LoRA SDXL-Lightning (o RealVisXL Lightning já cobre os dois papéis com um UNet
+só; o disco desta máquina não comportava os dois UNets). Obrigações OpenRAIL++: Attachment A no EULA (§4) e
+cópia da licença junto com os pesos.
 
 ## 2. Proibidos (não comerciais ou sem licença clara)
 

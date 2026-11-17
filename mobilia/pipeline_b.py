@@ -5,7 +5,8 @@ quando a detecção de modo (``removal.instances.detect_mode``) diz "B" ou o ped
 
 1. **Peças** (``removal/instances.py``): instâncias de móveis da foto na resolução do vídeo (OneFormer da análise,
    reamostrado, + SAM 2.1 se os pesos estão no disco), classificadas em soltos e planejados.
-2. **Sala vazia + portão de qualidade** (``removal/plate.py``, :func:`build_plate_gated`): placa crua por plano,
+2. **Sala vazia + portão de qualidade** (``removal/plate.py``, :func:`build_plate_gated`; com o perfil "B com SDXL",
+   cada tentativa passa pelo refino SDXL de ``gen/sdxl.py``, que cai para a LaMa se não melhorar): placa crua por plano,
    com a nota automática (OneFormer rodado de novo na placa para achar móvel que "voltou"). Reprovada: tenta
    mantendo os planejados, depois LaMa direto na imagem e máscara mais larga. Ainda reprovada: o trabalho termina
    **sem MP4** e com um aviso claro (a interface oferece gerar mesmo assim, usar o modo A ou outra foto), a não ser
@@ -96,6 +97,126 @@ def load_redetector(device: str, use_fp16: bool):
 def sam_choice(device: str):
     """SAM 2.1 para refinar as bordas: "auto" usa os pesos se estão no disco (sem baixar)."""
     return "auto"
+
+
+def sdxl_choice(hw) -> tuple[bool, bool, str]:
+    """(usar, offload, motivo) do refino SDXL da sala vazia (PT-V3-4). ``MOBILIA_SDXL``: "0" desliga; "1" força
+    (até na CPU, só para testes; precisa dos pesos); padrão "auto": o perfil da V3 decide (GPU NVIDIA com VRAM
+    suficiente, RAM para o offload e pesos instalados). Na GPU de 8 GB o SDXL roda com ``enable_model_cpu_offload``:
+    o OneFormer da nota de cada semente divide a VRAM com ele."""
+    from .gen.sdxl import ENV_SDXL
+
+    mode = os.environ.get(ENV_SDXL, "auto").strip().lower()
+    if mode in ("0", "false", "nao", "não", "off", "desligado"):
+        return False, False, f"refino SDXL desligado ({ENV_SDXL}=0)"
+    from .analysis.weights import sdxl_installed
+    from .hardware import choose_profile_v3, sdxl_capacity
+
+    force = mode in ("1", "true", "sim", "forcar", "forçar")
+    try:
+        cabe, _, why_cap = sdxl_capacity(hw)
+        if not cabe and not force:
+            return False, False, why_cap
+        # sem GPU que caiba não confere os pesos (conferir o SHA-256 de 5 GB custa segundos no 1º uso)
+        perfil = choose_profile_v3(hw, "B", sdxl_instalado=None if (cabe or force) else False)
+    except Exception as e:  # relatório de hardware incompleto: segue sem SDXL
+        return False, False, f"perfil de hardware indisponível ({type(e).__name__})"
+    if perfil.sdxl:
+        gpu = getattr(hw, "best_gpu", None)
+        big = gpu is not None and (gpu.vram_total_mb or 0) >= 12000
+        return True, bool(perfil.sdxl_offload or not big), perfil.motivo
+    if force and sdxl_installed():
+        return True, False, f"refino SDXL forçado ({ENV_SDXL}=1) apesar de: {perfil.motivo}"
+    return False, False, perfil.motivo
+
+
+def cuda_free_mb(device: str) -> int | None:
+    """VRAM livre agora (``torch.cuda.mem_get_info``), com o que este processo já carregou. None fora da CUDA."""
+    if not str(device).startswith("cuda"):
+        return None
+    try:
+        import torch
+
+        return int(torch.cuda.mem_get_info()[0] // 2**20)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class VramSwap:
+    """Tira da GPU os modelos do portão já carregados (LaMa, OneFormer da nota) enquanto o SDXL gera e os devolve
+    depois. Com ``enable_model_cpu_offload`` o UNet inteiro (4,9 GiB) sobe para a GPU de uma vez; na GPU de 8 GB, com
+    a LaMa e o OneFormer residentes, não sobra o bastante (revisão de código, rodada 2). O SDXL devolve os pesos dele
+    à CPU no fim de cada chamada (ganchos do offload), então o OneFormer da nota volta a caber logo depois.
+    Custo: copiar ~1 GB por semente entre RAM e VRAM (estimado em menos de 1 s; não medido)."""
+
+    def __init__(self, device: str, modules):
+        self.device = str(device)
+        self.mods = [m for m in modules if m is not None and hasattr(m, "to")]
+        self.active = self.device.startswith("cuda") and bool(self.mods)
+
+    def reclaim_mb(self) -> int:
+        """VRAM (MB) que os modelos ocupam e que a troca libera durante a geração."""
+        if not self.active:
+            return 0
+        tot = 0
+        for m in self.mods:
+            try:
+                for t in list(m.parameters()) + list(m.buffers()):
+                    if t.is_cuda:
+                        tot += t.numel() * t.element_size()
+            except Exception:  # noqa: BLE001 - módulo sem parâmetros enumeráveis: não conta
+                pass
+        return int(tot // 2**20)
+
+    def _move(self, dev: str) -> None:
+        for m in self.mods:
+            m.to(dev)
+        if dev == "cpu":
+            import torch
+
+            torch.cuda.empty_cache()
+
+    def wrap(self, generate):
+        """``generate`` com os modelos do portão fora da GPU durante a chamada (e de volta mesmo com erro)."""
+        if not self.active:
+            return generate
+
+        def gen(*a, **k):
+            self._move("cpu")
+            try:
+                return generate(*a, **k)
+            finally:
+                self._move(self.device)
+
+        return gen
+
+
+def sdxl_recheck(device: str, offload: bool, reclaim_mb: int = 0) -> tuple[bool, bool, str, int | None]:
+    """Reconfere a VRAM livre **depois** de a LaMa e o OneFormer da nota estarem na GPU (o perfil leu a VRAM livre
+    antes deles). Devolve (usar, offload, motivo, livre_mb): com menos que ``SDXL_VRAM_FULL_MB`` livres liga o
+    offload; com menos que ``SDXL_VRAM_MIN_MB``, desliga o SDXL (fica a LaMa) em vez de arriscar falta de memória
+    ou o *sysmem fallback* do driver no meio do trabalho. ``reclaim_mb``: VRAM que :class:`VramSwap` libera durante
+    a geração (somada à livre). Fora da CUDA nada muda."""
+    from .hardware import SDXL_VRAM_FULL_MB, SDXL_VRAM_MIN_MB
+
+    free = cuda_free_mb(device)
+    if free is None:
+        return True, offload, "", None
+    free += max(0, int(reclaim_mb))
+    if free < SDXL_VRAM_MIN_MB:
+        return False, offload, (f"VRAM livre depois da LaMa e do OneFormer: {free} MB (mínimo {SDXL_VRAM_MIN_MB}); "
+                                "refino SDXL desligado nesta foto"), free
+    if free < SDXL_VRAM_FULL_MB and not offload:
+        return True, True, f"VRAM livre depois da LaMa e do OneFormer: {free} MB; SDXL com offload", free
+    return True, offload, f"VRAM livre depois da LaMa e do OneFormer: {free} MB", free
+
+
+def load_refiner(device: str, offload: bool):
+    """Refinador SDXL (``generate`` de :func:`mobilia.gen.sdxl.refine_plate`) e a configuração do dispositivo."""
+    from .gen import sdxl
+
+    cfg = sdxl.RefineConfig.for_device(device)
+    return sdxl.load_sdxl(device, offload=offload, cfg=cfg), cfg
 
 
 # ------------------------------------------------------------------ reamostragem da análise para o vídeo
@@ -224,17 +345,59 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
             inpaint = load_inpainter(dev)
             t_load = time.perf_counter() - t0
             redetect, red_model = load_redetector(dev, bool(getattr(prof, "use_fp16", False)))
+            # refino SDXL (perfil "B com SDXL"): estágio depois da LaMa em cada tentativa do portão; sem pesos, sem
+            # VRAM ou com erro de carga, segue só com a LaMa (o motivo vai para o relatório)
+            use_sdxl, offload, why = sdxl_choice(ctx.hw)
+            sdxl_rep = {"ligado": use_sdxl, "motivo": why, "offload": offload,
+                        "vram_pico_mb_por_etapa": {"lama_e_oneformer_carregados": torch_peak_mb(dev)}}
+            refiner = refine = None
+            swap = VramSwap(dev, [getattr(inpaint, "model", None), red_model])
+            if use_sdxl:
+                use_sdxl, offload, why2, free = sdxl_recheck(dev, offload, swap.reclaim_mb())
+                sdxl_rep["vram_trocada_mb"] = swap.reclaim_mb()
+                sdxl_rep.update(ligado=use_sdxl, offload=offload, vram_livre_antes_sdxl_mb=free)
+                if why2:
+                    sdxl_rep["reconferencia_vram"] = why2
+                    if not use_sdxl:
+                        sdxl_rep["motivo"] = why2
+                        em.log(why2, "warning")
+            if use_sdxl:
+                em.stage("sala_vazia", 0.05, "Carregando o refino da sala vazia (SDXL)")
+                t1 = time.perf_counter()
+                try:
+                    refiner, rcfg = load_refiner(dev, offload)
+                    sdxl_rep["carga_s"] = round(time.perf_counter() - t1, 2)
+                    sdxl_rep["vram_pico_mb_por_etapa"]["sdxl_carregado"] = torch_peak_mb(dev)
+                except Exception as e:  # WeightsError, falta de memória, diffusers ausente...
+                    sdxl_rep.update(ligado=False, motivo=f"refino SDXL indisponível: {str(e)[:300]}")
+                    em.log(f"Refino SDXL indisponível ({type(e).__name__}); a sala vazia fica só com a LaMa.",
+                           "warning")
+                if refiner is not None:
+                    from .gen import sdxl as gsdxl
+
+                    generate = swap.wrap(refiner)
+
+                    def refine(r, name):
+                        em.stage("sala_vazia", min(0.9, 0.25 * attempt_no[0] + 0.15),
+                                 f"Refinando a sala vazia com SDXL ({names.get(name, name)})")
+                        return gsdxl.refine_plate(foto, r, seg_v, ctx.room, ctx.geo.depth, generate, redetect,
+                                                  seed=req.seed, cfg=rcfg, room_type=req.room_type)
             try:
                 res = rp.build_plate_gated(foto, inst, seg_v, ctx.room, ctx.geo.depth, inpaint, redetect,
-                                           seed=req.seed, on_attempt=on_attempt)
+                                           seed=req.seed, on_attempt=on_attempt, refine=refine)
             finally:
-                del redetect, red_model, inpaint
+                if refiner is not None:
+                    sdxl_rep["chamadas"] = list(refiner.calls)
+                    refiner.release()
+                refine = refiner = redetect = red_model = inpaint = None    # libera os modelos (VRAM)
+                swap = generate = None
                 gc.collect()
                 if dev.startswith("cuda"):
                     import torch
 
                     torch.cuda.empty_cache()
             vram_b = torch_peak_mb(dev)
+            sdxl_rep["vram_pico_mb_por_etapa"]["portao_completo"] = vram_b
         Image.fromarray(res.plate).save(work / "sala_vazia.png")
         Image.fromarray(res.plate).save(work / "sala_vazia.jpg", quality=90)
     em.preview(work / "sala_vazia.jpg")
@@ -251,7 +414,18 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
     for w in res.warnings:
         em.log(w, "warning")
     pieces = inst.removal(res.kept_builtins)
+    ri_ = res.info.get("refino_sdxl") or {}
+    sdxl_rep.update(usado=bool(ri_.get("usado")), semente=ri_.get("semente"),
+                    resultado=ri_.get("motivo"), sementes=ri_.get("sementes"),
+                    nota_lama=ri_.get("nota_lama"), prompt=ri_.get("prompt"))
     base = _base_report(ctx, inst, res, pieces, gate, t_load, vram_b)
+    base["refino_sdxl"] = sdxl_rep
+    base["semente_sdxl"] = sdxl_rep["semente"]
+    if "carga_s" in sdxl_rep:
+        base["modelos_carga_s"]["sdxl"] = sdxl_rep["carga_s"]
+    if sdxl_rep["usado"]:
+        base["narrativa"].append(f"A sala vazia foi refinada com SDXL (semente {sdxl_rep['semente']}), só dentro da "
+                                 "área reconstruída; janelas, portas e o resto da foto ficaram intactos.")
     if not ok and not accepted:
         em.log(warning, "warning")
         return _finish(ctx, base, "", warning, gate)
@@ -265,6 +439,8 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
         em.stage("camadas", 0.6, "Planejando a entrada de cada peça")
         ch = C.plan(st, fps=int(ctx.q.get("fps") or C.FPS))
         cv = C.verify(st, ch)
+        for w in ch.warnings:             # ex.: corte à vista pela verificação independente (o vídeo será recusado)
+            em.log(w, "warning")
     em.stage("camadas", 1.0, f"{len(ch.entrances)} entradas em {ch.duration:.1f} s")
 
     # -------------------------------------------------------------- vídeo
@@ -301,7 +477,9 @@ def _base_report(ctx: ModeBContext, inst, res, pieces, gate: dict, t_load: float
             f"{len(pieces)} peças da própria foto retiradas por trás e devolvidas uma a uma: "
             f"{_labels_pt(p.label for p in pieces)}."]
     if left:
-        narr.append(f"Planejados mantidos no fundo para preservar a qualidade: {_labels_pt(left)}.")
+        why = (res.info.get("cobertura") or {}).get("motivo") or "a sala crua reprovou na verificação"
+        narr.append(f"No modo B os planejados também saem (sala crua), mas aqui ficaram na foto porque {why}: "
+                    f"{_labels_pt(left)}.")
     narr.append(f"A sala vazia do início foi reconstruída em {100 * area:.1f}% da imagem (só onde havia móveis, "
                 "sombras e reflexos); o resto é a sua foto, pixel a pixel.")
     if gate["nota"] is not None:

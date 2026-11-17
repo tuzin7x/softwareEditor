@@ -14,8 +14,10 @@ quadros:
   do apoio, então entra *junto* com ele, como um bloco rígido. O mesmo vale para a bancada (e a cuba) sobre o
   armário planejado quando ela o cobre; se não cobre, ela pousa depois.
 * **Ordem de entrada.** De frente para trás: uma unidade só entra depois que todas as que estão na frente dela já
-  pousaram. Entre as livres, a prioridade é: tapete livre (desenrola primeiro), planejados (base, ilha, eletros e
-  louças → bancada → aéreos/coifa), móveis soltos (os mais perto da câmera primeiro), quadros e decoração.
+  pousaram. Exceção: o tapete completado por baixo dos móveis (``layers.LayerStack.rug_first``) desenrola ANTES de
+  quem está em cima dele, e quem pousa nele só termina o movimento com o tapete aberto. Entre as livres, a
+  prioridade é: tapete (desenrola primeiro), planejados (base, ilha, eletros e louças → bancada → aéreos/coifa),
+  móveis soltos (os mais perto da câmera primeiro), quadros e decoração.
 * **Movimento** (escolhido por candidatos, cada um testado ponto a ponto contra o corte da peça):
   - tapete: **desenrola no lugar** (revelação com borda suave de poucos pixels, nunca fade);
   - peça encostada na borda da foto: **desliza a partir dessa borda**, saindo de fora do quadro (nunca cai);
@@ -24,7 +26,13 @@ quadros:
   - peça isolada e inteira: **queda curta (<= 25% da altura do quadro) com quique**;
   - planejados (§3.6): base, ilha, eletros e louças **sobem do chão** (recorte na linha do piso: nada aparece
     abaixo dele); bancada **pousa** sobre a base; aéreos e coifa **descem** (do teto, se encostam no topo);
-  - último recurso (nada acima é seguro): surge no lugar, de uma vez (opacidade 100%, nunca fade).
+  - quadro de parede cortado só pelo topo: cresce no lugar preso ao topo, ou desliza rente à parede pelo lado
+    (descer do topo parecia "cair do teto");
+  - peça que só poderia surgir: tenta entrar em bloco com quem a cobre (todas, ou só parte delas, as menores
+    primeiro); último recurso: surge no lugar, de uma vez (opacidade 100%, nunca fade).
+* **Verificação independente** (:func:`verify_independent`): o "pixel oculto visível" medido sem o grafo de
+  oclusão (só a evidência clara das camadas e a borda da foto). O :func:`plan` replaneja com a relação que faltava;
+  o que sobrar vai para os avisos e o vídeo é recusado (§3.5, regra 5b).
 * **Sem fade.** A peça tem opacidade 100% desde o primeiro quadro em que aparece. A sombra de contato cresce
   conforme ela chega ao chão (proporcional à altura que falta) e o delta de contato (textura da sombra, reflexo)
   entra no pouso; o sombreamento acompanha o deslocamento.
@@ -71,6 +79,8 @@ RISE_MIN = 0.05             # sobe por trás só com amplitude >= 5% da altura d
 RISE_CAP = 0.15             # e no máximo 15% do quadro
 RISE_SIZE = 0.4             # ou 40% do tamanho da peça (o salto inicial fica pequeno)
 SCALES = (0.94, 0.96, 0.98)
+WALL_SCALES = (0.85, 0.9, 0.94)   # quadro preso ao topo da foto: cresce no lugar
+WALL_SLIDE_MAX = 0.4        # ... ou desliza pelo lado se a borda lateral está a <= 40% da largura
 EXIT_MARGIN = 6             # px além da borda no início do deslize
 BOUNCE = 0.06               # quique: fração da altura da queda
 MERGE_ROUNDS = 4            # tentativas de juntar peça "surgir" com quem a cobre
@@ -78,6 +88,7 @@ MERGE_MAX_AREA = 0.2        # bloco opcional no máximo com 20% da imagem
 MERGE_MAX_PIECES = 8
 CYCLE_BREAK_MAX = 1.5       # aresta de ciclo com até 1,5 × diagonal pontos de corte pode ser descartada
 REPAIR_ROUNDS = 2
+INDEPENDENT_REPAIRS = 2     # replanejamentos pedidos pela verificação independente
 SOFT_FRAC = 0.008           # borda suave do tapete (fração da diagonal)
 
 # --- papéis dos planejados (§3.6) ------------------------------------------------------------------------------
@@ -191,6 +202,13 @@ def cut_bands(stack: L.LayerStack, hard: Sequence[np.ndarray] | None = None, r: 
                 occ[r:r + H, r:r + W] |= hard[j]
         hp = np.pad(hard[i], r)
         ring = (cv2.dilate(hp.astype(np.uint8), k) > 0) & ~hp
+        am = stack.layers[i].amodal
+        if am is not None:
+            # tapete completado por baixo dos móveis: fora da envoltória a borda é a silhueta estimada dele
+            hull = np.zeros((H + 2 * r, W + 2 * r), bool)
+            x0, y0, x1, y1 = stack.layers[i].box
+            hull[r + y0:r + y1, r + x0:r + x1] = am
+            occ &= hull
         sel = ring & (occ | ~inside)
         ys, xs = np.nonzero(sel)
         out.append(np.stack([xs - r, ys - r], axis=1).astype(np.float32))
@@ -426,9 +444,13 @@ def _unit_graph(stack, units, after) -> tuple[np.ndarray, np.ndarray]:
     before = np.zeros((n_u, n_u), bool)              # before[a, b]: unidade a entra antes da b
     occluded = np.zeros(n_u, bool)
     n = len(stack.layers)
+    rf = getattr(stack, "rug_first", None) or {}
     for a in range(n):
         for b in range(n):
             if stack.front[a, b] and of[a] != of[b]:
+                if a in rf.get(b, ()):
+                    before[of[b], of[a]] = True          # tapete completado: desenrola antes de quem pousa nele
+                    continue
                 before[of[a], of[b]] = True
                 occluded[of[b]] = True
     for i, j in after.items():
@@ -466,6 +488,8 @@ def break_cycles(stack, hard, bands, units, after) -> tuple[np.ndarray, int]:
                 w[a, b] = int(hard[a][yi[ok], xi[ok]].sum())
     of = {i: u for u, mem in enumerate(units) for i in mem}
     hard_after = {(of[j], of[i]) for i, j in after.items() if of[i] != of[j]}
+    hard_after |= {(of[r_], of[a]) for r_, clear in (getattr(stack, "rug_first", None) or {}).items()
+                   for a in clear if of[r_] != of[a]}           # tapete antes de quem pousa nele: não é oclusão
     limit = CYCLE_BREAK_MAX * math.hypot(H, W)
     broken = 0
     for _ in range(4 * n):
@@ -668,6 +692,24 @@ class _Planner:
                             hi=float(x1 if axis == 0 else y1))
         # bordas laterais (e a de baixo) antes do topo: peça de borda lateral nunca vem de cima
         side = sorted([k for k in edges if k in ("esquerda", "direita", "base")], key=lambda k: -edges[k])
+        wall = role == "parede" or all(lab in L.WALL_HUNG_LABELS for lab in labels)
+        if wall and set(edges) == {"topo"}:
+            # quadro cortado pelo topo da foto: deslizar de cima parecia "cair do teto". Cresce no lugar a partir
+            # do ponto do topo (o corte fica fora do quadro) ou, se não der, desliza rente à parede pelo lado mais
+            # perto; descer do topo é o último recurso.
+            anchor = ((x0 + x1) / 2.0, 0.0)
+            for s0 in WALL_SCALES:
+                if self.scale_ok(unit, s0, anchor):
+                    return Entrance(list(unit), "escala", scale0=s0, anchor=anchor, role=role,
+                                    reason="quadro no topo da foto: cresce no lugar, preso ao topo")
+            near = "esquerda" if x0 <= W - x1 else "direita"
+            dist = x1 if near == "esquerda" else W - x0
+            if dist <= WALL_SLIDE_MAX * W:
+                d = EDGE_DIR[near]
+                amp = float(dist + EXIT_MARGIN)
+                if self.path_ok(unit, d, amp):
+                    return Entrance(list(unit), "deslizar", d, amp, role=role,
+                                    reason=f"quadro no topo da foto: desliza rente à parede ({near})")
         floor_role = role in ("base", "eletro", "louca", "bancada")
         for k in side:
             if not (floor_role and k == "base"):
@@ -767,10 +809,18 @@ def _schedule(ents: list[Entrance], units_of: dict, stack, gap: float, dscale: f
     for k, e in enumerate(ents):
         e.dur = DURATION[e.style] * dscale * (SMALL_DUR if small.get(k) else 1.0)
         start = t
+        rf = getattr(stack, "rug_first", None) or {}
         for a in range(len(stack.layers)):
             for b in e.members:
-                if stack.front[a, b] and of[a] in done and of[a] != of[b]:
-                    start = max(start, done[of[a]].motion_end + 1e-3)
+                if not (stack.front[a, b] and of[a] in done and of[a] != of[b]):
+                    continue
+                if a in rf.get(b, ()):
+                    continue
+                start = max(start, done[of[a]].motion_end + 1e-3)
+        for r_, clear in rf.items():
+            # quem pousa no tapete só termina o movimento depois de o tapete estar todo desenrolado
+            if of[r_] in done and of[r_] != of[e.members[0]] and clear & set(e.members):
+                start = max(start, done[of[r_]].motion_end - e.dur * MOTION_END + 1e-3)
         for dep in e.members:
             j = e.after.get(dep)
             if j is not None and of[j] in done:
@@ -817,29 +867,45 @@ def _plan_variant(stack, hard, bands, units, after, roles, ch):
     for _ in range(MERGE_ROUNDS):
         pops = [e for e in ents if e.style == "surgir"]
         improved = False
-        for e in pops:
+        for e in sorted(pops, key=lambda e: -float(_unit_union(hard, e.members).sum())):   # as grandes primeiro
             mem = set(e.members)
             occ = {j for i in e.members for j in range(n) if j not in mem and stack.front[j, i]}
             if not occ:
                 continue
-            new_units, grp = [], set(mem)
-            for u in units:
-                if set(u) & occ:
-                    grp |= set(u)
-            if len(grp) > MERGE_MAX_PIECES or float(_unit_union(hard, sorted(grp)).sum()) > MERGE_MAX_AREA * H * W:
-                continue
-            new_units = [u for u in units if not (set(u) & grp)] + [sorted(grp)]
-            new_units, _ = acyclic_units(stack, new_units, after)
-            if not any(grp <= set(u) and len(u) <= MERGE_MAX_PIECES for u in new_units):
-                continue
-            grp = next(set(u) for u in new_units if grp <= set(u))
-            cand, nb = _plan_units(stack, hard, bands, new_units, after, roles, ch)
-            ce = next(c for c in cand if set(c.members) == grp)
-            if ce.style != "surgir" and sum(c.style == "surgir" for c in cand) < len(pops):
-                units, ents, n_builtin = new_units, cand, nb
-                ce.reason += " (em bloco com quem a cobre)"
-                merged += 1
-                improved = True
+            # Grupos candidatos: todas as que a cobrem e, se o bloco fica grande demais, só parte delas (as
+            # menores primeiro, uma a uma e acumulando). O sofá coberto pela mesa lateral e pela poltrona da frente
+            # entra com a mesa lateral e sobe do chão; a poltrona (grande) continua com a entrada dela.
+            occ_units = sorted({tuple(u) for u in units if set(u) & occ},
+                               key=lambda u: float(_unit_union(hard, list(u)).sum()))
+            tries = [set(i for u in occ_units for i in u)]
+            tries += [set(u) for u in occ_units]
+            acc: set = set()
+            for u in occ_units[:-1]:
+                acc |= set(u)
+                tries.append(set(acc))
+            seen_g = []
+            for extra in tries:
+                grp = set(mem) | extra
+                if grp in seen_g:
+                    continue
+                seen_g.append(grp)
+                if len(grp) > MERGE_MAX_PIECES or \
+                        float(_unit_union(hard, sorted(grp)).sum()) > MERGE_MAX_AREA * H * W:
+                    continue
+                new_units = [u for u in units if not (set(u) & grp)] + [sorted(grp)]
+                new_units, _ = acyclic_units(stack, new_units, after)
+                if not any(grp <= set(u) and len(u) <= MERGE_MAX_PIECES for u in new_units):
+                    continue
+                g2 = next(set(u) for u in new_units if grp <= set(u))
+                cand, nb = _plan_units(stack, hard, bands, new_units, after, roles, ch)
+                ce = next(c for c in cand if set(c.members) == g2)
+                if ce.style != "surgir" and sum(c.style == "surgir" for c in cand) < len(pops):
+                    units, ents, n_builtin = new_units, cand, nb
+                    ce.reason += " (em bloco com quem a cobre)"
+                    merged += 1
+                    improved = True
+                    break
+            if improved:
                 break
         if not improved:
             break
@@ -847,7 +913,41 @@ def _plan_variant(stack, hard, bands, units, after, roles, ch):
 
 
 def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Choreography:
-    """Planeja a coreografia da pilha (ordem, estilo, amplitude, tempos) e mede o "pixel oculto visível"."""
+    """Planeja a coreografia da pilha (ordem, estilo, amplitude, tempos) e mede o "pixel oculto visível".
+
+    Depois do plano, a verificação independente (:func:`verify_independent`, que não usa o grafo) confere todos os
+    quadros. Se ela acha um corte à vista (a peça entrou antes de quem a cobria na foto, porque o grafo não tinha
+    a relação ou a tirou num ciclo), a relação que falta é posta no grafo e o plano é refeito (até
+    :data:`INDEPENDENT_REPAIRS` vezes; um ciclo vira bloco rígido). O que ainda sobrar fica em ``ch.warnings`` e a
+    verificação do vídeo (§3.5) recusa o MP4."""
+    ch = _plan_once(stack, fps, target)
+    if not ch.entrances:
+        return ch
+    ind = verify_independent(stack, ch)
+    best, best_px = ch, ind["oculto_independente_px"]
+    front = stack.front.copy()
+    fixes = 0
+    for _ in range(INDEPENDENT_REPAIRS):
+        if not best_px:
+            break
+        changed = False
+        for d in ind["oculto_independente_pares"]:
+            i, j = d["_i"], d["_j"]
+            if not front[j, i]:
+                front[j, i], front[i, j] = True, False
+                changed = True
+        if not changed:
+            break
+        fixes += 1
+        cand = _plan_once(dataclasses.replace(stack, front=front.copy()), fps, target)
+        ind = verify_independent(stack, cand)
+        if ind["oculto_independente_px"] < best_px:
+            best, best_px = cand, ind["oculto_independente_px"]
+    best.stats["reparos_independentes"] = fixes
+    return best
+
+
+def _plan_once(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Choreography:
     H, W = stack.photo_shape
     ch = Choreography(fps, (H, W), [], HOLD_START, 0, 0)
     ch._soft = max(4.0, SOFT_FRAC * math.hypot(H, W))
@@ -1001,9 +1101,96 @@ def verify(stack: L.LayerStack, ch: Choreography, step: int = 1) -> dict:
            "borda_vindo_de_cima": int(from_above), "duracao_s": round(ch.duration, 3),
            "vazio_inicial_s": round(ch.entrances[0].start, 3) if ch.entrances else round(ch.duration, 3),
            "hold_final_s": round((ch.n_frames - ch.n_anim - DISSOLVE_FRAMES) / ch.fps, 3)}
+    ind = verify_independent(stack, ch, step)
+    res["oculto_independente_px"] = ind["oculto_independente_px"]
+    res["quadros_com_oculto_independente"] = ind["quadros_com_oculto_independente"]
+    res["oculto_independente_pares"] = [{k: v for k, v in d.items() if not k.startswith("_")}
+                                        for d in ind["oculto_independente_pares"][:10]]
     ch.stats.update(res)
     if hidden_total:
         ch.warnings.append(f"{hidden_total} pixels de parte oculta ficaram visíveis em {hidden_frames} quadros")
+    if ind["oculto_independente_px"]:
+        ch.warnings.append(f"verificação independente: {ind['oculto_independente_px']} pixels de corte à vista em "
+                           f"{ind['quadros_com_oculto_independente']} quadros (peça entrando antes de quem a cobre)")
+    return res
+
+
+def _at_rest(q: L.Placement) -> bool:
+    return q.dx == 0 and q.dy == 0 and q.scale >= 1.0 - 1e-6 and q.alpha_mul is None
+
+
+def independent_front(stack: L.LayerStack, hard: Sequence[np.ndarray] | None = None) -> np.ndarray:
+    """Quem cobre quem para a verificação independente: a evidência clara gravada nas camadas
+    (``stack.evidence``: tapete/quadro atrás, profundidade com folga de 5%, dono do contorno pela envoltória
+    convexa), nunca o grafo ``stack.front`` que a coreografia usou. Pilha sem evidência (montada à mão): as
+    mesmas pistas recalculadas das máscaras, sem profundidade."""
+    ev = getattr(stack, "evidence", None)
+    if ev is not None and ev.shape == (len(stack.layers),) * 2:
+        return np.asarray(ev, bool)
+    hard = _abs_hard(stack) if hard is None else hard
+    labels = [l.label for l in stack.layers]
+    return L.confident_front(L.occlusion_cues(labels, hard, None), len(stack.layers))
+
+
+def verify_independent(stack: L.LayerStack, ch: Choreography, step: int = 1) -> dict:
+    """Verificação INDEPENDENTE do "pixel oculto visível" (não usa o grafo de oclusão da coreografia).
+
+    O corte de uma camada é a borda em que falta alpha porque outra peça a cobria na foto (evidência clara, ver
+    :func:`independent_front`) ou porque a foto acaba ali. Em todo quadro, cada ponto de corte de uma peça na tela
+    tem de estar coberto por uma peça JÁ POUSADA (em repouso) ou do mesmo bloco rígido; senão é pixel oculto
+    visível. Assim um grafo sem a relação mesa × cadeira (a mesa entrava antes, com o buraco das cadeiras) é
+    pego aqui mesmo com ``verify`` dizendo 0. Devolve as contagens e os pares (peça, quem a cobria)."""
+    n = len(stack.layers)
+    res = {"oculto_independente_px": 0, "quadros_com_oculto_independente": 0, "oculto_independente_pares": []}
+    if n == 0 or not ch.entrances:
+        return res
+    hard = ch._hard if ch._hard is not None else _abs_hard(stack)
+    ev = independent_front(stack, hard)
+    st_ev = dataclasses.replace(stack, front=ev)
+    bands = cut_bands(st_ev, hard)
+    H, W = stack.photo_shape
+    owner = {i: k for k, e in enumerate(ch.entrances) for i in e.members}
+    total, frames = 0, 0
+    pairs: dict = {}
+    cache: dict = {}
+    for f in range(0, ch.n_anim, step):
+        pl = placements_at(ch, stack, f)
+        rest = {j for j, q in pl.items() if _at_rest(q)}
+        fh = 0
+        for i in pl:
+            if not len(bands[i]):
+                continue
+            ei = ch.entrances[owner[i]]
+            cov = {j: pl[j] for j in pl if j == i or j in rest or owner.get(j) == owner[i]}
+            key = (i,) + tuple((j, cov[j].dx, cov[j].dy, round(cov[j].scale, 5),
+                                None if cov[j].alpha_mul is None else float(np.asarray(cov[j].alpha_mul).sum()))
+                               for j in sorted(cov))
+            if key not in cache:
+                clip = (ei.clip, ei.profile) if ei.clip else None
+                k = uncovered(st_ev, hard, bands, i, cov, clip)
+                who = set()
+                if k:
+                    # quem cobria o corte na foto (para o reparo): donos dos pontos de corte em repouso
+                    p = bands[i]
+                    xi, yi = np.rint(p[:, 0]).astype(int), np.rint(p[:, 1]).astype(int)
+                    ok = (xi >= 0) & (yi >= 0) & (xi < W) & (yi < H)
+                    for j in range(n):
+                        if ev[j, i] and hard[j][yi[ok], xi[ok]].any():
+                            who.add(j)
+                cache[key] = (k, who)
+            k, who = cache[key]
+            if k:
+                fh += k
+                for j in who:
+                    pairs[(i, j)] = pairs.get((i, j), 0) + k
+        total += fh
+        frames += fh > 0
+    res["oculto_independente_px"] = int(total)
+    res["quadros_com_oculto_independente"] = int(frames)
+    res["oculto_independente_pares"] = [
+        {"peca": f"{stack.layers[i].label}#{stack.layers[i].id}", "coberta_por":
+         f"{stack.layers[j].label}#{stack.layers[j].id}", "px": int(v), "_i": int(i), "_j": int(j)}
+        for (i, j), v in sorted(pairs.items(), key=lambda kv: -kv[1])]
     return res
 
 

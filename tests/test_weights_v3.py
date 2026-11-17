@@ -132,7 +132,33 @@ def test_v3_weights_are_pinned_and_allowed():
         assert all(len(s) == 64 and int(s, 16) >= 0 for s in shas)
     assert len(weights.SAM2_WEIGHT.revision) == 40                  # revisão fixada, não "main"
     assert "*.pt" not in weights.SAM2_WEIGHT.allow_patterns       # sem o checkpoint duplicado (+320 MB)
-    assert not weights.sdxl_installed()                            # SDXL ainda não é baixado
+
+
+
+def test_sdxl_weights_are_pinned_fp16_and_licensed():
+    """PT-V3-4: os pesos do SDXL têm revisão fixada, SHA-256 dos arquivos grandes, só variantes fp16 (sem o
+    checkpoint único de 6,9 GB nem o fp32) e licença comercial (OpenRAIL++ ou MIT)."""
+    allowed = {"SG161222/RealVisXL_V5.0_Lightning", "madebyollin/sdxl-vae-fp16-fix",
+               "diffusers/controlnet-depth-sdxl-1.0-small"}
+    assert set(weights.sdxl_repos()) == allowed
+    for w in weights.SDXL_WEIGHTS:
+        assert w.licenca in ("OpenRAIL++", "MIT") and len(w.revision) == 40
+        assert w.sha256 and all(len(s) == 64 and int(s, 16) >= 0 for s in w.sha256.values())
+        assert set(w.sha256) <= set(w.allow_patterns)
+        for pat in w.allow_patterns:
+            assert "*" not in pat or pat.endswith(".json")
+            if pat.endswith(".safetensors"):
+                assert "fp16" in pat or w.repo_id == "madebyollin/sdxl-vae-fp16-fix", pat
+    assert weights.SDXL_TEXT_WEIGHT not in weights.SDXL_REQUIRED      # só para prompts sem embedding em cache
+    assert not weights.sdxl_installed(required=())
+
+
+def test_sdxl_installed_is_false_when_weights_missing(monkeypatch):
+    def missing(w, offline=False):
+        raise weights.WeightsError("ausente")
+
+    monkeypatch.setattr(weights, "ensure_weight", missing)
+    assert not weights.sdxl_installed()
 
 
 def test_prefetch_includes_v3_weights(monkeypatch):
@@ -161,10 +187,11 @@ def _rep(vram_gb: float | None, free_gb: float | None = None, ram_gb: float = 32
 
 @pytest.mark.parametrize("vram, free, ram, cabe, offload", [
     (4, None, 32, False, False),
-    (6, None, 32, True, True),
-    (6, None, 8, False, False),      # offload sem RAM suficiente
+    (6, None, 32, False, False),     # o UNet fp16 inteiro (4,9 GiB) + ControlNet + ativações não cabe em 6 GB
     (8, None, 32, True, False),
-    (8, 6.0, 32, True, True),        # 8 GB com o desktop ocupando 2 GB: offload
+    (8, 6.8, 32, True, True),        # 8 GB com o desktop ocupando ~1,2 GB: offload
+    (8, 6.8, 8, False, False),       # offload sem RAM suficiente
+    (8, 6.0, 32, False, False),      # abaixo de SDXL_VRAM_MIN_MB (6500): o UNet não sobe inteiro
     (8, 4.5, 32, False, False),
     (12, None, 16, True, False),
 ])
@@ -173,21 +200,21 @@ def test_sdxl_capacity_by_vram(vram, free, ram, cabe, offload):
     assert (ok, off) == (cabe, offload), motivo
 
 
-@pytest.mark.parametrize("vram, esperado", [(4, PERFIL_B_SEM_SDXL), (6, PERFIL_B_COM_SDXL),
+@pytest.mark.parametrize("vram, esperado", [(4, PERFIL_B_SEM_SDXL), (6, PERFIL_B_SEM_SDXL),
                                             (8, PERFIL_B_COM_SDXL), (12, PERFIL_B_COM_SDXL)])
 def test_profiles_4_6_8_12_gb(vram, esperado):
     rep = _rep(vram)
-    # padrão de hoje: SDXL não instalado → sempre "B sem SDXL", na GPU
-    p = choose_profile_v3(rep)
+    # SDXL não instalado → sempre "B sem SDXL", na GPU
+    p = choose_profile_v3(rep, sdxl_instalado=False)
     assert p.nome == PERFIL_B_SEM_SDXL and p.dispositivo == "cuda" and not p.sdxl and p.modo == "B"
     # com o SDXL instalado, a VRAM decide
     p = choose_profile_v3(rep, sdxl_instalado=True)
     assert p.nome == esperado and p.sdxl == (esperado == PERFIL_B_COM_SDXL)
-    assert p.sdxl_offload == (vram == 6)
+    assert not p.sdxl_offload            # 8 e 12 GB livres: SDXL inteiro na GPU; 6 GB: sem SDXL
     # o usuário pode desligar o SDXL
     assert choose_profile_v3(rep, sdxl_instalado=True, sdxl_ligado=False).nome == PERFIL_B_SEM_SDXL
     # foto vazia: perfil A; motor v2 sem SDXL
-    a = choose_profile_v3(rep, modo="A")
+    a = choose_profile_v3(rep, modo="A", sdxl_instalado=False)
     assert a.nome == PERFIL_A and a.motor_a == "v2" and not a.sdxl
     a = choose_profile_v3(rep, modo="A", sdxl_instalado=True)
     assert a.motor_a == ("sdxl" if esperado == PERFIL_B_COM_SDXL else "v2")

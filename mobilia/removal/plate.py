@@ -29,8 +29,9 @@ A placa é a foto sem os móveis. Ela é o 1º quadro do vídeo e, fora da másc
 
 A **nota de qualidade** (:class:`PlateQuality`) mede, por plano: ΔE de costura (faixa interna x anel) e ΔE do
 preenchimento todo, razão de grão/textura, distância e continuidade da linha parede/piso projetada, e (opcional)
-o OneFormer rodado de novo na placa (nenhum móvel com área > 0,5% pode reaparecer dentro da máscara). Ela
-alimenta o portão de qualidade (:func:`build_plate_gated`): placa ruim refaz mantendo os planejados e, se ainda
+o OneFormer rodado de novo na placa (nenhum móvel com área > 0,5% pode reaparecer dentro da máscara, nem porta ou
+janela nova), mais névoa, fantasma e placas soltas dentro do preenchimento (:mod:`plate_score`). A nota é contínua
+(100 menos os pontos perdidos por defeito; reprovada = 0,6 × nota sem teto). Ela alimenta o portão de qualidade (:func:`build_plate_gated`): placa ruim refaz mantendo os planejados e, se ainda
 ruim, avisa; nunca entrega uma placa ruim em silêncio.
 
 O inpainter é injetável (``inpaint(rgb8, mask) -> rgb8``): no produto é o big-lama (:class:`Lama`, CUDA se houver,
@@ -63,6 +64,10 @@ EFFECT_RING = 0.012
 EFFECT_RING_BUILTIN = 0.025
 BAND_DOWN = 0.45             # faixa espelhada abaixo dos pés (fração da altura da peça)
 BAND_DOWN_BUILTIN = 0.6
+# peças penduradas na parede: a sombra da moldura cai NA PAREDE (embaixo e de lado). Antes a faixa só valia sobre o
+# piso, e o retângulo claro/escuro do quadro ficava fora da máscara (fantasma do quadro, avaliação SDXL rodada 1)
+WALL_HUNG = ("painting", "poster", "picture", "mirror", "clock", "photo", "frame", "sconce", "tv", "television")
+BAND_DOWN_WALL_HUNG = 0.25
 EFFECT_REL = 0.07            # diferença relativa (borrada) foto x placa provisória
 EFFECT_ABS = 12.0            # ou diferença absoluta em níveis
 
@@ -85,6 +90,10 @@ GATE_WIDE_DILATE = 2.5       # máscara ampla do portão: núcleo dilatado 2,5×
 KEEP_BUILTINS_TOTAL = 0.35
 KEEP_BUILTINS_AREA = 0.10
 KEEP_BUILTINS_MIN = 0.01     # planejados abaixo disto não mudam a decisão
+# Decisão do produto (§3.6, revista na rodada 1 de correções): a sala crua (planejados fora) é SEMPRE a 1ª tentativa;
+# os planejados só ficam se o portão (agora com falhas duras: estrutura inventada, material, contorno) reprovar a
+# crua. True volta ao comportamento antigo (mantém por padrão quando ``keep_builtins_reason`` acusa risco).
+KEEP_BUILTINS_FIRST = False
 
 LIMITS = {
     "costura_de_max": 6.0,           # ΔE76 entre faixa interna e anel, por plano (aceite PT-V3-3: <= 3)
@@ -104,7 +113,28 @@ LIMITS = {
     "sem_plano_area_min": 0.30,      # área gerada (fração da foto) a partir da qual a regra vale
     "sem_plano_frac_max": 0.50,      # fração da área gerada que fica "sem plano" (vãos, protegidos, plano perdido)
     "redetectado_area_min": 0.005,   # móvel reencontrado pelo OneFormer na placa (> 0,5% da foto)
+    # medidas de realismo (``plate_score``, PT-V3-4): severidades 0..1 (placas soltas: fração da máscara)
+    "nevoa_max": 0.6,                # névoa/borrão dentro do preenchimento
+    "fantasma_max": 0.6,             # estrutura da peça removida que sobrou
+    "placas_soltas_max": 0.35,       # manchas cuja cor destoa da cor esperada do plano
+    # falhas "duras" (rodada 1 de correções do SDXL): não se compensam com costura/cor boas
+    "estrutura_nova_max": 0.6,       # bordas fortes inventadas (rejunte, tijolo, cano, placa solta) x anel
+    "material_max": 0.6,             # orientação das bordas do preenchimento x material visível do mesmo plano
+    "contorno_max": 0.6,             # contorno da peça removida marcado na borda da máscara
+    "nota_min": 60.0,                # nota contínua mínima para aprovar
 }
+
+# Pesos da nota contínua (pontos tirados de 100 pela severidade 0..1 de cada defeito). Os defeitos que o crítico vê
+# primeiro (névoa, fantasma, placas soltas, objeto novo) pesam mais que costura e grão.
+SCORE_WEIGHTS = {
+    "costura": 10.0, "cor": 10.0, "grao": 8.0, "linha": 8.0, "sem_plano": 10.0, "mancha_sem_plano": 8.0,
+    "plano_sem_referencia": 10.0, "area": 8.0, "nevoa": 25.0, "fantasma": 25.0, "placas_soltas": 20.0,
+    "movel_reencontrado": 30.0, "abertura_nova": 30.0,
+    "estrutura_nova": 25.0, "material": 20.0, "contorno": 20.0,
+}
+# falhas duras: a pior delas (severidade 0..1) vai para ``PlateQuality.hard`` e decide a escolha de semente/tentativa
+# antes da nota média (uma placa lisa com rejunte inventado não ganha de uma placa com costura pior)
+HARD_KEYS = ("nevoa", "fantasma", "estrutura_nova", "material", "contorno")
 
 
 def disk(r: int) -> np.ndarray:
@@ -542,6 +572,7 @@ def effect_candidates(pieces: Sequence, groups: np.ndarray, core: np.ndarray) ->
     cand = np.zeros((H, W), bool)
     for p in pieces:
         builtin = getattr(p, "kind", "") == "planejado"
+        hung = str(getattr(p, "label", "")).split(",")[0].strip().lower() in WALL_HUNG
         m = p.mask
         if not m.any():
             continue
@@ -551,13 +582,13 @@ def effect_candidates(pieces: Sequence, groups: np.ndarray, core: np.ndarray) ->
         top = np.full(W, H)
         np.maximum.at(bottom, xs, ys)
         np.minimum.at(top, xs, ys)
-        frac = BAND_DOWN_BUILTIN if builtin else BAND_DOWN
+        frac = BAND_DOWN_BUILTIN if builtin else (BAND_DOWN_WALL_HUNG if hung else BAND_DOWN)
         band = np.zeros((H, W), bool)
         for c in np.nonzero(bottom >= 0)[0]:
             hgt = bottom[c] - top[c]
             band[bottom[c] + 1:min(H, bottom[c] + 1 + int(frac * hgt)), c] = True
         band = cv2.morphologyEx(band.astype(np.uint8), cv2.MORPH_CLOSE, disk(6)) > 0
-        cand |= band & (wallish if builtin else floorish)
+        cand |= band & (wallish if (builtin or hung) else floorish)
     prot = np.isin(groups, G_PROTECTED)
     for p in pieces:                   # painel fixo recortado da peça (cabeceira-painel): fica na foto
         panel = getattr(p, "wall_panel", None)
@@ -718,14 +749,23 @@ class PlateQuality:
     area_generated: float
     redetected: list = field(default_factory=list)   # [{rotulo, area_pct}] reencontrados pelo OneFormer
     reasons: list = field(default_factory=list)       # motivos de reprovação (português)
-    raw_score: float | None = None                    # nota antes do teto de 59 (compara duas placas reprovadas)
+    raw_score: float | None = None                    # nota antes da escala das reprovadas (ordena tentativas)
     unplanned: float = 0.0                            # fração da área gerada sem plano medido
+    components: dict = field(default_factory=dict)    # pontos perdidos por defeito (nota contínua)
+    realism: dict = field(default_factory=dict)       # névoa, fantasma e placas soltas (``plate_score``)
+    openings: list = field(default_factory=list)      # portas/janelas novas que o OneFormer achou na placa
+    hard: float = 0.0                                 # pior severidade entre as falhas duras (``HARD_KEYS``)
+    hard_detail: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {"nota": round(self.score, 1), "aprovada": self.ok, "por_plano": self.per_plane,
+        return {"nota": round(self.score, 1), "aprovada": self.ok,
+                "nota_sem_teto": None if self.raw_score is None else round(self.raw_score, 1),
+                "pontos_perdidos": self.components, "realismo": self.realism, "por_plano": self.per_plane,
                 "linha_parede_piso": self.line, "area_gerada_pct": round(100 * self.area_generated, 2),
                 "sem_plano_pct": round(100 * self.unplanned, 1),
-                "moveis_reencontrados": self.redetected, "motivos": list(self.reasons)}
+                "moveis_reencontrados": self.redetected, "aberturas_novas": self.openings,
+                "falha_dura": round(self.hard, 3), "falhas_duras": self.hard_detail,
+                "motivos": list(self.reasons)}
 
 
 @dataclass
@@ -748,10 +788,13 @@ class PlateResult:
                           "sombra_px": int(self.shadow.sum()), "luz_px": int(self.light.sum()),
                           "planejados_mantidos": self.kept_builtins,
                           "planejados_por_padrao": self.info.get("planejados_por_padrao"),
+                          "risco_planejados": self.info.get("risco_planejados"),
+                          "cobertura": self.info.get("cobertura"),
                           "planos": self.info.get("planos", {}),
                           "tempos_s": {k: round(v, 2) for k, v in self.info.get("tempos", {}).items()},
                           "qualidade": None if self.quality is None else self.quality.to_dict(),
                           "estrategia": self.info.get("estrategia_portao", self.info.get("estrategia", "planos")),
+                          "refino_sdxl": self.info.get("refino_sdxl"),
                           "tentativas": list(self.info.get("tentativas", [])),
                           "avisos": list(self.warnings)}}
 
@@ -915,16 +958,40 @@ def redetected_furniture(seg, pan, mask: np.ndarray, min_area: float = LIMITS["r
     return found
 
 
+def rug_mask(seg, shape: tuple[int, int]) -> np.ndarray | None:
+    """Pixels de tapete na segmentação da foto (o grupo "piso" inclui o tapete). None sem os rótulos ADE20K."""
+    lbl, names = getattr(seg, "labels", None), getattr(seg, "id2label", None) or {}
+    ids = [int(k) for k, v in names.items() if str(v) == "rug"]
+    if lbl is None or not ids:
+        return None
+    H, W = shape
+    if lbl.shape != (H, W):
+        lbl = cv2.resize(lbl.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
+    return np.isin(lbl, ids)
+
+
 def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.ndarray, groups: np.ndarray,
            box: RoomBox | None, redetect: Callable | None = None, fill_info: dict | None = None,
-           min_area: float = 0.002) -> PlateQuality:
+           min_area: float = 0.002, core: np.ndarray | None = None, rug: np.ndarray | None = None) -> PlateQuality:
     """Nota automática da placa (0..100) e aprovação pelo :data:`LIMITS`. Plano preenchido que não pôde ser
-    medido (nenhum pixel visível do próprio material em volta) reprova: o que não se mede não é aprovado."""
+    medido (nenhum pixel visível do próprio material em volta) reprova: o que não se mede não é aprovado.
+
+    **Nota contínua** (PT-V3-4): 100 menos os pontos perdidos por defeito (:data:`SCORE_WEIGHTS` × severidade
+    0..1): costura, cor, grão, linha parede/piso, área sem plano, área gerada e, dentro do preenchimento, **névoa,
+    fantasma e placas soltas** (:mod:`plate_score`), mais móvel ou porta/janela que o OneFormer reencontra na
+    placa. Reprovada (algum motivo, ou nota sem teto abaixo de ``nota_min``): a nota vira 0,6 × a nota sem teto,
+    continua e sempre abaixo de 60, para ordenar tentativas e sementes e mostrar quão perto ficou."""
+    from . import plate_score as ps
+
     per = plane_stats(photo, plate, mask, labels, groups, min_area=min_area)
     line = line_stats(plate, photo, mask, box, labels=labels) if box is not None else {}
     area = float(mask.mean())
     reasons = []
-    terms = []
+    pen: dict[str, float] = {}
+
+    def lose(key: str, sev: float, share: float = 1.0) -> None:
+        pen[key] = pen.get(key, 0.0) + SCORE_WEIGHTS[key] * float(np.clip(sev, 0.0, 1.0)) * share
+
     H, W = mask.shape
     n_mask = int(mask.sum())
     unplanned = float((mask & np.isin(labels, (OTHER, PROTECTED))).sum()) / n_mask if n_mask else 0.0
@@ -934,7 +1001,7 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         if unplanned >= LIMITS["sem_plano_frac_max"]:
             reasons.append(f"geometria da sala não encontrada: {100 * unplanned:.0f}% do preenchimento sem plano "
                            f"medido ({100 * area:.0f}% da foto)")
-        terms.append(np.clip(1 - (unplanned - 0.2) / 0.3, 0, 1))
+        lose("sem_plano", (unplanned - 0.2) / 0.3)
     for L in np.unique(labels[mask]):
         if L in (OTHER, PROTECTED):
             continue
@@ -943,45 +1010,92 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         if name in per or n < min_area * H * W or (fill_info or {}).get(name, {}).get("metodo") == "liso":
             continue
         reasons.append(f"{name} preenchido sem referência visível do material ({100 * n / (H * W):.1f}% da foto)")
-        terms.append(0.0)
+        lose("plano_sem_referencia", 1.0)
     # o limite da cor do preenchimento só relaxa se o que não tem plano não tem mancha forte (resto de móvel que a
     # reconferência não pegou): senão uma tentativa com fantasma passaria antes da tentativa limpa
     relax_fill = per.get("sem_plano", {}).get("costura_p90_de", 0.0) <= LIMITS["costura_sem_plano_max"]
+    planes = {k: v for k, v in per.items() if k != "sem_plano"}
+    tot = float(sum(v["area_px"] for v in planes.values())) or 1.0
     for name, s in per.items():
         if name == "sem_plano":
             if s["costura_de"] > LIMITS["costura_sem_plano_max"]:
                 reasons.append(f"mancha no preenchimento sem plano (ΔE {s['costura_de']:.1f})")
-            terms.append(np.clip(1 - (s["costura_de"] - 4.0) / 12.0, 0, 1))
+            lose("mancha_sem_plano", (s["costura_de"] - 4.0) / 12.0)
             continue
         relax = relax_fill and s.get("razao_material", 0.0) <= LIMITS["relaxa_area_max"]
-        if s["preenchimento_de"] > fill_de_limit(s["costura_de"], s["grao_log2"], relax):
+        lim = fill_de_limit(s["costura_de"], s["grao_log2"], relax)
+        if s["preenchimento_de"] > lim:
             reasons.append(f"cor do preenchimento destoa no(a) {name} (ΔE {s['preenchimento_de']:.1f})")
         if s["costura_de"] > LIMITS["costura_de_max"]:
             reasons.append(f"costura visível no(a) {name} (ΔE {s['costura_de']:.1f})")
         if abs(s["grao_log2"]) > LIMITS["grao_log2_max"]:
             reasons.append(f"textura diferente no(a) {name} (grão {2 ** s['grao_log2']:.2f}×)")
-        terms.append(np.clip(1 - (s["costura_de"] - 2.0) / 8.0, 0, 1))
-        terms.append(np.clip(1 - (abs(s["grao_log2"]) - 0.3) / 1.2, 0, 1))
+        share = s["area_px"] / tot                    # cada plano pesa pela área que ocupa no preenchimento
+        lose("costura", (s["costura_de"] - 2.0) / 8.0, share)
+        lose("cor", (s["preenchimento_de"] - 0.5 * lim) / lim, share)
+        lose("grao", (abs(s["grao_log2"]) - 0.3) / 1.2, share)
     if "distancia_px" in line:
         if line["distancia_px"] > LIMITS["linha_px_max"]:
             reasons.append(f"linha parede/piso fora do lugar ({line['distancia_px']:.1f} px)")
         if line["continuidade"] < LIMITS["linha_continuidade_min"]:
             reasons.append(f"rodapé/linha parede-piso interrompido ({100 * line['continuidade']:.0f}% contínuo)")
-        terms.append(np.clip(1 - (line["distancia_px"] - 2.0) / 6.0, 0, 1))
-        terms.append(np.clip(line["continuidade"] / 0.8, 0, 1))
+        lose("linha", 0.5 * (line["distancia_px"] - 2.0) / 6.0 + 0.5 * (1 - line["continuidade"] / 0.8))
     if area > LIMITS["area_gerada_max"]:
         reasons.append(f"área reconstruída muito grande ({100 * area:.0f}% da foto)")
-    terms.append(np.clip(1 - (area - 0.5) / 0.4, 0, 1))
-    red = []
+    lose("area", (area - 0.5) / 0.4)
+    # dentro do preenchimento: névoa, fantasma e placas soltas
+    real = ps.realism(photo, plate, mask, labels, groups, core, rug)
+    tex = real["textura"]
+    # névoa: a pior entre o contraste/véu (por plano) e a energia de alta frequência (vale também sem plano)
+    # e as manchas de véu/fumaça (``haze_metric``), que valem também onde não há plano medido
+    fog = max(real["nevoa"]["severidade"], tex["nevoa_af"], real.get("veu", {}).get("severidade", 0.0))
+    ghost = real["fantasma"]["severidade"]
+    slab = real["placas_soltas"]["fracao"]
+    # material: orientação das retas longas (``texture_metric``) ou cor/energia/orientação do piso preenchido contra
+    # o piso visível sem tapete (``floor_material_metric``)
+    struct, cont = tex["estrutura_nova"], real["contorno"]["severidade"]
+    mat = max(tex["material"], real.get("material_piso", {}).get("severidade", 0.0))
+    lose("nevoa", fog)
+    lose("fantasma", ghost)
+    lose("placas_soltas", slab / 0.3)
+    lose("estrutura_nova", struct)
+    lose("material", mat)
+    lose("contorno", cont)
+    if fog > LIMITS["nevoa_max"]:
+        reasons.append(f"névoa/borrão no preenchimento (severidade {fog:.2f})")
+    if ghost > LIMITS["fantasma_max"]:
+        reasons.append(f"fantasma do móvel removido na sala vazia (severidade {ghost:.2f})")
+    if slab > LIMITS["placas_soltas_max"]:
+        reasons.append(f"manchas/placas soltas no preenchimento ({100 * slab:.0f}% da área gerada)")
+    if struct > LIMITS["estrutura_nova_max"]:
+        reasons.append(f"estrutura inventada no preenchimento (bordas {struct:.2f}: rejunte, bloco, cano ou placa)")
+    if mat > LIMITS["material_max"]:
+        reasons.append(f"material do preenchimento diferente do visível (severidade {mat:.2f})")
+    if cont > LIMITS["contorno_max"]:
+        reasons.append(f"contorno da peça removida visível na sala vazia (severidade {cont:.2f})")
+    hard_detail = {"nevoa": round(fog, 3), "fantasma": round(ghost, 3), "estrutura_nova": round(struct, 3),
+                   "material": round(mat, 3), "contorno": round(cont, 3)}
+    red, opn = [], []
     if redetect is not None:
         seg2, pan2 = redetect(plate)
         red = redetected_furniture(seg2, pan2, mask)
+        opn = ps.new_openings(seg2, mask, groups, labels)
         if red:
             reasons.append("móvel reaparece na sala vazia: " + ", ".join(r["rotulo"] for r in red))
-        terms.append(0.0 if red else 1.0)
-    raw = 100.0 * float(np.mean(terms)) if terms else 50.0
-    score = min(raw, 59.0) if reasons else raw
-    return PlateQuality(score, not reasons, per, line, area, red, reasons, raw, unplanned)
+            lose("movel_reencontrado", 1.0)
+        if opn:
+            reasons.append("porta/janela nova na sala vazia: " + ", ".join(o["rotulo"] for o in opn))
+            lose("abertura_nova", 1.0)
+    raw = float(np.clip(100.0 - sum(pen.values()), 0.0, 100.0))
+    if not reasons and raw < LIMITS["nota_min"]:
+        top = sorted(pen.items(), key=lambda kv: -kv[1])[:3]
+        reasons.append(f"nota baixa ({raw:.0f}/100; mais pontos perdidos em: "
+                       + ", ".join(f"{k} {v:.0f}" for k, v in top) + ")")
+    score = 0.6 * raw if reasons else raw
+    comps = {k: round(v, 1) for k, v in sorted(pen.items(), key=lambda kv: -kv[1]) if v >= 0.05}
+    hard = max(hard_detail.values()) if hard_detail else 0.0
+    return PlateQuality(score, not reasons, per, line, area, red, reasons, raw, unplanned, comps, real, opn, hard,
+                        hard_detail)
 
 
 # ============================================================================================================
@@ -1066,8 +1180,10 @@ def _inpaint_local(inpaint: InpaintFn, img: np.ndarray, hole: np.ndarray, margin
 
 def fill_planes(inpaint: InpaintFn, photo: np.ndarray, mask: np.ndarray, groups: np.ndarray, box: RoomBox | None,
                 depth: np.ndarray | None = None, rng: np.random.Generator | None = None,
-                max_side: int = MAX_SIDE) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Preenche ``mask`` por plano. Retorna (placa, rótulos, informações por plano)."""
+                max_side: int = MAX_SIDE, rug: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Preenche ``mask`` por plano. Retorna (placa, rótulos, informações por plano). ``rug``: tapete que ficou
+    na foto; nunca é contexto do piso (o grupo "piso" da segmentação inclui o tapete, e o LaMa copiava a estampa
+    ou a cor dele para o piso de baixo)."""
     rng = rng or np.random.default_rng(0)
     H, W = mask.shape
     diag = float(np.hypot(H, W))
@@ -1076,7 +1192,11 @@ def fill_planes(inpaint: InpaintFn, photo: np.ndarray, mask: np.ndarray, groups:
         out = inpaint(photo, mask)
         out[~mask] = photo[~mask]
         info["imagem"] = {"metodo": "lama-imagem", "area_px": int(mask.sum())}
-        return out, np.where(mask, OTHER, OTHER).astype(np.int32), info
+        labels = np.full((H, W), OTHER, np.int32)
+        # janela/porta/cortina atrás do móvel continua "protegida" mesmo sem modelo da sala (o refino SDXL não a
+        # repinta: antes todo pixel ficava "outro" e o SDXL trocava a janela escondida por parede)
+        labels[_protected_labels(mask, labels, groups, None, diag)] = PROTECTED
+        return out, labels, info
     labels = box.label.copy()
     if depth is not None:                             # visto por uma porta: bem mais longe que a caixa
         dep = cv2.resize(depth.astype(np.float32), (W, H), interpolation=cv2.INTER_NEAREST) \
@@ -1128,6 +1248,8 @@ def fill_planes(inpaint: InpaintFn, photo: np.ndarray, mask: np.ndarray, groups:
             continue
         Hm, size = r
         same = (labels == key) & ~mask & (groups == grp)
+        if key == FLOOR and rug is not None:
+            same &= ~_dil(rug, 2)
         back, cover, pinfo = _fill_rect(inpaint, out, photo, mask, same, Hm, size, rng, ctx_restrict=True)
         done = sel & cover
         out[done] = back[done]
@@ -1258,6 +1380,7 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
     else:
         warnings.append("sem modelo da sala: sala vazia só no espaço da imagem (linhas podem entortar)")
     core = core_mask(pieces, (H, W), core_dilate)
+    rug = rug_mask(seg, (H, W))
     cand = effect_candidates(pieces, groups, core)
     t["mascaras"] = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -1271,9 +1394,11 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
         plate = np.array(inpaint(photo, mask), np.uint8, copy=True)
         plate[~mask] = photo[~mask]
         labels = box.label.copy() if box is not None else np.full((H, W), OTHER, np.int32)
+        # mesmos protegidos da estratégia por plano: a janela/porta escondida pelo móvel não vira parede no refino
+        labels[_protected_labels(mask, labels, groups, box, float(np.hypot(H, W)))] = PROTECTED
         pinfo = {"imagem": {"metodo": "lama-imagem", "area_px": int(mask.sum())}}
     else:
-        plate, labels, pinfo = fill_planes(inpaint, photo, mask, groups, box, depth, rng, max_side)
+        plate, labels, pinfo = fill_planes(inpaint, photo, mask, groups, box, depth, rng, max_side, rug=rug)
     t["passada2_planos"] = time.perf_counter() - t0
     panels = [pp.wall_panel for pp in pieces if getattr(pp, "wall_panel", None) is not None]
     if panels:
@@ -1285,7 +1410,7 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
     q = None
     if assess_quality:
         t0 = time.perf_counter()
-        q = assess(photo, plate, mask, labels, groups, box, redetect, pinfo)
+        q = assess(photo, plate, mask, labels, groups, box, redetect, pinfo, core=core, rug=rug)
         t["nota"] = time.perf_counter() - t0
     return PlateResult(plate, mask, core, effect, shadow, light, labels, q,
                        {"planos": pinfo, "tempos": t, "estrategia": strategy, "dilatacao_nucleo": core_dilate},
@@ -1346,9 +1471,70 @@ def keep_builtins_reason(inst_set, shape: tuple[int, int]) -> str:
     return ""
 
 
+# planejados/louças que ficaram na placa sem terem sido detectados como peça (o vaso que o detector não achou): a sala
+# não está crua e o portão não pode aprovar (revisão rodada 2: banheiro aprovado com vaso, cuba e gabinete)
+LEFTOVER_FIXTURE_MIN = 0.015     # fração da foto de um componente da classe para contar
+LEFTOVER_FIXTURE_CLASSES = frozenset({
+    "counter", "countertop", "kitchen island", "sink", "toilet", "tub", "bathtub", "shower", "stove", "oven",
+    "refrigerator", "dishwasher", "microwave", "hood", "washer", "cabinet", "wardrobe", "chest of drawers",
+    "buffet",
+})
+
+
+def leftover_fixtures(seg, mask: np.ndarray, keep: np.ndarray | None = None,
+                      min_area: float = LEFTOVER_FIXTURE_MIN) -> list:
+    """Planejados e louças (classes do ADE20K em :data:`LEFTOVER_FIXTURE_CLASSES`) que a segmentação da foto mostra
+    FORA da máscara de remoção: ficaram na sala vazia. ``keep``: pixels que ficam de propósito (painel fixo de parede,
+    planejados mantidos pelo portão, que já têm o próprio motivo). Componentes abaixo de ``min_area`` não contam."""
+    lbl, names = getattr(seg, "labels", None), getattr(seg, "id2label", None) or {}
+    if lbl is None or not names:
+        return []
+    H, W = mask.shape
+    if lbl.shape != (H, W):
+        lbl = cv2.resize(lbl.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
+    free = ~mask if keep is None else ~mask & ~keep
+    out = []
+    for cid, name in names.items():
+        if str(name) not in LEFTOVER_FIXTURE_CLASSES:
+            continue
+        pix = (lbl == int(cid)) & free
+        if pix.sum() < min_area * H * W:
+            continue
+        # sem as tiras finas que sobram em volta de uma peça removida (borda do OneFormer x máscara do SAM)
+        pix = _dil(_ero(pix, max(2, int(0.005 * np.hypot(H, W)))), max(2, int(0.005 * np.hypot(H, W)))) & pix
+        n, cc, st, _ = cv2.connectedComponentsWithStats(pix.astype(np.uint8), connectivity=8)
+        big = st[1:, cv2.CC_STAT_AREA] >= min_area * H * W
+        if big.any():
+            out.append({"rotulo": str(name), "area_pct": round(100.0 * float(st[1:, cv2.CC_STAT_AREA][big].sum())
+                                                               / (H * W), 2)})
+    return out
+
+
+def fail_quality(q: PlateQuality | None, reason: str) -> None:
+    """Reprova a placa por uma regra do produto (fora da nota contínua): o motivo entra, ``ok`` cai e a nota vira
+    0,6 × a nota sem teto, como toda reprovada."""
+    if q is None or reason in q.reasons:
+        return
+    q.reasons.append(reason)
+    q.ok = False
+    raw = q.raw_score if q.raw_score is not None else q.score
+    q.score = 0.6 * raw
+
+
+def _free_cuda() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, inpaint: InpaintFn | None = None,
                       redetect: Callable | None = None, seed: int = 0, max_side: int = MAX_SIDE,
-                      alternatives: bool = True, on_attempt: Callable | None = None) -> PlateResult:
+                      alternatives: bool = True, on_attempt: Callable | None = None,
+                      refine: Callable | None = None) -> PlateResult:
     """Portão de qualidade (§3.6 e PT-V3-8). Tentativas, parando na primeira aprovada:
 
     1. ``crua_por_plano``: soltos + planejados, LaMa por plano;
@@ -1356,13 +1542,18 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     3. ``lama_imagem`` (``alternatives``): LaMa direto na imagem, com o conjunto da melhor tentativa até aqui;
     4. ``mascara_ampla`` (``alternatives``): por plano com o núcleo dilatado :data:`GATE_WIDE_DILATE` vezes.
 
-    Se :func:`keep_builtins_reason` acusa risco (planejados grandes ou remoção total grande), a 1ª tentativa já é
-    ``planejados_mantidos`` e a sala crua não é tentada: a parede atrás deles seria toda inventada.
+    A sala crua é sempre a 1ª tentativa (§3.6); :func:`keep_builtins_reason` só vai para o relatório como risco
+    (``info["risco_planejados"]``), a menos que :data:`KEEP_BUILTINS_FIRST` esteja ligado. ``info["cobertura"]``
+    diz quais planejados ficaram na foto e por quê. Erro no ``refine`` nunca derruba o trabalho: fica a LaMa.
 
-    Fica a melhor (aprovada > menos motivos > nota sem teto). Se nenhuma passa, devolve a melhor com aviso (a
+    Fica a melhor (aprovada > área no limite > menor falha dura > menos motivos > nota sem teto). Se nenhuma passa, devolve a melhor com aviso (a
     interface oferece gerar mesmo assim, o modo A ou outra foto); nunca entrega uma placa ruim em silêncio.
     ``info["tentativas"]`` registra cada tentativa (estratégia, nota, motivos, tempo). ``on_attempt(nome, placa)``
-    é chamado depois de cada tentativa (progresso na interface)."""
+    é chamado depois de cada tentativa (progresso na interface).
+
+    ``refine(placa, nome) -> placa`` (perfil "B com SDXL", PT-V3-4): estágio depois da LaMa em **cada** tentativa
+    (refino SDXL só dentro da máscara, :func:`mobilia.gen.sdxl.refine_plate`); ele mesmo cai para a placa LaMa
+    quando nenhuma semente é melhor. A tentativa registra a nota da LaMa e a do refino."""
     if inpaint is None:
         inpaint = load_lama()
     attempts: list[dict] = []
@@ -1373,14 +1564,50 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
                         strategy=strategy, core_dilate=dil)
         r.kept_builtins = keep
         r.info["estrategia_portao"] = name
+        sd = None
+        if refine is not None:
+            q_lama = r.quality
+            try:
+                r = refine(r, name)
+            except Exception as e:  # noqa: BLE001 - qualquer erro no refino (falta de VRAM na nota, driver...)
+                # nunca derruba o trabalho: fica a placa LaMa desta tentativa, com o motivo no relatório
+                _free_cuda()
+                r.info["refino_sdxl"] = {"usado": False,
+                                         "motivo": f"erro no refino SDXL ({type(e).__name__}: {str(e)[:200]}); "
+                                                   "ficou a placa LaMa"}
+                if r.quality is None:
+                    r.quality = q_lama
+            r.kept_builtins = keep
+            r.info["estrategia_portao"] = name
+            ri_ = r.info.get("refino_sdxl") or {}
+            sd = {"usado": bool(ri_.get("usado")), "semente": ri_.get("semente"), "motivo": ri_.get("motivo"),
+                  "nota_lama": None if q_lama is None else round(q_lama.score, 1), "tempo_s": ri_.get("tempo_s")}
         q = r.quality
+        # regra do produto (§3.6): no modo B a sala vazia é CRUA. Planejado mantido ou planejado/louça que ficou sem
+        # ser detectado reprova a placa, por melhor que seja a nota (antes o banheiro com vaso e cuba aprovava 82)
+        if q is not None:
+            kept_m = np.zeros(r.mask.shape, bool)
+            for i in inst_set.instances:
+                wp = getattr(i, "wall_panel", None)
+                if wp is not None:
+                    kept_m |= np.asarray(wp, bool)
+                if keep and i.kind == "planejado":
+                    kept_m |= np.asarray(i.mask, bool)
+            if keep and any(i.kind == "planejado" for i in inst_set.instances):
+                fail_quality(q, "planejados mantidos na foto: a sala vazia não está crua (o modo B tira armários, "
+                                "bancadas e louças)")
+            left = leftover_fixtures(seg, r.mask, kept_m)
+            if left:
+                r.info["planejados_que_ficaram"] = left
+                fail_quality(q, "planejado/louça que ficou na sala vazia (não foi detectado como peça): "
+                             + ", ".join(f"{x['rotulo']} {x['area_pct']:.1f}%" for x in left))
         attempts.append({"estrategia": name, "planejados_mantidos": keep, "metodo": strategy,
                          "dilatacao_nucleo": round(dil, 4),
                          "nota": None if q is None else round(q.score, 1),
                          "nota_sem_teto": None if q is None or q.raw_score is None else round(q.raw_score, 1),
                          "aprovada": None if q is None else q.ok, "motivos": [] if q is None else list(q.reasons),
                          "area_gerada_pct": round(100 * float(r.mask.mean()), 2),
-                         "tempo_s": round(time.perf_counter() - t0, 2)})
+                         "refino_sdxl": sd, "tempo_s": round(time.perf_counter() - t0, 2)})
         if on_attempt is not None:
             on_attempt(name, r)
         return r
@@ -1388,9 +1615,10 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     # as reprovadas têm a nota limitada a 59: compara pela aprovação, pela área gerada dentro do limite (a máscara
     # larga não pode "ganhar" trocando uma costura por uma sala quase toda inventada), nº de motivos e nota sem teto
     rank = lambda r: (r.quality.ok, r.quality.area_generated <= LIMITS["area_gerada_max"],  # noqa: E731
-                      -len(r.quality.reasons),
+                      -round(getattr(r.quality, "hard", 0.0), 1), -len(r.quality.reasons),
                       r.quality.raw_score if r.quality.raw_score is not None else r.quality.score)
-    keep_why = keep_builtins_reason(inst_set, photo.shape[:2])
+    risk = keep_builtins_reason(inst_set, photo.shape[:2])
+    keep_why = risk if KEEP_BUILTINS_FIRST else ""
     if keep_why:
         best = run("planejados_mantidos", True, "planos", CORE_DILATE)
         best.warnings.append(f"planejados mantidos na foto por padrão ({keep_why}): a parede atrás deles seria "
@@ -1423,6 +1651,14 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
                                  f"(a primeira reprovou: {'; '.join(first_reasons)})")
     best.info["tentativas"] = attempts
     best.info["planejados_por_padrao"] = keep_why or None
+    best.info["risco_planejados"] = risk or None
+    # cobertura do produto (§3.6: no modo B saem também os planejados): a placa entregue diz o que ficou na foto
+    kept = [i.label for i in inst_set.instances if best.kept_builtins and i.kind == "planejado"]
+    best.info["cobertura"] = {"planejados_mantidos": kept, "tudo_removido": not kept,
+                              "motivo": None if not kept else (keep_why or "a sala crua reprovou no portão")}
+    if kept and not any("planejados mantidos" in w for w in best.warnings):
+        best.warnings.append("planejados mantidos na foto (a sala crua reprovou no portão): a sala vazia não está "
+                             "totalmente crua")
     if best.quality is not None and not best.quality.ok:
         best.warnings.append("a sala vazia ficou abaixo da qualidade mínima (" + "; ".join(best.quality.reasons)
                              + "): use o modo A ou envie outra foto")

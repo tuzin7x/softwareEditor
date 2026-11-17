@@ -130,8 +130,10 @@ Ordem que o protótipo validou: C > B > A > D (`p_removal/out/cmp_all.jpg`).
 
 Regras validadas no p_removal: nenhum pixel inexistente apareceu.
 
-- **Ordem de pintura:** de trás para frente, pelos pares de oclusão (profundidade do MoGe na borda comum) mais regras de apoio (vaso na mesa, travesseiro na cama, tapete no fundo de tudo).
-- **Ordem de entrada:** o tapete primeiro (**desenrola no lugar**). Depois, as peças da **frente para trás**, e os apoios antes do que está apoiado. Quando uma peça de trás entra, quem a cobre já está lá.
+- **Ordem de pintura:** de trás para frente, pelos pares de oclusão (profundidade do MoGe na borda comum) mais regras de apoio (vaso na mesa, travesseiro na cama, tapete no fundo de tudo). **Toda borda comum ganha uma ordem:** quando a profundidade empata (< 3%, comum entre peças encostadas, como mesa × cadeira), valem as pistas da imagem, nesta ordem: dono do contorno (a borda comum cai dentro da envoltória convexa *local* de quem está atrás: a cadeira "morde" o retângulo da mesa), peça pequena na frente da grande, a que desce mais nas colunas da borda comum, a menor.
+- **Ordem de entrada:** o tapete primeiro (**desenrola no lugar**). O tapete coberto por móveis é **completado por baixo deles** (envoltória convexa do tapete visível, só sob peças da frente; preenchido por espelho da própria estampa, sem modelo) e desenrola **antes** de os móveis pousarem nele. Depois, as peças da **frente para trás**, e os apoios antes do que está apoiado. Quando uma peça de trás entra, quem a cobre já está lá.
+- **Peça grande que só poderia "surgir":** entra em bloco rígido com parte de quem a cobre (as menores primeiro), para ganhar um movimento de verdade.
+- **Quadro de parede cortado só pelo topo:** cresce no lugar preso ao topo (0,85→1) ou desliza rente à parede pelo lado mais perto; descer do topo ("cair do teto") é o último recurso.
 - **Peça ocluída:** "sobe por trás" do oclusor, com amplitude limitada para a borda cortada ficar sempre dentro dele. Se a amplitude possível for < 5% da altura, usar **escala 0,94→1 no ponto de contato**, com opacidade 100%.
 - **Peça que toca a borda da foto:** desliza a partir dessa borda. Nunca cai.
 - **Peça isolada e inteira:** queda curta (≤ 25% da altura do quadro) com quique (curvas de `render/choreography.py`).
@@ -146,6 +148,11 @@ Regras validadas no p_removal: nenhum pixel inexistente apareceu.
 3. Em todo quadro, fora de (máscara de remoção ∪ caixa da peça em movimento), o quadro é `array_equal` à foto.
 4. A placa é `array_equal` à foto fora da máscara de remoção.
 5. Nenhum pixel com "alpha oculto" (parte da peça coberta por outra na foto) fica visível sem o oclusor na frente.
+   **5b. A mesma regra, independente do grafo de oclusão** (`choreo.verify_independent`): os cortes vêm só da
+   evidência clara gravada nas camadas (tapete/quadro atrás, profundidade com folga de 5%, dono do contorno com
+   folga de 4×, nenhuma pista contrária) e da borda da foto; em todo quadro cada ponto de corte de uma peça na tela
+   tem de estar coberto por uma peça já pousada ou do mesmo bloco. O `plan` replaneja com a relação que faltava
+   (até 2 vezes) e o vídeo é recusado se sobrar algum.
 6. Pixels fora de qualquer alpha e de qualquer efeito não mudam entre quadros consecutivos (anti-morph).
 7. O `report.json` registra a área gerada (%), o número de peças, as peças deixadas no fundo, a semente escolhida e a nota.
 
@@ -187,6 +194,13 @@ alto (divisória com TV), uma bancada de trabalho de parede a parede e um "armá
 parede viram planejados. O pedaço do painel que a cama escondia é continuado para baixo (espelhando o próprio painel),
 em vez de virar parede lisa. Com os planejados mantidos, o que está guardado neles (livros na estante embutida, vaso
 na prateleira) fica junto: tirar só isso abriria buracos cinzentos no móvel que ficou.
+
+**Revisão (rodada 1 de correções do SDXL, 17/11/2026):** a regra acima contrariava a decisão do usuário (os planejados
+saem) e escondia o problema. Agora a **sala crua é sempre a 1ª tentativa** (`plate.KEEP_BUILTINS_FIRST = False`); o
+`keep_builtins_reason` só vai para o relatório como risco (`placa.risco_planejados`). Os planejados ficam na foto apenas
+se o portão reprovar a crua, e o `report.json` diz quais ficaram e por quê (`placa.cobertura`), com aviso na tela e na
+narrativa. O que permitiu voltar atrás: o portão ganhou falhas duras que pegam a "parede inventada" (estrutura nova,
+material, contorno; ver PT-V3-4). `KEEP_BUILTINS_FIRST = True` volta ao comportamento antigo.
 
 **Teste de aceite:** as fotos de cozinha planejada (paisagem e retrato) e de banheiro do conjunto de teste do usuário: placa crua sem
 objetos inventados, linhas parede/piso retas, revestimento contínuo, último quadro idêntico à foto.
@@ -271,7 +285,10 @@ Tudo foi conferido [V] e **nada é gated**.
   - text encoders fora do runtime;
   - VAE em tiles;
   - medir a VRAM livre antes de carregar e, abaixo de ~7 GB, usar `enable_model_cpu_offload`;
-  - abaixo de ~5 GB, **pular o refino SDXL** (modo B) ou usar o fallback v2 (modo A).
+  - abaixo de ~6,5 GB, **pular o refino SDXL** (modo B) ou usar o fallback v2 (modo A). O offload por modelo leva o
+    UNet fp16 inteiro (4,9 GiB) para a GPU de uma vez, mais ControlNet e ativações (estimado; revisão de código da
+    rodada 2: o limite antigo de 5 GB deixava passar GPU em que o UNet não cabe). No modo B a LaMa e o OneFormer da
+    nota saem da GPU enquanto o SDXL gera (`pipeline_b.VramSwap`), e essa VRAM conta como livre.
 - **O sysmem fallback do driver NVIDIA no Windows** não dá OOM: deixa o SDXL de 5 a 20 vezes mais lento em silêncio. O diagnóstico precisa detectar isso (tempo por passo da sonda) e registrar no `report.json`.
 - RAM do sistema: SDXL com offload precisa de ≥ 16 GB.
 
@@ -345,6 +362,82 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
   - os pixels de janela são `array_equal` à placa LaMa;
   - com o SDXL desligado o pipeline continua funcionando;
   - [GPU] carga + 3 sementes ≤ 20 s quente, VRAM pico ≤ 7,2 GB e sem sysmem fallback registrado.
+- **Estado (17/11/2026, CPU):** implementado (`mobilia/gen/sdxl.py`, `mobilia/removal/plate_score.py`). Pesos:
+  RealVisXL V5.0 Lightning (UNet fp16), VAE fp16-fix e ControlNet depth small, revisão e SHA-256 em
+  `analysis/weights.py` (`SDXL_WEIGHTS`, ≈ 7,4 GB; `docs/LICENCAS_V3.md` §1.2). Como funciona:
+  - estágio **depois da LaMa em cada tentativa do portão** (`build_plate_gated(refine=...)`), ligado pelo perfil
+    "B com SDXL" (`pipeline_b.sdxl_choice`: GPU com VRAM, RAM para offload e pesos; 8 GB usa
+    `enable_model_cpu_offload` porque o OneFormer da nota divide a VRAM). `MOBILIA_SDXL=0` desliga, `=1` força
+    (até na CPU, para testes). Sem pesos/VRAM ou com erro: fica a LaMa e o motivo vai para `report.json`
+    (`refino_sdxl`: ligado, motivo, sementes com nota e motivos, semente escolhida, nota da LaMa, tempos);
+  - **escopo "piso"** (padrão): o SDXL gera só o piso; paredes e teto lisos e vãos sem plano viram **pintura lisa**
+    (membrana com a cor da borda + grão do material visível); parede com textura fica na LaMa por plano. No teste
+    com SDXL em toda a máscara ("tudo") o modelo inventou radiador e painéis nas paredes da Nice;
+  - ControlNet depth da **caixa vazia** (ray-cast do `RoomModel`, escala casada com o MoGe fora da máscara; dentro
+    nunca o MoGe, que tem os móveis); início = tom esperado do plano + grão da LaMa limitado a ±5 níveis (sem o
+    contorno do quadro/sofá), força 0,75, 8 passos (6 efetivos), CFG 2,0; prompt "empty unfurnished room" com a
+    cor/tipo do piso e a cor das paredes medidos na foto; prompt negativo contra móveis, porta/janela/tomada
+    novas, névoa e borrão;
+  - composição só dentro da máscara (rampa por dentro), janelas/portas/cortinas visíveis e os pixels mascarados
+    rotulados "protegido" ficam `array_equal` à LaMa (com SDXL ali, o balcão visto pela janela virou parede com
+    radiador); cor casada por membrana a partir da borda, por plano;
+  - 2 (CPU) ou 3 (GPU) sementes, escolhidas pela própria nota do portão; semente com móvel ou porta/janela nova
+    (OneFormer) nunca é escolhida; se nenhuma supera a LaMa, fica a LaMa.
+- **Nota contínua do portão** (próximo passo 4): 100 menos pontos perdidos por defeito (`plate.SCORE_WEIGHTS`),
+  agora com **névoa** (contraste local e véu leitoso contra o material visível do mesmo plano), **fantasma**
+  (correlação, por peça, entre a estrutura que sobrou na placa e a peça da foto, só onde a foto mostra o móvel),
+  **placas soltas** (manchas que destoam da cor esperada do plano) e **porta/janela nova** (OneFormer). Reprovada:
+  0,6 × nota sem teto (contínua, < 60). Medido nas placas LaMa das 2 fixtures a 768 px: típica **48 → 29**
+  (antes 90 sem teto) e Nice **23 → 14**. Calibração só nas 2 fixtures e em casos sintéticos; **não** foi
+  recalibrada nas 39 fotos do conjunto de teste (os limites de reprovação por névoa/fantasma/placas são
+  conservadores: 0,6 / 0,6 / 35%).
+- **Teste de fumaça real (CPU, 4 núcleos, bf16, 768 px, 3 sementes; `docs/poc/v3/sdxl_folha.jpg`: foto | LaMa |
+  SDXL):** carga 5–33 s (fria/quente), **≈ 21 s por semente** (6 passos a 768×400, 3,4–3,8 s/passo; com outro
+  processo usando a CPU, 13–29 s/passo), nota ~1 s por semente sem OneFormer. Nota sem teto: típica **45,8 →
+  82,3** (aprovada), Nice **23,3 → 47,0** (reprovada). A olho: na típica o piso vira porcelanato bege coerente
+  com o visível, sem a névoa nem o "carpete" inventado; sobram a mesinha fantasma colada à cortina (pixels
+  protegidos, ficam na LaMa) e a sombra do quadro **fora** da máscara (máscara de efeitos não pegou a sombra).
+  Na Nice as paredes ficam lisas e sem as placas soltas, mas o piso de granilite sai liso demais com manchas e o
+  quarto visto pela porta vira um borrão bege-rosado: **melhor que a LaMa, ainda não entregável**. Não medidos:
+  GPU (tempo, VRAM, sysmem fallback), as 39 fotos do conjunto de teste e a nota do crítico.
+- **Rodada 1 de correções (17/11/2026, CPU, 8 fotos fixas a 768 px, semente 7, 2 sementes SDXL).** A avaliação
+  independente deu 2/10 à sala vazia e mostrou que a nota subia com o SDXL enquanto o piso piorava. Mudanças (todas
+  gerais, nenhum limiar ajustado a uma foto):
+  - **Piso sem material inventado:** o prompt não nomeia mais o tipo do piso ("smooth tiled floor" fazia o SDXL
+    desenhar placas com rejunte sobre porcelanato e ardósia sobre madeira); só a cor, e o negativo ganhou "tile grout,
+    bricks, pipe". E, por padrão (`RefineConfig.floor_detail="lama"`), **do SDXL no piso só fica a baixa frequência**
+    (tom e luz: tira névoa e a mancha da silhueta) e a textura vem da LaMa por plano, que continua o piso visível
+    (`floor_texture_from_lama`, corte em 1% da diagonal, textura limitada a ±12 níveis). Testado antes com início pela
+    LaMa e força 0,5: o SDXL continuou desenhando placas (descartado).
+  - **Falhas duras na nota** (`plate_score.texture_metric` e `contour_metric`, `PlateQuality.hard`): *estrutura nova*
+    (densidade de retas longas do LSD dentro do preenchimento contra o anel do mesmo plano; retas que continuam uma
+    reta do anel ou saem da máscara, como rodapé e quina, não contam), *material* (orientação dessas retas contra o
+    anel), *névoa por alta frequência* (vale também sem plano), *contorno* (degrau de cor ou linha ao longo da borda da
+    máscara onde os dois lados são a mesma superfície: o retângulo do quadro, a silhueta do sofá). Acima de 0,6 cada uma
+    reprova sozinha; a escolha de tentativa e de semente olha primeiro a **pior** falha dura, depois a nota média. Uma
+    semente que piora qualquer falha dura da LaMa (mais de 0,15 e acima de 0,3) nunca troca a LaMa.
+  - **Reconferência OneFormer relativa:** objeto que já aparecia na placa LaMa não descarta a semente (antes 14 de 22
+    tentativas jogavam fora o SDXL por "toalha"/"janela" que vinham da própria LaMa). Na placa final o motivo continua.
+  - **Erro no refino nunca derruba o trabalho:** `refine_plate` e o portão pegam qualquer exceção (OneFormer sem VRAM
+    na nota, casamento de cor...), liberam a CUDA e ficam com a LaMa, com o motivo no relatório.
+  - **VRAM:** `pipeline_b.sdxl_recheck` reconfere a VRAM livre **depois** de LaMa e OneFormer carregados (liga o
+    offload abaixo de 7 GB livres e desliga o SDXL abaixo de 6,5 GB; rodada 2) e o relatório guarda o pico por etapa
+    (`refino_sdxl.vram_pico_mb_por_etapa`). **Continua sem medida na GPU real.**
+  - **Planejados:** a sala crua é sempre a 1ª tentativa (§3.6, revisão); quadro/espelho/TV pendurados têm a faixa de
+    sombra procurada na parede; cor esperada do que não tem plano vem só de piso/parede/teto em volta.
+  - **Coreografia:** o relatório traz a cobertura da verificação independente (`oclusao_cobertura_evidencia`: bordas
+    do grafo com evidência própria / bordas do grafo). A evidência ainda usa as mesmas pistas do grafo (não foi
+    acrescentada uma pista independente nesta rodada).
+  - **Resultado medido** (portão; nota sem teto; antes → agora): sala_sofas_brancos reprova → reprova; nice_terrazzo
+    reprova (SDXL usado, 71) → reprova (todas as sementes com "sofá" novo, fica a LaMa); foto interna (não versionada) reprova
+    (SDXL 87 com piso de placas) → **aprova 85, sala crua**; kitchen_frontal_island reprova → reprova (agora tenta a
+    crua: 67–68 com SDXL); hotel_bathroom_accessible aprova 87 → aprova 83 (a crua reprovou, planejados mantidos e
+    ditos no relatório); dining_backlit_window, living_bookshelves_cluttered e living_portrait_window reprovam nas duas.
+    **A olho:** piso sem placas inventadas na foto interna e sem ardósia no retrato (o problema nº 1 da avaliação); a
+    sala de sofás continua com piso de "carpete" manchado e névoa clara à direita; o quarto pela porta da Nice e a sala lotada continuam
+    ruins; o banheiro mantém louças. **Falso aceite que continua:** a foto interna aprova com uma mancha escura borrada
+    onde estava a cozinha (região sem plano medido, 28% do preenchimento; nenhuma falha dura pega) e a faixa marrom na
+    base do vidro. Não medidos: GPU, as 39 fotos, segundo avaliador.
 
 ### PT-V3-5: Camadas 2D e anti-morph
 - `layers2d/layers.py`: ordem de pintura, RGBA pré-multiplicado `C = foto − (1−A)·fundo`, efeito = razão limitada só perto da peça e mais escuro que a placa, e correção do resíduo restante **na placa**.
@@ -394,6 +487,17 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
   antes das cadeiras com o buraco delas (grafo de oclusão sem relação quando a profundidade empata; a verificação não
   vê). Corrigido: o anel das camadas agora segue a dilatação da máscara "ampla" do portão (antes, o contorno dos
   móveis voltava da foto para a sala vazia, 4,9% da imagem na Nice).
+- **Correção da coreografia (17/11/2026, depois da avaliação):** os defeitos 2, 3, 4 e 6 da avaliação final
+  (`RESULTADO.md`) foram tratados de forma geral (§3.4 e §3.5, regra 5b): (a) pistas da imagem quando a
+  profundidade empata, então toda borda comum tem ordem (na Nice, mesa e as duas cadeiras da frente entram como bloco
+  rígido em queda; antes a mesa caía sozinha com o buraco das cadeiras); (b) verificação independente do grafo,
+  ligada ao `choreo.verify` e ao `ModeBVerifier` (regra 5b), que pega o defeito da Nice quando a relação falta
+  (75 300 px de corte à vista na fixture com o grafo antigo; o `plan` repara para 0); (c) tapete completado por baixo
+  dos móveis e desenrolando primeiro nas 2 fixtures; (d) sofá principal da típica sobe do chão (sem "surgir"),
+  0 "surgir" nas 2 fixtures e em 160 cenas sintéticas aleatórias; quadro no topo cresce no lugar. Medido só nas
+  fixtures (placa Telea) e em cenas sintéticas, sem vídeo novo nem nota de crítico. Limite: o preenchimento do tapete
+  é por espelho (sem modelo); sob uma mesa de vidro grande ele vira retalhos da estampa, visíveis por ~1 s antes de
+  a mesa pousar.
 
 ### PT-V3-9: Modo A com o motor novo
 - Passe Z do layout (Blender só Z), `gen/sdxl.py` em modo inserção (máscara = pegadas + sombras), 3 sementes + nota, hires pass nos móveis, recolocação por máscara, camadas com a foto vazia como placa, completamento SDXL da parte oculta só para peças que caem e fallback v2.
@@ -417,10 +521,13 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
 
 **Estado (17/11/2026):** PT-V3-0 a PT-V3-8 implementados e testados na CPU. O modo B **funciona de ponta a ponta,
 mas não é vendável sem uma sala vazia melhor**: o portão reprova a placa em quase todas as fotos (2 de 2 fixtures,
-33 de 39 fotos mobiliadas variadas). Próximos passos, em ordem: (1) medir na RTX 5070 Laptop do usuário (§7.2); (2) PT-V3-4
-(refino SDXL só no piso e nos vãos) e reavaliar com a mesma folha; (3) relação de oclusão para peças grandes
-encostadas com a mesma profundidade (mesa × cadeira) e uma verificação de "buraco" que não dependa do grafo;
-(4) nota contínua no portão. PT-V3-9 e PT-V3-10 não começaram.
+33 de 39 fotos mobiliadas variadas). PT-V3-4 (refino SDXL do piso + paredes lisas) e a nota contínua do portão
+foram implementados e testados na CPU nas 2 fixtures (ver PT-V3-4). Próximos passos, em ordem: (1) medir na RTX
+5070 Laptop do usuário (§7.2), agora com o SDXL; (2) rodar as 39 fotos com o SDXL e recalibrar os limites de
+névoa/fantasma/placas soltas com a folha do olho; (3) máscara de efeitos que pegue a sombra dos quadros e
+embeddings dos prompts pré-calculados (tirar os text encoders do pacote). A relação de
+oclusão entre peças encostadas com a mesma profundidade e a verificação de "buraco" independente do grafo foram
+feitas (ver "Correção da coreografia" no PT-V3-8). PT-V3-9 e PT-V3-10 não começaram.
 
 ---
 
