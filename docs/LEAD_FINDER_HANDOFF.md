@@ -19,19 +19,20 @@ Todos dentro das áreas permitidas pelo `docs/PARALLEL_DEVELOPMENT.md`:
 
 - `mobilia/modules/lead_finder/**` (código do módulo, só `.py`);
 - `tests/lead_finder/**` (testes, `conftest.py`, `__init__.py` e fixtures fictícias em JSON);
-- `docs/LEAD_FINDER.md` e `docs/LEAD_FINDER_HANDOFF.md`.
+- `docs/LEAD_FINDER.md` e `docs/LEAD_FINDER_HANDOFF.md`;
+- `.github/workflows/tests.yml`: **só** o caminho `tests/lead_finder` acrescentado ao fim da lista do passo de
+  testes rápidos (exceção prevista no §5 do guia; commit `ce0c00c`, separado para ser fácil de revisar).
 
-**Nenhum** arquivo fora disso foi alterado: nem `app.py`, `modules.py`, `theme.py`, `brand.py`, `widgets.py`,
-`design_widgets.py`, motor, vídeo, `packaging/`, `requirements/`, `.github/`, `pyproject.toml`, README, RESUME
-ou ARQUITETURA. `tests/test_modules.py` também não precisou mudar.
+**Nenhum** outro arquivo foi alterado: nem `app.py`, `modules.py`, `theme.py`, `brand.py`, `widgets.py`,
+`design_widgets.py`, motor, vídeo, `packaging/`, `requirements/`, `build-windows.yml`, `pyproject.toml`, README,
+RESUME ou ARQUITETURA. `tests/test_modules.py` também não precisou mudar.
 
 ## 3. Pedidos à sessão principal
 
-1. **CI:** acrescentar `tests/lead_finder` à lista de arquivos do passo "Testes rápidos" em
-   `.github/workflows/tests.yml` (só a linha acrescentada). Os testes rodam em ~10 s e não usam internet.
+1. **CI:** feito nesta branch (ver §2). Antes disso o `tests.yml` rodava só a lista fixa (123 testes) e **nenhum**
+   teste do Lead Finder rodava no GitHub. Ao integrar, manter `tests/lead_finder` na lista.
 2. **Empacotamento:** nada a fazer. O módulo só tem `.py` (sem `datas`), e `collect_submodules("mobilia.modules")`
-   já inclui os subpacotes `sources` e `ui`. Recomendo gerar um `.exe` de teste pelo **Run workflow** do Build
-   Windows na branch, sem "publicar".
+   já inclui os subpacotes `sources` e `ui`. Resultado do build de teste no §6.
 3. **Dependências:** nenhuma nova. Só biblioteca padrão (`urllib`, `json`, `csv`, `sqlite3`, `zipfile`,
    `html.parser`, `urllib.robotparser`) e PySide6.
 4. **Documentação geral:** na integração, citar o módulo em README (tabela de estrutura: `mobilia/modules/`
@@ -61,46 +62,90 @@ Nada do motor de redesenho ou de vídeo foi tocado; `api.py` não importa nada d
 ## 5. Como testar
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 96 testes
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 162 testes
 QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_ui.py
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 python -m pytest --collect-only -q
 python -m mobilia.modules.lead_finder         # janela isolada do módulo
 ```
 
-Resultado nesta branch, depois do merge com `eaee226` (Linux, Python 3.13, instalação completa do `tests.yml`):
+Resultado nesta branch (`ce0c00c`, depois do merge com `eaee226` e das correções da revisão):
 
-- `tests/lead_finder`: **96 passaram**;
-- `tests/test_modules.py` + `tests/test_ui.py`: **todos passaram** (com o Lead Finder registrado na janela);
-- suíte rápida inteira: **802 passaram, 258 pulados, 4 falharam**. As 4 falhas
-  (`test_design_weights_in_prefetch`, `test_vram_swap_moves_models_out_during_generate_and_back`,
-  `test_ensure_local_separates_network_time`, `test_prefetch_includes_v3_weights`) são `ModuleNotFoundError` de
-  `torch`/`huggingface_hub` e **falham igualmente em `claude/sweet-bohr-4uzml2` sem o Lead Finder** (conferido num
-  worktree separado). Não têm relação com o módulo;
-- `--collect-only`: coleta completa sem erros.
+| Onde | Resultado |
+|---|---|
+| `tests/lead_finder` (local) | **162 passaram**: 96 originais + 66 de regressão da revisão do Codex |
+| `tests/test_modules.py` + `tests/test_ui.py` + `tests/lead_finder` (local) | **205 passaram** |
+| Suíte rápida inteira (local, instalação completa do `tests.yml`) | **868 passaram, 258 pulados, 4 falharam**: as mesmas 4 falhas da base (`ModuleNotFoundError` de `torch`/`huggingface_hub`), que **falham igualmente em `claude/sweet-bohr-4uzml2` sem o Lead Finder** |
+| GitHub Actions, "Testes (CPU)" | **285 passaram** (123 da lista original + 162 do Lead Finder). Antes de `ce0c00c` o CI rodava só os 123 e nenhum teste do módulo |
+| GitHub Actions, "Build Windows" (manual, `publicar=false`, run 44202166745) | **sucesso**: PyInstaller, autoteste do `.exe`, Inno Setup; "Publicar em Releases" **pulado** |
+| Conteúdo do `.exe` (artefato `7xAi-onedir` baixado, SHA-256 conferido) | os 39 módulos do Lead Finder estão no `PYZ` do `7xAi.exe`, com o código corrigido; `sqlite3`, `ssl` (`_ssl.pyd`, `_sqlite3.pyd`), `urllib.robotparser`, `html.parser`, `zipfile` e `csv` presentes; nenhuma biblioteca do motor |
 
-Teste manual sugerido no Windows:
+## 6. Pendências e testes reais que ainda faltam
 
-1. Abrir o 7xAi › **Lead Finder** › Pesquisar › Municípios › SP › Campinas › "Imobiliária" › OpenStreetMap ›
-   Pesquisar.
-2. Na aba Leads, clicar em **OPEN WHATSAPP** de uma empresa com celular: conferir o texto, abrir, verificar que o
-   WhatsApp (app ou web) abre com a mensagem preenchida e **não** envia sozinho; responder "Ainda não" e depois
-   registrar "Mensagem enviada" pelo painel.
-3. Marcar uma empresa como "Não contatar" e repetir a pesquisa: ela não volta como contatável.
-4. (Opcional) Importar a base da Receita para uma UF pequena (ex.: AC) e pesquisar com a fonte "Base aberta de
-   CNPJ".
-
-## 6. Pendências e o que NÃO foi verificado
+O que **não** dá para afirmar sem testar com contas, chaves e um PC Windows de verdade:
 
 | Item | Situação |
 |---|---|
-| Overpass (OpenStreetMap) ao vivo | `overpass-api.de` recusou conexões do ambiente de nuvem do desenvolvimento. A consulta gerada foi aceita por outro servidor Overpass (200, JSON válido). **Precisa ser confirmada no PC do usuário.** |
-| Google Places ao vivo | Sem chave disponível. Implementado pela documentação oficial (Places API New, Text Search e Place Details, com máscara de campos) e testado com respostas gravadas. **Não afirmo que esteja funcionando com uma chave real até alguém testar.** |
-| IA (API da Anthropic) ao vivo | Sem chave. Chamada HTTP direta (o `.exe` não pode ganhar o SDK). Opcional e desligada por padrão. |
-| BrasilAPI e IBGE ao vivo | **Verificados** a partir do ambiente de desenvolvimento com o código do módulo (consulta de CNPJ público e lista de 645 municípios de SP). |
-| Importação da Receita em arquivos reais | Testada com ZIP sintético no formato oficial (CSV `;`, latin-1, sem cabeçalho, 30 colunas). Não foi rodada nos arquivos completos (vários GB). O endereço de download da Receita muda com frequência; o módulo abre a página do dataset no dados.gov.br e o usuário baixa os arquivos. |
-| `.exe` | Não gerado nesta sessão (sem Windows). O módulo só usa PySide6 e biblioteca padrão. |
+| OpenStreetMap (Overpass) ao vivo | `overpass-api.de` recusou conexões do ambiente de nuvem do desenvolvimento. A consulta gerada foi aceita por outro servidor Overpass (200, JSON válido, sem dados por ser regional). **Pendente no PC do usuário.** |
+| Google Places ao vivo | Sem chave. Implementado pela documentação oficial (Places API New: Text Search e Place Details, máscara de campos) e testado com respostas gravadas. **Não está verificado com chave real.** |
+| WhatsApp de verdade | O link `wa.me` e o fluxo foram testados com clique real na interface (offscreen), mas **não** abrindo o WhatsApp Desktop/Web de verdade. **Pendente no Windows.** |
+| Abrir a aba no `.exe` | O `.exe` contém o módulo e o autoteste passa, mas o autoteste não abre a aba. **Pendente no Windows.** |
+| IA (API da Anthropic) ao vivo | Sem chave. Opcional e desligada por padrão. |
+| Importação da Receita com arquivos reais | Testada com ZIP sintético no formato oficial; não com os arquivos completos (vários GB). |
+| BrasilAPI e IBGE ao vivo | **Verificados** (consulta de CNPJ público e 645 municípios de SP). |
 | Provedores comerciais de CNPJ | Avaliados e documentados; não implementados (exigem contrato). |
+
+### Roteiro dos testes reais (no Windows, com o `.exe` de teste)
+
+Baixe o artefato `7xAi-onedir` (ou `7xAi-Setup`) do run 44202166745 em Actions › Build Windows. Use uma pasta de
+dados limpa, se quiser isolar: defina `MOBILIA_HOME` antes de abrir.
+
+**A. Abrir o módulo no executável**
+1. Abrir o `7xAi.exe` › cabeçalho mostra `Ambientes | Lead Finder` › clicar em **Lead Finder**.
+2. Esperado: a aba abre sem o aviso "Não foi possível abrir…"; as 5 abas internas trocam com transição suave;
+   em 1280×720 nada fica cortado (as abas rolam).
+
+**B. OpenStreetMap (gratuito, sem chave)**
+1. Pesquisar › **Municípios** › UF SP › digitar "Campinas" (a lista do IBGE deve completar) › Adicionar.
+2. Palavra-chave "Imobiliária" › fonte OpenStreetMap › Pesquisar.
+3. Esperado: em até ~1 min, contadores "Novas" > 0 e registros na aba Leads com fonte "OpenStreetMap".
+   Repetir a pesquisa: "Novas" = 0 e "Atualizadas" = o mesmo número (nada duplica). Testar **Cancelar** durante
+   uma pesquisa por "Estados › SP" (mais lenta): o botão volta em ~1 s e o que chegou fica guardado.
+4. Se falhar com "Sem conexão…" ou erro 429/504: trocar o servidor em Configurações (ex.: outro servidor Overpass
+   público) e anotar a mensagem exibida.
+
+**C. Google Places (pago — usar limites baixos)**
+1. Google Cloud: projeto com faturamento, **Places API (New)** ativada e chave restrita a ela.
+2. Configurações › Google: colar a chave › Salvar chave › marcar "Usar o Google Places" › Máximo por pesquisa
+   **3**, Máximo por mês **10** › Salvar.
+3. Pesquisar › Municípios › Campinas - SP › "Imobiliária" › só a fonte Google › Pesquisar.
+4. Esperado: aparece a confirmação com a estimativa ("Até 1 requisição paga…") e o uso do mês; os resultados
+   chegam com nome, telefone e site; em Configurações, "Uso neste mês: 1 de 10".
+5. Cancelar no meio de uma pesquisa com várias palavras-chave: o uso do mês deve contar as requisições enviadas.
+6. Exportar CSV: as linhas que só vieram do Google saem **sem** nome/telefone/endereço, com o `place_id` na
+   observação.
+7. No painel da empresa: "Atualizar dados do Google" (Place Details) soma 1 ao uso do mês.
+8. Conferir no console do Google Cloud que o número de requisições bate com o contador do 7xAi.
+
+**D. WhatsApp (com um número de teste seu)**
+1. Leads › Nova empresa › cadastrar uma empresa fictícia com o **seu** celular.
+2. Clicar em **OPEN WHATSAPP** na tabela › conferir o texto (nome da empresa, sem marcadores) › Abrir no WhatsApp.
+3. Esperado: o WhatsApp Desktop (ou Web no navegador padrão) abre a conversa com o seu número e a mensagem
+   preenchida, **sem enviar**. No 7xAi aparece "Você enviou a mensagem?".
+4. Responder "Ainda não": o histórico mostra "WhatsApp aberto" e o status continua "Não contatado". Enviar
+   manualmente no WhatsApp e registrar "Mensagem enviada" no painel: status vira "Contato iniciado".
+5. Empresa com fixo e celular: em "WhatsApp: confirmado" o painel pergunta qual número; o escolhido é o que o
+   botão passa a abrir.
+6. Marcar "Não contatar": o botão some da tabela e do painel; repetir a pesquisa que a trouxe: ela não volta como
+   contatável.
+7. Aba Mensagens: escolher uma empresa, depois buscar outro texto com vários resultados: o botão OPEN WHATSAPP
+   deve ficar desligado até escolher de novo.
+
+**E. Base de CNPJ (opcional)**
+1. Baixar da página oficial (Configurações › Página oficial) `Estabelecimentos*.zip`, `Empresas*.zip`,
+   `Municipios.zip`; importar só uma UF pequena (ex.: AC) e pesquisar com "Base aberta de CNPJ".
+
+Registre no PR o resultado de cada letra (passou / falhou + mensagem exibida).
 
 ## 7. Decisões que valem revisar
 
@@ -110,3 +155,19 @@ Teste manual sugerido no Windows:
   Pesquisar.
 - **Frase de não contato** ativada por padrão nas mensagens.
 - **Modelo de IA padrão:** `claude-opus-5-5` (configurável em Configurações; esforço baixo para mensagens curtas).
+
+## 8. Revisão automática do Codex (PR #1)
+
+A primeira revisão (`b5de8d5`) apontou 6 problemas P2, todos corrigidos em `25d83cf` e respondidos/resolvidos nos
+threads do PR. Testes em `tests/lead_finder/test_lead_finder_review_fixes.py` (66; 31 falham no código anterior):
+
+| # | Problema | Correção |
+|---|---|---|
+| 1 | Ordenar por prioridade/pontuação gerava SQL inválido (`max(priority DESC, ...)`) | `SORTABLE` com tuplas de expressões explícitas |
+| 2 | Cancelar durante uma requisição paga do Google não registrava o uso | uso emitido no `finally`; o Place Details também registra cada requisição e respeita o limite mensal |
+| 3 | Mensagens: nova busca mantinha o destinatário anterior ativo (WhatsApp para a empresa errada) | destinatário limpo ao trocar a lista; respostas atrasadas ignoradas |
+| 4 | Pontuação não era recalculada quando uma empresa ganhava dados | a `Store` recalcula a pontuação a cada mudança dos dados de entrada |
+| 5 | CSV: `=1+1` passava sem proteção | apóstrofo para qualquer valor iniciado por `= + - @ \t \r`; só números puros ficam como estão |
+| 6 | Confirmar WhatsApp trocava o celular pelo fixo | o número confirmado é gravado (migração v3) e o painel pergunta qual número |
+
+O resultado da nova revisão pedida após as correções está registrado no PR.

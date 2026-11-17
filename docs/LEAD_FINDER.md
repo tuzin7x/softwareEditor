@@ -103,7 +103,9 @@ de cada registro (fonte, data, consulta) aparece no painel da empresa.
 3. O diálogo mostra o modelo escolhido já personalizado com dados reais e permite editar o texto.
 4. `QDesktopServices.openUrl("https://wa.me/<número>?text=<mensagem>")` abre a conversa com o texto preenchido.
    O envio é feito pela pessoa, no WhatsApp.
-5. O CRM registra **"WhatsApp aberto"** e pergunta se a mensagem foi enviada. Só com a confirmação vira
+5. Ao confirmar manualmente que uma empresa tem WhatsApp, o número exato é gravado; se a empresa tem mais de um
+   telefone, o painel pergunta qual deles.
+6. O CRM registra **"WhatsApp aberto"** e pergunta se a mensagem foi enviada. Só com a confirmação vira
    **"Mensagem enviada"** e o status passa de "Não contatado" para "Contato iniciado".
 
 Não há envio automático, envio em massa nem automação do WhatsApp Web.
@@ -149,7 +151,8 @@ WhatsApp de links oficiais (`wa.me`, `api.whatsapp.com`) — não guarda o conte
 | Gerações por IA por dia | 30 | Configurações |
 | Sites analisados por lote | 25 | `settings.json` |
 
-Antes de uma pesquisa paga aparece a estimativa (requisições e valor) e o uso do mês. O uso fica em
+Toda requisição paga é contada no momento em que é enviada, inclusive se a pesquisa for cancelada ou falhar no
+meio; "Atualizar dados do Google" (Place Details) também respeita o limite mensal. Antes de uma pesquisa paga aparece a estimativa (requisições e valor) e o uso do mês. O uso fica em
 `api_usage`. Confira sempre a tabela de preços vigente e o crédito gratuito mensal da sua conta Google.
 
 ## 8. Configurações e credenciais
@@ -188,7 +191,7 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_u
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 ```
 
-96 testes no módulo, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
+162 testes no módulo (96 originais + 66 de regressão da revisão do Codex), rodando também no GitHub Actions, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
 `tests/lead_finder/fixtures/`): telefones e `wa.me`, IBGE, palavras-chave, mensagens, IA (formato da
 requisição), HTTP (novas tentativas, cancelamento imediato, limite por host, logs sem chaves), OSM, Google
 (máscara de campos, limite de custo), BrasilAPI (minimização), importador da Receita com ZIP sintético
@@ -204,6 +207,8 @@ WHATSAPP, pesquisa em thread, cancelamento, painel vazio, mensagens, configuraç
   Campinas › OpenStreetMap). O servidor pode ser trocado em Configurações.
 - **Google Places e IA não verificados ao vivo** por falta de chaves: implementados conforme a documentação
   oficial e testados com respostas gravadas.
+- **WhatsApp real não aberto:** o fluxo foi testado com clique na interface e o link `wa.me` validado, mas sem
+  abrir o WhatsApp Desktop/Web. Roteiro dos testes reais em `LEAD_FINDER_HANDOFF.md` §6.
 - Cobertura do OSM no Brasil é irregular; a base de CNPJ é a fonte mais completa, mas exige baixar os arquivos
   da Receita (vários GB) e importar.
 - A base de CNPJ traz o telefone cadastrado na Receita, que pode estar desatualizado; WhatsApp nunca é presumido.
