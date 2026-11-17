@@ -387,6 +387,12 @@ def test_gate_alternatives_record_attempts_and_skip_when_only_area(monkeypatch):
     rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
                          on_attempt=lambda name, res: seen.append(name))
     assert seen == ["crua_por_plano"]
+    # área acima do limite junto com outros motivos (foto lotada): as alternativas também não podem passar
+    reason[:] = ["costura visível no(a) piso (ΔE 9.0)", "área reconstruída muito grande (80% da foto)"]
+    seen.clear()
+    rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                         on_attempt=lambda name, res: seen.append(name))
+    assert seen == ["crua_por_plano"]
 
 
 def test_image_strategy_keeps_photo_outside_mask():

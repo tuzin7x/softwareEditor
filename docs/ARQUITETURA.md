@@ -345,7 +345,8 @@ após o movimento eles têm de cair fora do quadro ou sob outra peça presente).
   100% dos quadros) → MP4. Nada de layout nem Blender.
 - **Portão de qualidade** (`plate.build_plate_gated`), parando na 1ª aprovada: sala crua por plano → mantendo
   os planejados (se há) → LaMa direto na imagem → máscara 2,5× mais larga. Fica a melhor (aprovada > menos
-  motivos > nota sem teto). Se só a área grande reprovou, as alternativas não rodam (não diminuem a área). A
+  motivos > nota sem teto). Se a área gerada passa do limite (sozinha ou com outros motivos), as alternativas
+  não rodam (não diminuem a área). A
   nota usa o OneFormer de novo na placa (móvel que "voltou"); `MOBILIA_MODO_B_REDETECTAR=0` desliga (só
   depuração). Ainda reprovada: **sem MP4**, evento `done` com `output: null` e `warning` em português; a
   interface oferece *gerar mesmo assim* (`accept_weak_plate`, o vídeo sai com o aviso na tela final e no

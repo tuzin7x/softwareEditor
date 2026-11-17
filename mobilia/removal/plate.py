@@ -1273,9 +1273,10 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
             r2.warnings.append("sala crua reprovada (" + "; ".join(first_reasons) + "): planejados mantidos na foto")
             if rank(r2) >= rank(best):
                 best = r2
-        # só a área grande reprovou: LaMa na imagem não muda a área e a máscara larga só a aumenta
-        area_only = all(r.startswith("área reconstruída") for r in best.quality.reasons)
-        if alternatives and not best.quality.ok and not area_only:
+        # área acima do limite: nenhuma alternativa passa (LaMa na imagem não muda a área e a máscara larga só a
+        # aumenta), mesmo com outros motivos junto; não gasta ~2 preenchimentos + OneFormer à toa (foto lotada)
+        area_blocked = any(r.startswith("área reconstruída") for r in best.quality.reasons)
+        if alternatives and not best.quality.ok and not area_blocked:
             keep = best.kept_builtins
             for name, strategy, dil in (("lama_imagem", "imagem", CORE_DILATE),
                                         ("mascara_ampla", "planos", CORE_DILATE * GATE_WIDE_DILATE)):
