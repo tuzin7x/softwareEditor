@@ -260,6 +260,8 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
     em.stage("camadas", 0.1, "Recortando os móveis reais da foto")
     with sw.measure("camadas"):
         st = L.build_layers(foto, res, pieces, ctx.geo.depth)
+        for w in st.warnings:             # ex.: pedaço de móvel voltando para a sala vazia (o portão não vê isso)
+            em.log(w, "warning")
         em.stage("camadas", 0.6, "Planejando a entrada de cada peça")
         ch = C.plan(st, fps=int(ctx.q.get("fps") or C.FPS))
         cv = C.verify(st, ch)

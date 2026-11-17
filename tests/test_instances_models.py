@@ -28,7 +28,8 @@ def test_nice_with_sam(oneformer, room_fixture):
     f = room_fixture("nice_terrazzo")
     seg, pan = ri.oneformer_infer(*oneformer, f.photo)
     s = ri.detect_instances(f.photo, seg, pan, sam="auto", geometry=f.geometry, room=f.room)
-    assert not s.warnings
+    # só avisos informativos (painel fixo atrás da cama fica na foto, §3.6, desde o commit dos planejados fixos)
+    assert all(w.startswith("painel fixo na parede") for w in s.warnings), s.warnings
     boxes = [(i.label, i.bbox) for i in s.instances]
     found = sum(any(l == lab and (_box_iou(b, bb) >= 0.5 or _contains(bb, b)) for l, bb in boxes)
                 for lab, b in NICE_PROTOTYPE)

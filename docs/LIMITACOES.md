@@ -113,3 +113,29 @@ Na PoC V2, a inspeção encontrou mais um defeito: com o fade-in, o sofá passav
 superfícies transparentes do Cycles, e no primeiro quadro da queda aparecia uma mancha opaca. O limite
 agora sobe só nos quadros com fade (teste `tests/test_fade_bounces.py`). Detalhes em
 `docs/poc/v2/RESULTADO.md`.
+
+## 8. Modo B (foto mobiliada → sala vazia → móveis reais voltando), sem SDXL
+
+Estado em 17/11/2026, depois da avaliação final na CPU (`docs/poc/v3/RESULTADO.md`, vídeos e folha de contato
+no mesmo diretório). Notas do crítico: sala vazia 2/10, móveis 6–7/10, animação 5/10, **geral 3/10**.
+
+- **A sala vazia é o gargalo.** O big-lama por plano produz névoa, fantasmas de móveis e quadros, piso com material
+  errado (sob tapetes grandes, o piso de verdade não aparece em lugar nenhum) e pedaços de parede "soltos". O
+  portão de qualidade reprova a placa das 2 fotos de teste e de 33 das 39 fotos mobiliadas da rodada de robustez.
+  **Por padrão, o modo B quase nunca entrega vídeo:** o usuário recebe o aviso e pode gerar mesmo assim. A GPU
+  deixa tudo mais rápido, mas não melhora a placa; a esperança é o refino SDXL (PT-V3-4), ainda não feito.
+- **Peças encostadas com a mesma profundidade** (cadeira na mesa de jantar) podem ficar sem relação de oclusão. A
+  peça de trás entra antes, com o buraco da da frente, e a verificação automática não acusa (ela só confere
+  recortes contra peças marcadas como da frente). Visto na foto de Nice; a inspeção visual continua necessária.
+- **Tapete coberto por móveis desenrola depois deles**, por baixo (a ordem é de frente para trás para nunca mostrar
+  parte escondida do tapete). Fica estranho, mas não mostra nada inventado.
+- Quando não há movimento seguro, a peça **surge de uma vez** (sem fade). Na foto típica, isso acontece com o sofá
+  principal.
+- A **nota do portão** separa mal: todas as reprovadas saem com 59 e uma placa ruim pode ter nota sem teto 90.
+- Exatidão: o último quadro é a foto **na resolução do vídeo** (byte a byte nos quadros mestres e no MKV de
+  auditoria); o MP4 tem perda (PSNR 47–50 dB medido). Fotos menores que a resolução do perfil não são ampliadas
+  pelo produto (a demonstração de 1440 px ampliou de propósito fotos de 960 e 1280 px).
+- **Tempo medido na CPU** (4 núcleos, 1440 px): 156–163 s do clique ao MP4, 70–75% na sala vazia (3 tentativas do
+  portão). Na RTX 5070 Laptop, a estimativa é de 20–40 s; **não medido**.
+- Corrigido nesta rodada: com a tentativa "máscara ampla" do portão, o contorno dos móveis (pés das cadeiras) voltava
+  da foto mobiliada para a sala vazia (4,9% da imagem na Nice) sem que o portão visse.

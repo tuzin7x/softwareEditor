@@ -386,6 +386,14 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
   vistos a olho (fantasma da cama, mancha escura no piso, quadro inventado); fotos vazias foram para o modo A.
   O big-lama dá o mesmo resultado na GPU, então **o modo B hoje quase nunca entrega por padrão**: a qualidade da
   placa (PT-V3-4, SDXL) é o próximo gargalo, não o portão.
+- **Avaliação final (17/11/2026, `docs/poc/v3/RESULTADO.md`):** vídeos de demonstração a 1440 px nas 2 fixtures
+  (`modo_b_tipica.mp4`, `modo_b_nice.mp4`, só com "gerar mesmo assim") e folha `modo_b_folha.jpg`. Notas: sala
+  vazia 2, móveis 6–7, animação 5, **geral 3/10 nas duas** (aceite pedia ≥ 7 na típica: **não atingido**). Tempo
+  medido na CPU: 156 s (típica) e 163 s (Nice); GPU estimado 20–40 s. Verificações independentes no MKV: fim =
+  foto e início = placa byte a byte, sem morph. Refutado: "0 pixel oculto visível" — na Nice a mesa de jantar entra
+  antes das cadeiras com o buraco delas (grafo de oclusão sem relação quando a profundidade empata; a verificação não
+  vê). Corrigido: o anel das camadas agora segue a dilatação da máscara "ampla" do portão (antes, o contorno dos
+  móveis voltava da foto para a sala vazia, 4,9% da imagem na Nice).
 
 ### PT-V3-9: Modo A com o motor novo
 - Passe Z do layout (Blender só Z), `gen/sdxl.py` em modo inserção (máscara = pegadas + sombras), 3 sementes + nota, hires pass nos móveis, recolocação por máscara, camadas com a foto vazia como placa, completamento SDXL da parte oculta só para peças que caem e fallback v2.
@@ -407,13 +415,20 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
 
 **Ordem e dependências:** 0 → 1 → 2 → 3 → 5 → 6 → 7 → 8 (o **modo B entregável sem SDXL** já sai aqui) → 4 (refino SDXL) → 9 (modo A) → 10.
 
+**Estado (17/11/2026):** PT-V3-0 a PT-V3-8 implementados e testados na CPU. O modo B **funciona de ponta a ponta,
+mas não é vendável sem uma sala vazia melhor**: o portão reprova a placa em quase todas as fotos (2 de 2 fixtures,
+33 de 39 fotos mobiliadas variadas). Próximos passos, em ordem: (1) medir na RTX 5070 Laptop do usuário (§7.2); (2) PT-V3-4
+(refino SDXL só no piso e nos vãos) e reavaliar com a mesma folha; (3) relação de oclusão para peças grandes
+encostadas com a mesma profundidade (mesa × cadeira) e uma verificação de "buraco" que não dependa do grafo;
+(4) nota contínua no portão. PT-V3-9 e PT-V3-10 não começaram.
+
 ---
 
 ## 7. Riscos abertos e o que validar na GPU do usuário
 
 ### 7.1 Riscos
 
-1. **Qualidade da sala vazia:** é o 1º quadro, o que o espectador vê primeiro. Hoje está em 3/10 na foto difícil. Pisos polidos ou estampados e peças grandes encostadas na parede são os piores casos. Mitigações: §3.2, regiões protegidas e seleção de sementes. Pode ser preciso aceitar "imagem ilustrativa".
+1. **Qualidade da sala vazia:** é o 1º quadro, o que o espectador vê primeiro. Hoje está em 2/10 nas 2 fixtures (avaliação final do PT-V3-8). Pisos polidos ou estampados e peças grandes encostadas na parede são os piores casos. Mitigações: §3.2, regiões protegidas e seleção de sementes. Pode ser preciso aceitar "imagem ilustrativa".
 2. **Invenções do SDXL** (porta, tomada, vista de janela): risco comercial e jurídico (CDC, art. 37). Mitigação: SDXL só no piso, regiões protegidas e descarte automático de sementes com objetos novos.
 3. **Partes ocultas:** sem completamento amodal comercial (pix2gestalt é NC). Depende das regras de coreografia. No modo A, o completamento é por SDXL e pode alucinar.
 4. **Embutido vs solto:** o ADE20K não distingue. Painéis, prateleiras e armários podem ser removidos ou mantidos errado.

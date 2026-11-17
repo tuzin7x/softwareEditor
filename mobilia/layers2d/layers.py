@@ -327,7 +327,11 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
         raise ValueError("placa difere da foto fora da máscara de remoção")
     n = len(pieces)
     if ring_px is None:
-        ring_px = max(3, int(rp.CORE_DILATE * diag)) + 2
+        # a dilatação que a placa usou de fato (a tentativa "mascara_ampla" do portão usa 2,5×): com a constante,
+        # a faixa extra da máscara larga voltava a ser a foto na sala vazia (contorno de pés de cadeira no piso)
+        info = getattr(plate_res, "info", None) or {}
+        dil = float(info.get("dilatacao_nucleo") or rp.CORE_DILATE)
+        ring_px = max(3, int(dil * diag)) + 2
 
     # --- alpha limitado à máscara de remoção (fora dela a placa já é a foto) ---------------------------------
     A, hard, outside = [], [], 0.0

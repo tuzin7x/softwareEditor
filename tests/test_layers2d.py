@@ -287,3 +287,26 @@ def test_fixture_paint_order_supports(room_fixture):
     assert order[0] == "rug" and order[1] == "rug"
     sup = {st.layers[i].label: st.layers[j].label for i, j in st.supports.items()}
     assert sup.get("pillow") == "bed" and sup.get("vase") == "table"
+
+
+def test_wide_mask_band_is_not_written_back_to_the_empty_plate():
+    """Tentativa "mascara_ampla" do portão (núcleo dilatado 2,5×): a faixa larga em volta da peça faz parte do anel
+    dela. Antes o anel usava a dilatação padrão, e o resto da faixa voltava a ser a foto mobiliada na sala vazia
+    (contorno escuro dos pés das cadeiras no piso de Nice)."""
+    photo, res, pieces = _scene(shadow=False)
+    diag = float(np.hypot(H, W))
+    dil = rp.CORE_DILATE * rp.GATE_WIDE_DILATE * 4          # faixa bem mais larga que o anel padrão
+    wide = rp.core_mask(pieces, (H, W), dil)
+    plate = photo.copy()
+    plate[wide] = np.uint8(90)                               # "inpainting" bem diferente da foto
+    narrow_ring = max(3, int(rp.CORE_DILATE * diag)) + 2
+    wide_res = SimpleNamespace(plate=plate, mask=wide, shadow=np.zeros((H, W), bool),
+                               effect=np.zeros((H, W), bool), info={"dilatacao_nucleo": dil})
+    st = L.build_layers(photo, wide_res, pieces)
+    assert st.corrected.sum() == 0
+    assert np.array_equal(L.composite(st, []), plate)
+    assert np.array_equal(L.composite(st, range(len(st.layers))), photo)
+    # sem a informação (placa antiga), o comportamento padrão continua: a faixa além do anel é corrigida
+    old = SimpleNamespace(plate=plate, mask=wide, shadow=wide_res.shadow, effect=wide_res.effect)
+    st_old = L.build_layers(photo, old, pieces)
+    assert st_old.corrected.sum() > 0 and narrow_ring < int(dil * diag)
