@@ -51,6 +51,12 @@ AMBIGUOUS_CLASSES = frozenset({
     "cabinet", "shelf", "wardrobe", "chest of drawers", "bookcase", "buffet", "case", "mirror",
 })
 REMOVABLE_CLASSES = LOOSE_CLASSES | BUILTIN_CLASSES | AMBIGUOUS_CLASSES
+# Ficam sempre na foto (§3.6): o SAM não pode "comer" estes pixels fora da máscara do OneFormer (ex.: a caixa da
+# cama pega a cortina ao lado e o SAM a inclui com IoU ainda aceitável).
+PROTECTED_CLASSES = frozenset({
+    "curtain", "blind", "window", "door", "double door", "screen door", "sconce", "chandelier", "light", "fan",
+    "fireplace", "radiator", "stairs", "stairway", "step", "bannister", "rail", "column", "person", "animal",
+})
 # Peças "grandes" que, sozinhas, já caracterizam a foto como mobiliada.
 MAJOR_CLASSES = frozenset({
     "bed", "sofa", "armchair", "table", "coffee table", "desk", "chair", "swivel chair", "bench", "wardrobe",
@@ -67,6 +73,7 @@ MIN_AREA_SEMANTIC = 0.002
 SPLIT_MIN_PART = 0.001          # parte mínima para separar instância panóptica fundida
 SPLIT_MIN_GAP = 0.04            # distância mínima entre as partes (fração da diagonal)
 SAM_MIN_IOU = 0.6
+SAM_MAX_GROW = 0.015            # o SAM só acrescenta pixels até esta distância da máscara do OneFormer (fração da diagonal)
 ALPHA_CUT = 0.05
 MERGE_HULL_COVER = 0.7
 MERGE_VERTICAL_OVERLAP = 0.5
@@ -356,9 +363,17 @@ def _cleanup(prob: np.ndarray, m0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return hard, alpha
 
 
-def refine(rgb: np.ndarray, cands: Sequence[Candidate], sam: SamFn | None) -> list[tuple[np.ndarray, np.ndarray,
-                                                                                     float | None, bool]]:
-    """Para cada candidata: (máscara dura, alpha, IoU do SAM, SAM usado?)."""
+def refine(rgb: np.ndarray, cands: Sequence[Candidate], sam: SamFn | None,
+           protected: np.ndarray | None = None) -> list[tuple[np.ndarray, np.ndarray, float | None, bool]]:
+    """Para cada candidata: (máscara dura, alpha, IoU do SAM, SAM usado?).
+
+    Quando o SAM é aceito, o que ele acrescenta é limitado a uma faixa em volta da máscara do OneFormer
+    (``SAM_MAX_GROW``) e nunca entra em ``protected`` (cortina, janela, porta... da semântica): sem isso a
+    cama "levava" a cortina e uma auréola de carpete, que a placa teria de inventar."""
+    import cv2
+
+    grow = max(4, int(round(SAM_MAX_GROW * float(np.hypot(*rgb.shape[:2])))))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1))
     probs: list[np.ndarray | None] = [None] * len(cands)
     if sam is not None and cands:
         boxes = []
@@ -379,7 +394,12 @@ def refine(rgb: np.ndarray, cands: Sequence[Candidate], sam: SamFn | None) -> li
                 if biou is None or iou > biou:
                     best, biou = p[k], iou
         used = best is not None and biou >= SAM_MIN_IOU
-        if not used:
+        if used:
+            allowed = cv2.dilate(m0.astype(np.uint8), kernel) > 0
+            if protected is not None:
+                allowed &= ~protected | m0
+            best = np.where(allowed, best, 0.0).astype(np.float32)
+        else:
             best = ndimage.gaussian_filter(m0.astype(np.float32), 1.0)
             best[m0] = np.maximum(best[m0], 0.51)
         hard, alpha = _cleanup(best, m0)
@@ -705,7 +725,10 @@ def detect_instances(rgb8: np.ndarray, seg=None, pan: PanopticResult | None = No
             sam = None
             warnings.append("SAM 2.1 não instalado: bordas das peças vêm só do OneFormer")
     t = time.perf_counter()
-    refined = refine(rgb8, cands, sam) if cands else []
+    names = _label_lut(seg.id2label)
+    prot_ids = [k for k, n in names.items() if n in PROTECTED_CLASSES]
+    protected = np.isin(seg.labels, prot_ids) if prot_ids else None
+    refined = refine(rgb8, cands, sam, protected) if cands else []
     timings["sam"] = time.perf_counter() - t
     insts = []
     for k, (c, (hard, alpha, iou, used)) in enumerate(zip(cands, refined)):

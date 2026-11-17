@@ -171,6 +171,27 @@ def test_sam_fallback_when_iou_low_and_accept_when_good():
     assert alpha[m0].min() > 0.5 and alpha.dtype == np.float32
 
 
+def test_sam_growth_is_limited_and_never_takes_protected_pixels():
+    """Revisão: na foto do quarto de hotel o SAM da cama pegava a cortina e uma auréola de carpete (IoU 0,68,
+    aceito). O que o SAM acrescenta fica numa faixa em volta do OneFormer e nunca em cortina/janela/porta."""
+    shape = (200, 200)
+    m0 = _rect(shape, 60, 60, 140, 140)
+    cand = ri.Candidate("bed", 7, "panoptic", 0.9, m0)
+    prob = np.zeros((3,) + shape, np.float32)
+    prob[0] = _rect(shape, 60, 60, 140, 140) * 0.99
+    prob[0][60:140, 140:155] = 0.99          # "cortina" colada à direita
+    prob[0][140:170, 60:140] = 0.99          # "auréola" no piso, 30 px abaixo
+    protected = np.zeros(shape, bool)
+    protected[:, 140:] = True                # a semântica diz cortina à direita
+    rgb = np.zeros(shape + (3,), np.uint8)
+    (hard, alpha, iou, used), = ri.refine(rgb, [cand], lambda r, b: [prob], protected)
+    assert used
+    assert not hard[:, 140:].any() and not (alpha[:, 141:] > 0).any()    # cortina intacta
+    grow = max(4, int(round(ri.SAM_MAX_GROW * np.hypot(*shape))))
+    assert hard[140:140 + grow - 1, 80].all() and not hard[140 + grow + 2:, :].any()
+    assert hard[m0].all()
+
+
 def test_cleanup_keeps_largest_and_confirmed_legs_and_cuts_low_alpha():
     shape = (120, 160)
     body = _rect(shape, 40, 30, 100, 80)
