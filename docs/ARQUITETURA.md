@@ -2,6 +2,11 @@
 
 > Documento vivo. Decisões tomadas e **validadas com testes reais** neste repositório.
 > A pesquisa comparativa de tecnologias está em [`PESQUISA_TECNOLOGIAS.md`](PESQUISA_TECNOLOGIAS.md).
+>
+> **Estado atual (17/11/2026):** o fluxo principal do 7xAi passou a ser o **redesenho de ambientes por IA da
+> imagem inteira** (seção 11), com a interface e o registro de módulos descritos na seção 12. Os modos A e B das
+> seções 1 a 10 continuam no programa como **legado/avançado** ("vídeo de montagem"), e o texto dessas seções
+> continua valendo para eles.
 
 ## 1. Objetivo e regra absoluta
 
@@ -86,6 +91,8 @@ foto.jpg ─┬─► [Preparo]   EXIF, placa imutável na resolução do vídeo
 Código: `mobilia/` — `analysis/` (geometria, segmentação, sala), `layout/` (catálogo, solver, estilo),
 `assets/` (Poly Haven, procedurais), `render/` (coreografia, especificação da cena, worker do Blender),
 `composite/`, `video/`, `pipeline.py`, `cli.py`, `ui/` (PySide6), `hardware.py`.
+Fluxo principal (seção 11): `design/` (redesenho por IA) e `video/showcase.py` (vídeo antes e depois). Módulos
+opcionais da janela (seção 12): `ui/modules.py` e `modules/`.
 
 ## 3. Hardware e perfis
 
@@ -726,3 +733,93 @@ A melhoria sugerida por essa pesquisa — material de catcher com `Light Path �
   report.json             preservação, PSNR do encode, telemetria completa (tempos, GPU, render)
   encode.log, interface.log  registros do FFmpeg e da saída do motor (vão no zip de diagnóstico)
 ```
+
+## 11. Redesenho de ambientes por IA (fluxo principal)
+
+Entrada: uma foto, uma **função** e um **estilo**. A função "texto" usa uma descrição em vez da foto. Saída: até 4
+versões da mesma sala, mais `antes.jpg` (a foto no mesmo tamanho) e `design.json`. As chaves de funções, estilos,
+ambientes e eventos ficam em `mobilia/design/presets.py`. A interface tem uma cópia delas (`CATALOG` em
+`mobilia/ui/app.py`), e um teste confere que as duas são iguais.
+
+```
+foto ─► tamanho de trabalho (lado maior 1024 na GPU / 768 na CPU, múltiplos de 64)
+     ─► análise local: profundidade → mapa de controle; segmentação → janelas/portas (+ teto no "Mobiliar")
+     ─► difusão local guiada pela profundidade (pipeline em cache, N sementes, paleta do estilo girando)
+     ─► trava da arquitetura (design/archlock.py): aberturas originais por cima, rampa suave, casamento de cor
+     ─► escolha automática (design/quality.py): gera candidatos a mais e descarta sala vazia ou janela inventada
+     ─► <saída>/<nome>_<i>.jpg + antes.jpg + design.json
+```
+
+| Arquivo | O que faz |
+|---|---|
+| `design/presets.py` | funções, estilos, ambientes, eventos e textos de geração |
+| `design/engine.py` | carrega o pipeline uma vez. Na GPU de 8 GB, os codificadores de texto ficam na CPU (cerca de 8 a 11 s por imagem numa RTX 5070 Laptop) |
+| `design/api.py` | `redesign`, `edit_area` (só a área pintada muda; o resto é pixel a pixel a foto) e `text_to_design` |
+| `design/upscale.py` | "Ampliar 4K": ampliação ×4 em blocos sobrepostos, reduzida para 3840 px |
+| `video/showcase.py` | "Vídeo antes e depois", descrito abaixo |
+
+Detalhes do vídeo antes e depois:
+
+- **Roteiro**, a 30 fps e com 10 a 20 s:
+  - a foto original com aproximação lenta;
+  - uma linha vertical revela a primeira versão;
+  - *crossfades* entre as versões;
+  - rótulos "Antes" e "Depois" e a marca 7xAi.
+- **Formatos:** 16:9 (1920×1080) ou 9:16 (1080×1920).
+- **Codificação:** H.264 yuv420p.
+
+CLI: `design`, `ampliar` (também `upscale`) e `showcase`, todos com `--json` para eventos de progresso. A
+**qualidade do redesenho ainda está em avaliação**. O próximo passo planejado é "Esvaziar ambiente", feito por este
+motor, para servir de sala vazia ao modo B (seção 4.1). Licenças dos modelos: só uso comercial permitido
+([`LICENCAS_V3.md`](LICENCAS_V3.md)).
+
+## 12. Interface principal e registro de módulos
+
+**Janela principal** (`ui/app.py`, `MainWindow`):
+
+- **Cabeçalho:** marca, frase, botão "Avançado (vídeo de montagem, legado)" (abre `ui/legacy.py`) e selo de
+  privacidade.
+- **Stepper:** Foto → Função → Ajustes → Gerar → Resultados.
+- **Corpo:**
+  - à esquerda, um "palco" em `QStackedWidget`: soltar foto, texto, progresso, resultado e máscara;
+  - à direita, 7 páginas: foto, função, estilo, progresso, resultados, editar e vídeo.
+
+  `go(page)` troca as duas pilhas e protege os estados: com o motor ocupado vai para o progresso, e sem resultado
+  não abre resultados nem vídeo.
+- **Modo compacto** abaixo de 790 px de altura, para telas de 1280×720 e 1366×768.
+
+**Motor fora do processo** (`ui/runner.py`, `CliTask`):
+
+- Cada ação roda `python -m mobilia.cli <comando> --json` num subprocesso. No `.exe`, o comando usa o Python
+  embutido do motor, instalado no primeiro uso.
+- Linhas JSON viram sinais Qt:
+  - `progress{stage, fraction, message}`;
+  - `preview{path, index}`;
+  - `log`;
+  - `done{...}`;
+  - `error{message, detail}`.
+- Cancelar mata a árvore de processos.
+- A interface **não importa** numpy, PIL nem torch: o `.exe` (`packaging/7xai.spec`) leva só PySide6. Um teste
+  verifica isso por AST.
+
+**Registro de módulos** (`ui/modules.py` + pacote `modules/`), o ponto de extensão para abas novas, como o futuro
+Lead Finder:
+
+- Cada subpacote de `mobilia/modules/` chama `register(ModuleSpec(id, title, factory, order, tooltip))` ao ser
+  importado.
+- `mobilia.modules.discover()` importa os subpacotes. Uma falha vai para `modules.failed` e o subpacote é
+  ignorado.
+- `ModuleHost` é o único contato com a janela. O gancho em `app.py` tem 5 linhas: `ModuleHost(self)`,
+  `design_layout(outer)`, `add_nav(head, tag)` e `set_compact(...)`.
+  - **Sem módulos:** `design_layout` devolve o próprio layout principal, e a janela é idêntica à anterior.
+  - **Com módulos:**
+    - o cabeçalho ganha um seletor (`Segmented`: "Ambientes" + um botão por módulo), que substitui a frase;
+    - o conteúdo vira um `QStackedWidget`, em que a página 0 é o fluxo de redesenho;
+    - cada módulo tem sua página, criada na 1ª abertura;
+    - `on_show()` e `on_hide()` são opcionais;
+    - o botão "Avançado" só aparece em "Ambientes";
+    - um redesenho em andamento continua em segundo plano.
+- **Empacotamento:** `collect_submodules("mobilia.modules")` em `hiddenimports`.
+- **Testes:** `tests/test_modules.py`.
+- **Regras para quem cria módulos** (arquivos permitidos e proibidos, dados, LGPD):
+  [`PARALLEL_DEVELOPMENT.md`](PARALLEL_DEVELOPMENT.md).

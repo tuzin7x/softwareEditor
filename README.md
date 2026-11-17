@@ -1,128 +1,157 @@
 # 7xAi
 
-**7xAi** é um software Windows (`.exe`) que transforma **uma foto de um imóvel** em um **vídeo cinematográfico
-de decoração**, com a câmera travada. Tudo roda **localmente na sua GPU NVIDIA**, sem APIs pagas. A interface
-pede só a foto e o tipo de ambiente; o modo é **detectado pela foto**:
+O **7xAi** é um programa para Windows (`.exe`) de **redesenho de ambientes por IA**. A partir de **uma única foto**
+de um imóvel, ele gera novas versões do mesmo ambiente, com móveis, materiais e estilo novos, e monta um **vídeo
+"antes e depois"** pronto para redes sociais.
 
-- **foto vazia (modo A):** móveis 3D surgem e se montam progressivamente **dentro da foto original**;
-- **foto mobiliada (modo B):** o vídeo começa com a **sala vazia** (montada por trás, não aparece a remoção) e os
-  **mesmos móveis da foto**, recortados dos pixels reais, entram um a um com animação até o vídeo terminar
-  **idêntico à foto**. Um **portão de qualidade** dá nota à sala vazia; se ela reprovar em todas as tentativas,
-  nenhum MP4 é entregue e a tela mostra o motivo, com as opções *gerar mesmo assim*, *modo A* ou *outra foto*.
+Tudo roda **localmente, na placa de vídeo NVIDIA do usuário**, sem APIs pagas. A foto não sai do computador.
 
-> **Regra absoluta:** fora da máscara de remoção ou de inserção, todo quadro mestre é byte a byte a foto.
-> **Modo A (foto vazia):** o vídeo começa na foto exata; só os móveis/decoração (e as sombras de contato
-> que eles projetam) são adicionados, em camadas 3D independentes. **Modo B (foto mobiliada, V3):** o
-> software esvazia a sala por trás (a sala vazia contém pixels gerados por inpainting), os móveis reais
-> da própria foto voltam um a um, e o **último quadro é idêntico à foto**. Isso é **verificado quadro a
-> quadro**, e o relatório informa a área gerada. Detalhes em `docs/ARQUITETURA.md` §1.
+> **Estado (17/11/2026):** a reformulação para o redesenho por IA está **em avaliação de qualidade** e ainda não
+> foi aprovada para lançamento. O desenvolvimento acontece na branch `claude/sweet-bohr-4uzml2`. A `main` está
+> parada de propósito (ver "Política de branches").
 
-## Como funciona (resumo)
+## Funções
 
-1. **Análise com IA local:** profundidade métrica e câmera (MoGe-2) e segmentação de piso, paredes,
-   janelas e portas (OneFormer). Disso sai a reconstrução 3D da sala.
-2. **Layout automático:** a IA escolhe os móveis adequados ao tipo de ambiente e ao estilo/paleta da
-   foto, e os posiciona seguindo regras de design de interiores e de enquadramento.
-3. **Render 3D (Blender Cycles, OptiX):** móveis 3D reais com a câmera casada à foto, sombras e
-   oclusão coerentes e luz calibrada pela própria foto.
-4. **Animação de montagem:** tapete, móveis grandes, plantas, quadros e decoração entram peça a peça,
-   com física de queda e acomodação e motion blur.
-5. **Composição exata + MP4:** as camadas entram sobre a foto original e o vídeo sai em H.264 de alta
-   qualidade.
+| Função | O que faz |
+|---|---|
+| Mudar estilo | mesma sala e mesma arquitetura, com móveis e decoração em outro estilo |
+| Reforma completa | troca também pisos, revestimentos e acabamentos |
+| Redesign simples | mudança leve, que mantém a sala reconhecível |
+| Mobiliar ambiente vazio | mobília completa numa sala vazia |
+| Editar área | o usuário pinta uma região e só ela muda; o resto fica idêntico à foto |
+| Fachada | redesenho da parte externa |
+| Decoração de evento | aniversário, casamento, Natal, festa infantil, chá de bebê, réveillon |
+| Texto para ambiente | cria um ambiente a partir de uma descrição, sem foto |
 
-Detalhes: [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) · pesquisa de tecnologias:
-[`docs/PESQUISA_TECNOLOGIAS.md`](docs/PESQUISA_TECNOLOGIAS.md) · limitações conhecidas:
-[`docs/LIMITACOES.md`](docs/LIMITACOES.md).
+São 14 estilos: moderno, contemporâneo, escandinavo, minimalista, industrial, clássico, luxo, boho, japandi,
+rústico, costeiro, tropical brasileiro, mid-century e fazenda moderna. Também há 8 tipos de ambiente.
 
-## Gerar e instalar no Windows (ícone 7xAi na Área de Trabalho)
+Cada pedido gera até 4 versões. Janelas e portas originais são recolocadas por cima da imagem gerada, e um controle
+automático descarta as versões fracas.
 
-1. Instale o [Python 3.13](https://www.python.org/downloads/) (marque *Add python.exe to PATH*).
-2. Dê dois cliques em **`GERAR_EXE.bat`**, na pasta do projeto. Leva uns 5 a 10 minutos.
+Depois de gerar:
+
+- **Ampliar 4K:** a versão escolhida sai em 3840 px.
+- **Vídeo antes e depois:** a foto original se transforma nas versões novas, com movimento de câmera lento, em
+  **16:9** (1920×1080) ou **9:16** (1080×1920, Reels e Stories).
+
+**Modos legado e avançado:** pelo botão "Avançado (vídeo de montagem, legado)" continuam disponíveis os vídeos de
+montagem antigos:
+
+- **modo A:** móveis 3D entram numa foto vazia;
+- **modo B:** a foto mobiliada vira sala vazia, os móveis da própria foto entram um a um e o vídeo termina
+  idêntico à foto.
+
+Eles estão documentados em [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md), seções 1 a 10.
+
+**Desempenho medido:** cerca de 8 a 11 s por imagem numa RTX 5070 Laptop de 8 GB.
+
+**Licenças:** só usamos modelos de IA com licença que permite uso comercial. A lista está em
+[`docs/LICENCAS_V3.md`](docs/LICENCAS_V3.md).
+
+## Instalar e gerar o `.exe` no Windows
+
+1. Instale o [Python 3.13](https://www.python.org/downloads/) e marque *Add python.exe to PATH*.
+2. Dê dois cliques em **`GERAR_EXE.bat`**, na pasta do projeto. Leva de 5 a 10 minutos.
 3. No fim aparece *"Pronto! O 7xAi foi instalado e o ícone está na sua Área de Trabalho."*
 
-O script `packaging/build_windows.ps1` gera `dist\7xAi\7xAi.exe` (PyInstaller, `packaging/7xai.spec`),
-roda o autoteste, instala o programa em `%LOCALAPPDATA%\Programs\7xAi` e cria o atalho **7xAi** na
-Área de Trabalho e no Menu Iniciar. Atalhos antigos do `MobiliaStudio.exe` são removidos. Se o 7xAi
-estiver aberto, feche-o antes de rodar de novo.
+O `GERAR_EXE.bat` chama `packaging/build_windows.ps1`, que:
 
-No primeiro uso, o 7xAi instala o motor de IA e renderização (~7 GB, uma única vez) em
-`%LOCALAPPDATA%\MobiliaStudio`. A pasta mantém o nome antigo de propósito: quem já tinha o motor
-instalado não baixa nada de novo.
+- gera `dist\7xAi\7xAi.exe` com o PyInstaller e o arquivo `packaging/7xai.spec`;
+- roda o autoteste;
+- instala o programa em `%LOCALAPPDATA%\Programs\7xAi`;
+- cria o atalho **7xAi** na Área de Trabalho e no Menu Iniciar.
 
-Para instalar em **outros PCs**, instale o [Inno Setup 6](https://jrsoftware.org/isdl.php) e rode o
-`GERAR_EXE.bat` de novo. Ele também gera `dist\7xAi-Setup-<versão>.exe`, que instala o programa e cria o
-ícone na Área de Trabalho.
+Com o [Inno Setup 6](https://jrsoftware.org/isdl.php) instalado, o script também gera
+`dist\7xAi-Setup-<versão>.exe`, o instalador para outros PCs.
 
-O ícone (`packaging/assets/icon.ico`, de 16 a 256 px) e os SVGs da marca são gerados dos vetores com
-`python scripts/make_icon.py`.
+No primeiro uso, o 7xAi instala o motor de IA (vários GB, uma única vez) em `%LOCALAPPDATA%\MobiliaStudio`. A
+pasta mantém o nome antigo de propósito, para reaproveitar um motor que já esteja instalado.
 
-## Uso (linha de comando / desenvolvimento)
+**Pelo GitHub Actions**, o workflow `.github/workflows/build-windows.yml` gera o `.exe` e o instalador a cada push
+em `claude/**`. Ele publica uma *prerelease* quando a mensagem do commit tem `[release]` ou quando é disparado
+manualmente com "publicar" marcado.
+
+O ícone (`packaging/assets/icon.ico`) e os SVGs da marca são gerados com `python scripts/make_icon.py`.
+
+## Uso pela linha de comando (desenvolvimento)
 
 ```bash
 python -m mobilia.cli hardware
+python -m mobilia.cli design --photo sala.jpg --funcao mudar_estilo --estilo japandi --ambiente sala --n 4 --out-dir saida/
+python -m mobilia.cli ampliar --image saida/<versão>.jpg --out saida/<versão>_4k.jpg
+python -m mobilia.cli showcase --before saida/antes.jpg --after saida/<versão1>.jpg saida/<versão2>.jpg --out antes_depois.mp4 --format 9x16
+python -m mobilia.cli run --photo sala.jpg --room sala --out montagem.mp4     # modo legado A/B
 ```
 
-```bash
-python -m mobilia.cli run --photo minha_sala.jpg --room sala --out sala_decorada.mp4
-```
+`python -m mobilia.cli <comando> --help` lista as opções de cada comando. A interface usa esses mesmos comandos, num
+processo separado, com eventos JSON (`--json`).
 
-Tipos de ambiente: `sala`, `quarto`, `cozinha`, `banheiro`, `escritorio`, `sala_jantar`.
-Qualidade: `--quality previa|final|auto` (auto = final na GPU, prévia na CPU).
-Modo: `--mode auto|A|B` (padrão `auto`: foto vazia → A, mobiliada → B). No modo B, `--aceitar-placa-fraca`
-gera o vídeo mesmo com a sala vazia reprovada pelo portão (o aviso fica no `report.json`). Com
-`MOBILIA_MODO_B_MKV=1` o modo B grava também `auditoria.mkv` (sem perdas) e confere cada quadro byte a byte.
-
-Para conferir o hardware no Windows sem instalar nada, use `scripts/diagnostico_hardware.ps1`.
-
-## Prova de conceito V2 (resultado real, CPU)
-
-Mesma foto, pipeline do `docs/PLANO_V2.md`: render em camadas, controle de orçamento, luz da foto,
-sombra de contato, entradas novas e narrativa do designer. Resultado em
-[`docs/poc/v2/RESULTADO.md`](docs/poc/v2/RESULTADO.md), vídeo
-[`docs/poc/v2/sala_stafford_v2.mp4`](docs/poc/v2/sala_stafford_v2.mp4) e folha de contato
-[`docs/poc/v2/v2_folha_contato.jpg`](docs/poc/v2/v2_folha_contato.jpg).
-
-- **Preservação:** 251/251 quadros bit a bit idênticos à foto fora dos móveis e das sombras; PSNR do
-  MP4 43,2 dB no fundo.
-- **Tempo (CPU, 4 threads, 960×720):** 1 175 s do início ao MP4 verificado, contra 6 768 s só de
-  render na V1. 169 renders, 76 quadros reaproveitados, 20 só de foto. Estimativa na RTX 5070 Laptop
-  em 1920×1440: ≈ 105 s (premissa no `RESULTADO.md`).
-
-## Prova de conceito V1 (resultado real)
-
-Foto de teste de uma sala vazia (960×720), ambiente `sala`, tudo em **CPU** (sem GPU no ambiente de
-desenvolvimento): [`docs/poc/sala_stafford_poc.mp4`](docs/poc/sala_stafford_poc.mp4) (10,5 s, 251
-quadros), quadros-chave em [`docs/poc/quadros_sala/`](docs/poc/quadros_sala/), folha de contato em
-[`docs/poc/sala_stafford_folha_contato.jpg`](docs/poc/sala_stafford_folha_contato.jpg) e relatório
-completo em [`docs/poc/sala_stafford_report.json`](docs/poc/sala_stafford_report.json).
-
-- 13 peças escolhidas e posicionadas automaticamente (sofá, poltrona, mesa de centro, mesa lateral,
-  tapete, luminária de piso, planta, 2 quadros, almofadas, vaso, livros, tigela de madeira).
-- **Preservação:** 251/251 quadros bit a bit idênticos à foto fora dos móveis e das sombras; os 20
-  quadros iniciais, antes da primeira peça, são idênticos à foto inteira.
-- **Vídeo:** PSNR do MP4 decodificado entre 43,2 e 44,3 dB (H.264 CRF 14, 2 MB).
-- **Tempo (CPU, 4 threads):** análise 19 s (modelos já baixados), layout 4 s, render 6 768 s
-  (176 de 251 quadros renderizados; o resto é reaproveitado), composição + encode 47 s.
-
-Para refazer só o vídeo (por exemplo, depois de ajustar a composição) sem renderizar de novo:
-
-```bash
-python -m mobilia.cli recompor --work-dir <pasta_de_trabalho>
-```
+Para preparar um ambiente Linux de desenvolvimento, use `bash scripts/preparar_ambiente_dev.sh`. Para conferir o
+hardware no Windows, use `scripts/diagnostico_hardware.ps1`.
 
 ## Testes
 
 ```bash
-python -m pytest -q
+QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"   # suíte rápida
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_ui.py tests/test_modules.py     # interface
 ```
 
-Os testes cobrem a preservação bit a bit na composição, a coreografia, a reconstrução de sala
-sintética, o casamento de câmera no Blender (erro < 0,35 px) e o encode sem desvio de cor.
+Os marcadores ficam em `pyproject.toml`:
 
-## Licenças de terceiros
+| Marcador | O teste precisa de |
+|---|---|
+| `slow` | render ou modelos de IA em CPU |
+| `models` | pesos dos modelos |
+| `gpu` | placa NVIDIA |
 
-- Modelos de IA: MoGe-2 (MIT) e OneFormer ADE20K (MIT), baixados no primeiro uso.
-- Assets 3D: Poly Haven (CC0), mais assets procedurais próprios.
-- Blender/bpy (GPL) roda como processo separado; FFmpeg (GPL, build com x264).
-- As fotos de teste em `tests/fixtures/photos` são CC BY-SA (ver `ATRIBUICOES.md`) e servem só para
-  testes.
+O CI (`.github/workflows/tests.yml`) roda a suíte rápida a cada push e a cada Pull Request.
+
+## Estrutura
+
+| Caminho | Conteúdo |
+|---|---|
+| `mobilia/design/` | motor de redesenho por IA: funções, estilos, trava de janelas e portas, escolha automática, ampliar 4K |
+| `mobilia/video/` | vídeo antes e depois (`showcase.py`) e codificação H.264 |
+| `mobilia/ui/` | interface PySide6: janela principal, modo legado, tema, registro de módulos (`modules.py`) |
+| `mobilia/modules/` | módulos opcionais da janela (abas novas). Ainda não há nenhum |
+| `mobilia/analysis/`, `layout/`, `render/`, `composite/`, `removal/`, `layers2d/`, `gen/` | modos legados A e B |
+| `mobilia/cli.py`, `runtime.py`, `bootstrap.py` | linha de comando, caminhos e worker, instalação no primeiro uso |
+| `packaging/`, `GERAR_EXE.bat` | geração do `.exe` e do instalador |
+| `docs/` | arquitetura, planos, licenças, limitações, pesquisa e evidências das provas de conceito (`docs/poc/`) |
+
+## Política de branches e desenvolvimento paralelo
+
+- **`claude/sweet-bohr-4uzml2`** é a **branch de integração**, onde está todo o trabalho atual.
+- **`main`** fica como está até o usuário aprovar uma versão. Hoje ela tem só o commit inicial.
+- **Módulos novos** são feitos em branches `feature/<nome>`, criadas a partir da branch de integração, e voltam
+  por Pull Request para ela. O primeiro planejado é o **7xAi Lead Finder**, em `feature/lead-finder`. Ele não deve
+  mexer no motor de redesenho nem no de vídeo.
+- Não use force-push nem reescreva o histórico.
+
+O guia completo está em [`docs/PARALLEL_DEVELOPMENT.md`](docs/PARALLEL_DEVELOPMENT.md).
+
+## Documentação
+
+- [`RESUME.md`](RESUME.md): estado atual e como retomar o trabalho.
+- [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md): arquitetura do redesenho, da interface e dos modos legados.
+- [`docs/PARALLEL_DEVELOPMENT.md`](docs/PARALLEL_DEVELOPMENT.md): regras para desenvolver módulos em paralelo.
+- [`docs/LICENCAS_V3.md`](docs/LICENCAS_V3.md): licenças dos modelos e dos assets.
+- [`docs/LIMITACOES.md`](docs/LIMITACOES.md): limitações conhecidas, sobretudo dos modos legados.
+- [`docs/PESQUISA_TECNOLOGIAS.md`](docs/PESQUISA_TECNOLOGIAS.md), [`docs/PLANO_V2.md`](docs/PLANO_V2.md),
+  [`docs/PLANO_V3.md`](docs/PLANO_V3.md): pesquisa e planos (histórico).
+- `docs/poc/`: vídeos e quadros das provas de conceito dos modos legados. Os resultados estão em
+  [`docs/poc/v2/RESULTADO.md`](docs/poc/v2/RESULTADO.md) e [`docs/poc/v3/RESULTADO.md`](docs/poc/v3/RESULTADO.md),
+  e a demonstração da v1 em [`docs/poc/sala_stafford_poc.mp4`](docs/poc/sala_stafford_poc.mp4), com quadros em
+  [`docs/poc/quadros_sala/`](docs/poc/quadros_sala/).
+
+## Licenças e dados
+
+- Modelos de IA: só modelos com licença comercial ([`docs/LICENCAS_V3.md`](docs/LICENCAS_V3.md)), baixados no
+  primeiro uso e nunca guardados no repositório.
+- Assets 3D do modo legado: Poly Haven (CC0) e assets procedurais próprios.
+- Blender/bpy (GPL) roda num processo separado. FFmpeg: GPL, build com x264.
+- Fontes Inter: SIL OFL (`mobilia/ui/fonts/OFL.txt`).
+- As fotos de `tests/fixtures/photos` são CC BY-SA (ver `ATRIBUICOES.md`) e servem só para testes.
+- **Fotos e dados de clientes nunca entram no repositório.** O `.gitignore` bloqueia `usuario_*`, `.env`, chaves e
+  bancos locais.

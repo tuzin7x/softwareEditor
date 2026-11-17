@@ -1,3 +1,83 @@
+# RESUME — estado atual (17/11/2026)
+
+## Onde está o trabalho
+
+- **Repositório:** `tuzin7x/softwareEditor` (público). O pacote Python se chama `mobilia` e o produto se chama
+  **7xAi**.
+- **Branch de integração (desenvolvimento):** `claude/sweet-bohr-4uzml2`. Todo o trabalho está nela e foi enviado
+  ao GitHub.
+- **`main`:** tem só o commit inicial e **não foi atualizada de propósito**. A reformulação ainda está em
+  avaliação; a `main` só recebe a integração quando o usuário aprovar uma versão. Detalhes em
+  `docs/PARALLEL_DEVELOPMENT.md`, seção 13.
+- **`ui-7xai`:** branch local antiga, já contida na branch de integração (worktree `/home/user/wt-7xai`). Não
+  mexer.
+- **`feature/lead-finder`** (planejada): será feita por outra conta, a partir do commit de base indicado em
+  `docs/PARALLEL_DEVELOPMENT.md`, e volta por Pull Request para `claude/sweet-bohr-4uzml2`.
+
+### Últimos commits relevantes
+
+| Commit | O que fez |
+|---|---|
+| `d2f929b` | Motor de redesenho de ambientes (mesma sala, móveis e estilo novos) |
+| `5b298a6` | Ajuste no "Ampliar 4K" |
+| `bfbe546` | Vídeo antes e depois e comando `upscale` |
+| `42955e6` | Interface nova, com o redesenho por IA como fluxo principal |
+| commits seguintes | Ponto de extensão de módulos (`mobilia/ui/modules.py`, `mobilia/modules/`), `.gitignore` reforçado e documentação do desenvolvimento paralelo |
+
+## Estado do produto
+
+- **Fluxo principal: redesenho por IA da imagem inteira**, com 8 funções:
+  - mudar estilo, reforma completa, redesign simples e mobiliar vazio;
+  - editar área, fachada, decoração de evento e texto para ambiente.
+
+  Há também **ampliar 4K** e **vídeo antes e depois** em 16:9 e 9:16.
+- **Execução:** é 100% local. Na RTX 5070 Laptop de 8 GB leva cerca de 8 a 11 s por imagem, com os codificadores
+  de texto na CPU para caber em 8 GB.
+- **Qualidade do redesenho:** **em avaliação**, ainda não aprovada pelo usuário.
+- **Legado/avançado:** os modos A (montagem 3D) e B (foto mobiliada → sala vazia → móveis entram → foto exata)
+  continuam disponíveis pelo botão "Avançado".
+- **Interface:** `mobilia/ui/app.py` (janela de redesenho) e `mobilia/ui/legacy.py` (modo legado).
+- **Ponto de extensão:** o registro de módulos permite abas novas sem editar `app.py`. Sem módulos, a janela não
+  muda.
+- **CI:**
+  - `tests.yml` roda os testes rápidos em cada push em `claude/**`, `feature/**` e `main`, e em cada PR;
+  - `build-windows.yml` gera o `.exe` e o instalador em cada push em `claude/**` e publica uma prerelease com
+    `[release]` ou com o disparo manual "publicar".
+- **Build local:** `GERAR_EXE.bat`, que chama `packaging/build_windows.ps1`.
+
+## Em andamento (sessão principal)
+
+- Ajustes de qualidade do redesenho por IA: `mobilia/design/*`, `mobilia/video/showcase.py` e a interface
+  (`app.py`, `design_widgets.py`, `legacy.py`, `runner.py`), com os testes correspondentes.
+
+## Próximos passos
+
+1. Terminar a avaliação de qualidade do redesenho com o usuário e corrigir o que ele apontar.
+2. **"Esvaziar ambiente"** pelo motor de difusão, para servir de sala vazia ao modo B.
+3. Revisar e integrar o Pull Request do Lead Finder (`feature/lead-finder` → `claude/sweet-bohr-4uzml2`), quando
+   chegar. Depois, atualizar README, RESUME e ARQUITETURA.
+4. Com uma versão aprovada pelo usuário: release (`[release]`) e só então atualizar a `main`.
+
+## Como retomar
+
+Numa nova sessão neste repositório, envie:
+
+> Leia RESUME.md e docs/PARALLEL_DEVELOPMENT.md e continue pelos "Próximos passos".
+
+Testes rápidos: `QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"`. Para um
+contêiner novo de desenvolvimento, use `bash scripts/preparar_ambiente_dev.sh`.
+
+## Regras permanentes
+
+- Fotos do usuário (`usuario_*`) e dados pessoais **nunca** vão para o repositório.
+- Use só modelos com licença comercial (`docs/LICENCAS_V3.md`).
+- Não use force-push nem reescreva o histórico.
+- Faça commit só dos arquivos alterados, sem `git add -A`.
+
+---
+
+# Histórico (registros anteriores, mantidos como estavam)
+
 # RESUME — atualizado em 2026-11-16 ~06:00 UTC (passos 1–6 concluídos)
 
 ## Atualização da retomada (16/11)

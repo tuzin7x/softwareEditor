@@ -1,6 +1,8 @@
 name: Testes (CPU)
 on:
   push:
+    branches: ["claude/**", "feature/**", "main"]
+  pull_request:
     branches: ["claude/**", "main"]
   workflow_dispatch:
 jobs:
@@ -17,4 +19,4 @@ jobs:
       - name: Testes rápidos (sem modelos, sem Blender)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q -m "not slow and not models and not gpu" tests/test_compositor.py tests/test_choreography.py tests/test_room.py tests/test_encoder.py tests/test_sunlight.py tests/test_depth_mesh.py tests/test_scene_spec.py tests/test_bootstrap.py tests/test_ui.py
+        run: python -m pytest -q -m "not slow and not models and not gpu" tests/test_compositor.py tests/test_choreography.py tests/test_room.py tests/test_encoder.py tests/test_sunlight.py tests/test_depth_mesh.py tests/test_scene_spec.py tests/test_bootstrap.py tests/test_ui.py tests/test_modules.py
