@@ -313,7 +313,10 @@ class LeadsView(QWidget):
                        lambda errs: self.ctx.status("CNPJ consultado." if not errs else "; ".join(errs[:3])))
 
     def refresh_google(self, lead_id: int) -> None:
-        def go(refs):
+        """Place Details (pago). Respeita o limite mensal e registra cada requisição **antes** de enviá-la, para
+        que cancelamentos e erros no meio do caminho também entrem no uso do mês."""
+        def go(res):
+            refs, used = res
             if not refs:
                 return
             src = self.ctx.sources()["google_places"]
@@ -321,23 +324,32 @@ class LeadsView(QWidget):
             if not ok:
                 QMessageBox.information(self, "Google Places", why)
                 return
+            cap = self.ctx.settings.google_monthly_request_cap
+            if used + len(refs) > cap:
+                QMessageBox.information(self, "Google Places",
+                                        f"Limite mensal atingido ({used} de {cap} requisições). "
+                                        "Ajuste o limite em Configurações.")
+                return
+            price = self.ctx.settings.google_price_per_1000_usd
 
             def work(task):
                 out = []
                 for ref in refs:
                     task.check()
+                    task.emit(("usage", 1))
                     lead = src.details(ref, task)
                     if lead is not None:
                         out.append(lead)
                 return out
 
+            def item(it):
+                if it[0] == "usage":
+                    self.ctx.db.call(lambda s: s.record_usage("google_places", it[1], it[1] * price / 1000))
+
             def done(leads):
-                price = self.ctx.settings.google_price_per_1000_usd
-                self.ctx.db.call(lambda s: (s.record_usage("google_places", len(refs), len(refs) * price / 1000),
-                                            s.ingest(leads), ops.rescore(s, [lead_id])),
-                                 on_done=lambda _r: self.ctx.leads_changed.emit())
-            self._start_bg(work, "Atualizando dados pelo Google (Place Details, consulta paga)…", None, done)
-        self.ctx.db.call(lambda s: s.google_refs(lead_id), on_done=go)
+                self.ctx.db.call(lambda s: s.ingest(leads), on_done=lambda _r: self.ctx.leads_changed.emit())
+            self._start_bg(work, "Atualizando dados pelo Google (Place Details, consulta paga)…", item, done)
+        self.ctx.db.call(lambda s: (s.google_refs(lead_id), s.usage_month("google_places")[0]), on_done=go)
 
     def _rescore_selected(self) -> None:
         ids = self.selected_ids()

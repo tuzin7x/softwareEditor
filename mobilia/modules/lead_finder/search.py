@@ -31,6 +31,16 @@ class Budget:
         return True
 
 
+def _flush_usage(ctx, src: Source, budget: Budget | None, st: dict) -> None:
+    """Emite o uso pago ainda não registrado. A unidade é consumida antes da requisição sair, então uma consulta
+    cancelada no meio também conta (preferimos superestimar a estourar o limite mensal)."""
+    if budget is None or budget.used <= st["paid"]:
+        return
+    n = budget.used - st["paid"]
+    ctx.emit(("usage", src.id, n, n * src.settings.google_price_per_1000_usd / 1000))
+    st["paid"] = budget.used
+
+
 def run_search(ctx, query: SearchQuery, sources: dict[str, Source], google_used_month: int = 0) -> dict:
     summary: dict[str, dict] = {}
     chosen = [sources[s] for s in query.sources if s in sources]
@@ -70,14 +80,13 @@ def run_search(ctx, query: SearchQuery, sources: dict[str, Source], google_used_
                 st["errors"].append(f"{unit.label}: {e}")
                 ctx.emit(("unit_error", src.id, unit.label, str(e)))
             finally:
+                # roda também no cancelamento e em erros inesperados: o que já chegou é entregue e toda
+                # requisição paga já enviada (unidade consumida do limite) é contabilizada no uso do mês
                 if batch:
                     st["found"] += len(batch)
                     ctx.emit(("batch", src.id, batch))
+                _flush_usage(ctx, src, budget, st)
             done += 1
-            if budget is not None and budget.used > st["paid"]:
-                price = src.settings.google_price_per_1000_usd
-                ctx.emit(("usage", src.id, budget.used - st["paid"], (budget.used - st["paid"]) * price / 1000))
-                st["paid"] = budget.used
             if budget is not None and (budget.left_search <= 0 or budget.left_month <= 0):
                 rest = len(units) - units.index(unit) - 1
                 if rest:

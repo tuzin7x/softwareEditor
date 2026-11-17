@@ -280,7 +280,7 @@ def test_csv_formula_injection_is_neutralized(tmp_path):
     out = write_csv(tmp_path / "x.csv", [{"empresa": "=HYPERLINK(\"http://mal\")", "telefone": "+55 11"}],
                     ("empresa", "telefone"), [])
     text = out.read_text(encoding="utf-8-sig")
-    assert "'=HYPERLINK" in text and ";+55 11" in text
+    assert "'=HYPERLINK" in text and ";'+55 11" in text                # "+55 11" não é número puro
 
 
 def test_delete_lead_removes_everything(store):

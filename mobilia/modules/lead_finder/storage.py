@@ -85,14 +85,22 @@ MIGRATIONS: tuple[str, ...] = (
       path TEXT NOT NULL, kind TEXT DEFAULT 'projeto', title TEXT DEFAULT '', linked_at TEXT,
       UNIQUE(lead_id, path));
     """,
+    # v3 — número exato que o usuário confirmou como WhatsApp (antes era deduzido do 1º telefone válido)
+    """
+    ALTER TABLE leads ADD COLUMN wa_user_number TEXT DEFAULT '';
+    UPDATE leads SET wa_user_number = wa_number WHERE wa_user = 'confirmado' AND wa_number != '';
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
-SORTABLE = {
-    "name": "name COLLATE NOCASE", "city": "uf, city COLLATE NOCASE", "address": "address COLLATE NOCASE",
-    "phone": "phone_e164", "whatsapp": "wa_status", "website": "domain", "cnpj": "cnpj",
-    "category": "category", "source": "sources, last_fetched", "priority": "max(priority, priority_user)",
-    "status": "status", "score": "coalesce(score, -1)", "updated": "updated_at", "followup": "next_followup",
+# chave da coluna -> expressões de ordenação (tupla explícita: nunca dividir texto SQL por vírgula, porque
+# funções como max(a, b) e coalesce(x, -1) têm vírgulas nos argumentos)
+SORTABLE: dict[str, tuple[str, ...]] = {
+    "name": ("name COLLATE NOCASE",), "city": ("uf", "city COLLATE NOCASE"), "address": ("address COLLATE NOCASE",),
+    "phone": ("phone_e164",), "whatsapp": ("wa_status",), "website": ("domain",), "cnpj": ("cnpj",),
+    "category": ("category",), "source": ("sources", "last_fetched"), "priority": ("max(priority, priority_user)",),
+    "status": ("status",), "score": ("coalesce(score, -1)",), "updated": ("updated_at",),
+    "followup": ("next_followup",),
 }
 DASH_STAGES = (("found", "Encontradas"), ("qualified", "Qualificadas"), ("contacted", "Contatos iniciados"),
                ("interested", "Interessados"), ("demo", "Demonstrações"), ("negotiation", "Negociações"),
@@ -255,12 +263,13 @@ class Store:
             p1, p2 = p2, p1
         wa_src = ph.normalize(merged.get("whatsapp", ""))
         wa_user = cur["wa_user"]
+        wa_user_num = ph.normalize(cur["wa_user_number"])
         if wa_user == WA_NONE:
             wa_num, wa_status = "", WA_NONE
+        elif wa_user == WA_CONFIRMED and wa_user_num.valid:      # o número que a pessoa confirmou, exatamente
+            wa_num, wa_status = wa_user_num.e164, WA_CONFIRMED
         elif wa_src.valid:
             wa_num, wa_status = wa_src.e164, WA_CONFIRMED
-        elif wa_user == WA_CONFIRMED and (p1.valid or p2.valid):
-            wa_num, wa_status = (p1 if p1.valid else p2).e164, WA_CONFIRMED
         else:
             mobile = p1 if p1.kind == ph.MOBILE else p2 if p2.kind == ph.MOBILE else None
             wa_num, wa_status = (mobile.e164, WA_LIKELY) if mobile else ("", WA_UNKNOWN)
@@ -279,6 +288,16 @@ class Store:
                     last_fetched=max((r["fetched_at"] or "" for r in rows), default=""), updated_at=now_iso())
         sets = ", ".join(f"{k}=?" for k in vals)
         self.con.execute(f"UPDATE leads SET {sets} WHERE id=?", (*vals.values(), lead_id))
+        self._rescore(lead_id)
+
+    def _rescore(self, lead_id: int) -> None:
+        """Pontuação e prioridade automática acompanham os dados: recalculadas a cada mudança de fonte, WhatsApp,
+        edição manual, análise de site ou prazo de guarda (antes só leads sem pontuação eram calculados)."""
+        from .scoring import score_lead
+        row = self.con.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+        total, prio, detail = score_lead(dict(row))
+        self.con.execute("UPDATE leads SET score=?, priority=?, score_detail=? WHERE id=?",
+                         (int(total), int(prio), _j(detail), lead_id))
 
     # ------------------------------------------------------------------------------------ consulta
     def _where(self, f: dict) -> tuple[str, list]:
@@ -318,7 +337,7 @@ class Store:
         total = self.con.execute(f"SELECT count(*) FROM leads WHERE {where}", args).fetchone()[0]
         order = SORTABLE.get(sort, SORTABLE["updated"])
         direction = "DESC" if desc else "ASC"
-        order_sql = ", ".join(f"{part.strip()} {direction}" for part in order.split(","))
+        order_sql = ", ".join(f"{expr} {direction}" for expr in order)
         rows = self.con.execute(f"SELECT * FROM leads WHERE {where} ORDER BY {order_sql}, id {direction} "
                                 "LIMIT ? OFFSET ?", (*args, max(1, min(1000, limit)), max(0, offset))).fetchall()
         return [dict(r) for r in rows], total
@@ -466,15 +485,48 @@ class Store:
             "JOIN leads l ON l.id = r.lead_id WHERE r.done=0 AND r.due_at <= ? AND l.status != ? "
             "ORDER BY r.due_at LIMIT ?", (until, DO_NOT_CONTACT, limit))]
 
-    def set_whatsapp(self, lead_id: int, state: str) -> None:
-        """Confirmação manual: ``confirmado`` (conversou pelo WhatsApp), ``sem_whatsapp`` ou ``""`` (desfazer)."""
+    def set_whatsapp(self, lead_id: int, state: str, number: str = "") -> None:
+        """Confirmação manual: ``confirmado`` (conversou pelo WhatsApp), ``sem_whatsapp`` ou ``""`` (desfazer).
+
+        Ao confirmar, grava o número exato: ``number`` (escolhido pela pessoa) ou, se vazio, o candidato atual de
+        WhatsApp; só sem candidato usa o primeiro telefone válido. Nunca troca o número confirmado por outro."""
         if state not in ("", WA_CONFIRMED, WA_NONE):
             raise ValueError(state)
         with self.con:
-            self._row(lead_id)
-            self._update(lead_id, {"wa_user": state})
+            row = self._row(lead_id)
+            confirmed = ""
+            if state == WA_CONFIRMED:
+                if number:
+                    info = ph.normalize(number)
+                    if not info.valid:
+                        raise ValueError("Número de WhatsApp inválido.")
+                    known = {ph.normalize(x).e164 for x in (row["wa_number"], row["phone_e164"], row["phone"],
+                                                              row["phone2"], row["whatsapp"]) if x}
+                    if info.e164 not in known:
+                        raise ValueError("Escolha um dos telefones da empresa.")
+                    confirmed = info.e164
+                else:
+                    for cand in (row["wa_number"], row["phone_e164"], row["phone2"]):
+                        info = ph.normalize(cand)
+                        if info.valid:
+                            confirmed = info.e164
+                            break
+                    if not confirmed:
+                        raise ValueError("A empresa não tem telefone válido para confirmar.")
+            self._update(lead_id, {"wa_user": state, "wa_user_number": confirmed})
             self._recompute(lead_id)
-            self._event(lead_id, "editado", f"WhatsApp: {state or 'automático'}")
+            self._event(lead_id, "editado", f"WhatsApp: {state or 'automático'}"
+                        + (f" ({ph.normalize(confirmed).national})" if confirmed else ""))
+
+    def whatsapp_candidates(self, lead_id: int) -> list[str]:
+        """Telefones válidos da empresa (E.164), o candidato atual de WhatsApp primeiro."""
+        row = self._row(lead_id)
+        out: list[str] = []
+        for cand in (row["wa_number"], row["whatsapp"], row["phone_e164"], row["phone"], row["phone2"]):
+            info = ph.normalize(cand)
+            if info.valid and info.kind != ph.SERVICE and info.e164 not in out:
+                out.append(info.e164)
+        return out
 
     def set_priority(self, lead_id: int, priority: int) -> None:
         with self.con:

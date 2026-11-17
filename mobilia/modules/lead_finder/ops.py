@@ -23,6 +23,8 @@ def rescore(store, ids: list[int] | None = None, only_missing: bool = False) -> 
 
 
 def ingest_and_score(store, leads) -> dict:
+    """Grava os registros. A ``Store`` recalcula a pontuação de cada empresa afetada (nova, atualizada ou
+    consolidada); o passo extra só cobre registros antigos que ainda não tenham pontuação."""
     stats = store.ingest(leads)
     rescore(store, only_missing=True)
     return stats

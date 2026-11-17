@@ -147,6 +147,8 @@ class MessagesView(QWidget):
                          on_done=self._leads_found)
 
     def _leads_found(self, rows) -> None:
+        # a lista nova substitui a anterior: o destinatário ativo deixa de valer até a pessoa escolher outro
+        self._clear_recipient()
         self.lead_combo.blockSignals(True); self.lead_combo.clear()
         self.lead_combo.addItem("— escolha uma empresa —", None)
         for r in rows:
@@ -158,10 +160,26 @@ class MessagesView(QWidget):
 
     def _lead_chosen(self) -> None:
         lid = self.lead_combo.currentData()
+        self._clear_recipient()
         if lid:
-            self.ctx.db.call(lambda s: s.get(lid), on_done=self._set_lead)
+            # a resposta do banco é assíncrona: só vale se o seletor ainda mostrar a mesma empresa
+            self.ctx.db.call(lambda s: s.get(lid),
+                             on_done=lambda lead: self._set_lead(lead) if self.lead_combo.currentData() == lid else None)
         else:
-            self._set_lead(None)
+            self.generate()
+
+    def _clear_recipient(self) -> None:
+        """Esquece o destinatário (o botão do WhatsApp fica desligado). Campos preenchidos a partir dele são
+        limpos; um nome digitado à mão pela pessoa é mantido."""
+        old = self.lead
+        self.lead = None
+        if old:
+            prev = message_context(old, self.ctx.settings)
+            if self.company.text().strip() == prev.empresa:
+                self.company.clear()
+            if self.city.text().strip() == prev.cidade:
+                self.city.clear()
+        self._update_buttons()
 
     def _set_lead(self, lead: dict | None) -> None:
         self.lead = lead
@@ -172,7 +190,10 @@ class MessagesView(QWidget):
         self.generate()
 
     def compose_for(self, lead_id: int) -> None:
+        self._composing = True          # a busca automática ao abrir a aba não pode trocar esta empresa
+
         def got(lead):
+            self._composing = False
             if lead is None:
                 return
             self.lead_combo.blockSignals(True); self.lead_combo.clear()
@@ -237,7 +258,7 @@ class MessagesView(QWidget):
             self.ctx.db.call(lambda s: s.add_event(lid, "mensagem_copiada", self.current_template()["name"]))
 
     def _open_wa(self) -> None:
-        if not self.lead:
+        if not self.lead or self.lead_combo.currentData() != self.lead["id"]:
             self.info.setText("Escolha uma empresa do CRM para abrir o WhatsApp.")
             return
         open_whatsapp(self.ctx, self, self.lead["id"], self.editor.toPlainText())
@@ -250,5 +271,5 @@ class MessagesView(QWidget):
     def on_show(self) -> None:
         if not self.custom:
             self.load_templates()
-        if self.lead_combo.count() == 0:
+        if self.lead_combo.count() == 0 and not getattr(self, "_composing", False):
             self._find_leads()

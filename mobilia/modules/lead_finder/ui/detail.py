@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import QDateTime, Qt, QUrl, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QComboBox, QDateTimeEdit, QGridLayout, QLabel, QLineEdit, QListWidget,
+from PySide6.QtWidgets import (QComboBox, QDateTimeEdit, QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget)
 
 from mobilia.ui import theme
@@ -384,7 +384,28 @@ class LeadDetail(QWidget):
         if self._loading or not self.lead:
             return
         lid, v = self.lead["id"], self.wa_state.currentData()
-        self._call(lambda s: s.set_whatsapp(lid, v), "WhatsApp atualizado.")
+        if v != WA_CONFIRMED:
+            self._call(lambda s: s.set_whatsapp(lid, v), "WhatsApp atualizado.")
+            return
+        # confirmar: a pessoa escolhe QUAL número tem WhatsApp quando a empresa tem mais de um
+        self.ctx.db.call(lambda s: s.whatsapp_candidates(lid), on_done=lambda c: self._confirm_number(lid, c))
+
+    def _confirm_number(self, lid: int, candidates: list[str]) -> None:
+        if not self.lead or self.lead["id"] != lid:
+            return
+        if not candidates:
+            QMessageBox.warning(self, "WhatsApp", "A empresa não tem telefone válido para confirmar.")
+            return self.reload()
+        number = candidates[0]
+        if len(candidates) > 1:
+            labels = [ph.normalize(c).national + ("  (atual)" if i == 0 and self.lead["wa_number"] == c else "")
+                      for i, c in enumerate(candidates)]
+            choice, ok = QInputDialog.getItem(self, "Confirmar WhatsApp", "Qual número tem WhatsApp?", labels, 0, False)
+            if not ok:
+                return self.reload()
+            number = candidates[labels.index(choice)]
+        self._call(lambda s: s.set_whatsapp(lid, WA_CONFIRMED, number),
+                   f"WhatsApp confirmado: {ph.normalize(number).national}.")
 
     def _event(self, kind: str) -> None:
         if not self.lead:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 from .models import now_iso
@@ -28,7 +29,18 @@ def write_csv(path: Path | str, rows: list[dict], columns: tuple[str, ...], attr
     return path
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+_PLAIN_NUMBER = re.compile(r"[+-]?\d+(?:[.,]\d+)?")
+
+
 def _safe(v) -> str:
-    """Evita injeção de fórmulas em planilhas (=, +, -, @ no início)."""
+    """Neutraliza injeção de fórmulas em planilhas (OWASP "CSV injection").
+
+    Qualquer valor que comece (mesmo depois de espaços) com ``=``, ``+``, ``-``, ``@``, tabulação ou retorno de
+    carro ganha um apóstrofo na frente, **inclusive** quando o próximo caractere é um dígito (``=1+1``,
+    ``=1+WEBSERVICE(...)``). Só um número puro (``-12``, ``+3,5``) fica como está, porque não é fórmula."""
     s = "" if v is None else str(v)
-    return "'" + s if s[:1] in ("=", "+", "-", "@") and not s[1:2].isdigit() else s
+    head = s.lstrip(" ")[:1]
+    if head and head in _FORMULA_START and not _PLAIN_NUMBER.fullmatch(s.strip()):
+        return "'" + s
+    return s
