@@ -575,7 +575,8 @@ class MainWindow(QMainWindow):
         self.ready_hint = QLabel(""); self.ready_hint.setObjectName("hint"); self.ready_hint.setAlignment(Qt.AlignCenter)
         self.btn_generate = QPushButton("Gerar vídeo"); self.btn_generate.setObjectName("primary")
         self.btn_generate.setCursor(Qt.PointingHandCursor)
-        self.btn_generate.clicked.connect(self.generate)
+        # clicked(bool) mandaria checked=False como "mode": sempre chama sem argumentos
+        self.btn_generate.clicked.connect(lambda _checked=False: self.generate())
         g = lambda n: self._gap(lay, n)  # noqa: E731
         lay.addWidget(self.step_photo); g(14)
         lay.addWidget(self.btn_import); g(10); lay.addWidget(self.photo_label)

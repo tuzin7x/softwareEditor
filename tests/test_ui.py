@@ -67,6 +67,16 @@ def test_flow_success(app, win):
     _shot(win, "4_pronto")
 
 
+def test_click_generate_button_sends_valid_mode(app, win):
+    """O clique real passa clicked(bool); o pedido tem de sair com modo "auto", não "False"."""
+    win.load_photo(str(FX)); win.select_room("sala"); app.processEvents()
+    win.btn_generate.click(); app.processEvents()
+    assert win.last_request.mode == "auto"
+    cmd = win.runner.command_for(win.last_request)
+    assert "False" not in cmd and "--mode" not in cmd
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+
+
 def test_flow_error_returns_to_setup(app, win, monkeypatch):
     shown = {}
     monkeypatch.setattr("mobilia.ui.app.MainWindow.show_error", lambda self, m, d="": shown.update(m=m, d=d))
