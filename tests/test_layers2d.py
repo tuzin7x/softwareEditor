@@ -181,6 +181,67 @@ def test_no_pieces_gives_empty_stack():
     assert st.report()["camadas"]["n"] == 0
 
 
+def test_cushion_on_blanket_inherits_sofa_support():
+    """Almofada cuja base está sobre a manta (pequena) que está sobre o sofá: o apoio é o sofá e ela fica na
+    frente dele (antes a regra "termina mais embaixo" punha o sofá na frente da almofada)."""
+    sofa = np.zeros((H, W), bool)
+    sofa[50:100, 20:140] = True
+    blanket = np.zeros((H, W), bool)
+    blanket[45:60, 30:110] = True
+    cush = np.zeros((H, W), bool)
+    cush[25:45, 40:70] = True
+    sofa &= ~blanket
+    order, front, sup = L.paint_order(["sofa", "blanket", "cushion"], [sofa, blanket, cush])
+    assert sup == {1: 0, 2: 0}
+    assert front[2, 0] and not front[0, 2]
+    assert order.index(0) < order.index(2)
+
+
+def test_effect_reached_by_far_piece_is_not_corrected_on_plate():
+    """Luz da placa ao alcance do armário (planejado) mas com um vaso pequeno mais perto: continua efeito do
+    armário (região dinâmica), não volta a ser a foto mobiliada na sala vazia."""
+    photo, res, pieces = _scene(shadow=False)
+    a_cab, h_cab = _soft_rect(5, 25, 30, 130)
+    a_vase, h_vase = _soft_rect(26, 30, 132, 136)
+    pieces = pieces + [_piece(4, "cabinet", a_cab, h_cab, kind="planejado"), _piece(5, "vase", a_vase, h_vase)]
+    light = np.zeros((H, W), bool)
+    light[27:40, 118:138] = True
+    img = photo.astype(np.float32)
+    img[light] += 50.0
+    for a, c in ((a_cab, (90.0, 60.0, 40.0)), (a_vase, (20.0, 120.0, 20.0))):
+        img = (1 - a[..., None]) * img + a[..., None] * np.array(c)
+    photo = np.clip(img, 0, 255).round().astype(np.uint8)
+    core = rp.core_mask(pieces, (H, W))
+    effect = light & ~core
+    mask = core | rp._dil(effect, 3)
+    plate = photo.copy()
+    pt = np.clip(_floor(7), 0, 255).round().astype(np.uint8)
+    plate[mask] = pt[mask]
+    res = SimpleNamespace(plate=plate, mask=mask, shadow=np.zeros((H, W), bool), effect=effect)
+    st = L.build_layers(photo, res, pieces)
+    assert not (st.corrected & effect).any()
+    assert st.stats["placa_corrigida_fantasma_pct"] == 0.0
+    cab = st.layers[st.index(4)]
+    assert cab.effect.sum() > 0
+    full = L.composite(st, range(len(st.layers)))
+    assert np.abs(full.astype(int) - photo).max() <= L.RECON_TOL
+
+
+def test_partial_reveal_masks_contact_delta():
+    """Tapete meio desenrolado com contato ligado: o delta de contato não aparece na parte ainda enrolada."""
+    photo, res, pieces = _scene()
+    st = L.build_layers(photo, res, pieces)
+    rug = st.index(3)
+    lay = st.layers[rug]
+    x0, y0, x1, y1 = lay.box
+    half = np.zeros((y1 - y0, x1 - x0), np.float32)
+    half[:, : (x1 - x0) // 2] = 1.0
+    f = L.composite(st, {rug: L.Placement(alpha_mul=half, contact=1.0)})
+    hidden = np.zeros(photo.shape[:2], bool)
+    hidden[y0:y1, x0 + (x1 - x0) // 2:x1] = True
+    assert np.array_equal(f[hidden], st.plate[hidden])
+
+
 # ------------------------------------------------------------------------------------------- fixtures reais
 _cache: dict = {}
 

@@ -265,12 +265,18 @@ quadros: cada quadro é marco + camada dele, e a sombra da camada é cortada com
 - **Ordem de pintura** (de trás para frente): borda comum entre peças decidida pela profundidade do MoGe
   (sem ela, quem termina mais embaixo na foto está na frente); tapete e quadro/espelho atrás de tudo o que
   tocam; peça pequena apoiada noutra (almofada no sofá, vaso na mesa) na frente do apoio (`supports`, usado
-  pela coreografia para fazer o apoio entrar antes).
+  pela coreografia para fazer o apoio entrar antes). Peça pequena sobre outra pequena (almofada sobre manta
+  ou almofada) herda o apoio grande embaixo dela.
 - **RGBA pré-multiplicado** `C = foto − (1−A)·fundo_abaixo` na ordem de pintura, limitado a `0 ≤ C ≤ 255·A`.
 - **Sombreamento** = razão `foto/placa` suavizada, ≤ 1, só na sombra perto da peça; acompanha a peça.
 - **Delta de contato** (fixo na posição de repouso): o resto até a foto no alpha, no anel de contato
   (dilatação do núcleo da máscara) e na região de efeito da peça (textura da sombra, reflexo claro).
-- **Correção na placa:** o que não pertence a nenhuma peça vira o pixel da foto já no quadro 0. Resultado:
+- **Região de efeito:** sombra/luz da placa ao alcance de *alguma* peça (anel ou faixa do `plate.py`), com
+  dono = a peça mais próxima cujo alcance a cobre (a luz de LED sob o aéreo é do armário, não do vaso ao lado).
+  Em `composite`, o `alpha_mul` (tapete desenrolando) também recorta o delta de contato.
+- **Correção na placa:** o que não pertence a nenhuma peça vira o pixel da foto já no quadro 0; pixel
+  corrigido que difere > 30 níveis da placa conta como "fantasma" (`placa_corrigida_fantasma_pct`, aviso
+  acima de 0,1% da imagem: pedaço da foto mobiliada voltando para a sala vazia). Resultado:
   pilha completa = foto (0 níveis nas fixtures), quadro vazio = placa corrigida byte a byte e 0% de pixels
   fora de alpha ∪ anel ∪ efeito mudando entre o 1º e o último quadro (o protótipo tinha 7,1%).
 

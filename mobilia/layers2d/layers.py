@@ -53,6 +53,8 @@ DEPTH_FRONT = 0.97           # i na frente de j se z_i < 0,97·z_j na borda comu
 SHADE_MIN = 0.2              # razão mínima do sombreamento (o resto do escurecimento vai para o delta)
 SHADE_SIGMA = 0.002          # suavização da razão (fração da diagonal)
 EFFECT_SLACK_PX = 4
+GHOST_LEVELS = 30           # pixel corrigido na placa que difere disto da placa do LaMa = "fantasma" de móvel
+GHOST_WARN_FRAC = 0.001     # aviso se os fantasmas passam de 0,1% da imagem
 RECON_TOL = 2                # aceite PT-V3-5: pilha completa x foto <= 2 níveis
 
 
@@ -209,7 +211,10 @@ def occlusion_graph(labels: Sequence[str], hard: Sequence[np.ndarray], depth: np
                 if j != i and touch[i, j] and not (labels[j] in RUG_LABELS and lab in WALL_HUNG_LABELS):
                     front[i, j] = False
                     front[j, i] = True
-    supports: dict = {}
+    # Apoio direto: a peça embaixo da base. Peça pequena sobre outra pequena (almofada sobre manta/almofada no
+    # sofá, garrafa entre almofadas) herda o apoio grande dela, senão a regra "termina mais embaixo" punha o sofá
+    # NA FRENTE da almofada que está sentada nele.
+    direct: dict = {}
     for i, lab in enumerate(labels):
         if lab not in SMALL_LABELS or not hard[i].any():
             continue
@@ -221,13 +226,30 @@ def occlusion_graph(labels: Sequence[str], hard: Sequence[np.ndarray], depth: np
             for j in range(n):
                 if j != i and labels[j] not in RUG_LABELS:
                     votes[j] += int(hard[j][ys, cols].sum())
+        need = max(CONTACT_MIN_PX, 0.25 * 6 * cols.size)
         j = int(np.argmax(votes))
-        if votes[j] >= max(CONTACT_MIN_PX, 0.25 * 6 * cols.size):
-            if labels[j] in SMALL_LABELS and not (lab in ("flower", "plant") and labels[j] in ("vase", "pot")):
-                continue
-            supports[i] = j
-            front[i, j] = True
-            front[j, i] = False
+        if votes[j] < need:
+            continue
+        if labels[j] in SMALL_LABELS and not (lab in ("flower", "plant") and labels[j] in ("vase", "pot")):
+            big = [q for q in range(n) if labels[q] not in SMALL_LABELS and votes[q] >= need / 2]
+            if big:                                   # apoio grande também embaixo (ex.: manta + sofá)
+                j = max(big, key=lambda q: votes[q])
+                direct[i] = (j, True)
+            else:
+                direct[i] = (j, False)                # só sobre outra pequena: resolve pela cadeia abaixo
+        else:
+            direct[i] = (j, True)
+    supports: dict = {}
+    for i in direct:
+        j, ok, seen = direct[i][0], direct[i][1], {i}
+        while not ok and j in direct and j not in seen:    # sobe a cadeia até um apoio de verdade
+            seen.add(j)
+            j, ok = direct[j]
+        if not ok or j == i:
+            continue
+        supports[i] = j
+        front[i, j] = True
+        front[j, i] = False
     return front, supports
 
 
@@ -313,8 +335,13 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
     for s in supp:
         support |= s
     # --- dono de cada pixel fora do alpha: a peça mais próxima ------------------------------------------------
+    # O dono de um pixel de efeito é a peça mais próxima cujo alcance (anel/faixa do ``plate.py``) o cobre: a luz
+    # de LED sob o armário aéreo é do armário, não do vaso pequeno que está mais perto dela.
+    reach = np.array([_reach(p, diag) for p in pieces] + [0.0], np.float32)
     dmin = np.full((H, W), np.inf, np.float32)
     owner = np.full((H, W), -1, np.int32)
+    dmin_r = np.full((H, W), np.inf, np.float32)
+    owner_r = np.full((H, W), -1, np.int32)
     for k in range(n):
         if not supp[k].any():
             continue
@@ -322,6 +349,9 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
         upd = dt < dmin
         dmin[upd] = dt[upd]
         owner[upd] = k
+        upd = (dt <= reach[k]) & (dt < dmin_r)
+        dmin_r[upd] = dt[upd]
+        owner_r[upd] = k
     ring = mask & ~support & (dmin <= ring_px)
 
     # --- sombra/reflexo: razão foto/placa <= 1, só perto da peça e só onde a foto é mais escura ---------------
@@ -330,11 +360,13 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
     plate = plate8.astype(np.float32)
     shadow = np.asarray(getattr(plate_res, "shadow", np.zeros((H, W), bool)), bool)
     effect = np.asarray(getattr(plate_res, "effect", shadow), bool) | shadow
-    reach = np.array([_reach(p, diag) for p in pieces] + [0.0], np.float32)
-    near = dmin <= reach[owner]
+    near = owner_r >= 0
+    owner_e = np.where(near, owner_r, owner)
     free = mask & ~support & ~ring & (owner >= 0)
-    # região de efeito da peça: sombra ∪ luz da placa (com a mesma folga de 3 px da máscara), só perto dela.
-    # A luz (reflexo claro) não vira razão > 1: entra só pelo delta, junto com a peça.
+    # região de efeito da peça: sombra ∪ luz da placa (com a mesma folga de 3 px da máscara), só ao alcance de
+    # ALGUMA peça (não só da mais próxima: devolver à foto a luz do armário aéreo porque um vaso está mais perto
+    # punha um pedaço da foto mobiliada flutuando na sala vazia do quadro 0). A luz (reflexo claro) não vira
+    # razão > 1: entra só pelo delta, junto com a peça.
     eff = _dil(effect, 3) & free & near
     rejected = int((effect & mask & ~support & ~ring & ~eff).sum())
     S = np.ones((H, W, 3), np.float32)
@@ -351,6 +383,8 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
     leftover = mask & ~support & ~ring & ~eff
     plate_fix[leftover] = photo[leftover]
     corrected = leftover
+    # "fantasma": pixel corrigido muito diferente da placa = pedaço da foto mobiliada voltando para a sala vazia
+    ghost = leftover & (np.abs(photo.astype(np.int16) - plate8.astype(np.int16)).max(axis=2) > GHOST_LEVELS)
 
     # --- RGBA pré-multiplicado na ordem de pintura -------------------------------------------------------------
     below = plate_fix.astype(np.float32) * S
@@ -368,7 +402,7 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
         topmost[s] = k
     R = P - below
     # delta de contato: no alpha (dono = a de cima), no anel e no efeito (dono = a mais próxima)
-    downer = np.where(support, topmost, np.where(ring | eff, owner, -1))
+    downer = np.where(support, topmost, np.where(ring, owner, np.where(eff, owner_e, -1)))
     stray = np.abs(R[downer < 0]).max() if (downer < 0).any() else 0.0
     if stray > 0.05:      # nunca deveria acontecer: placa corrigida, foto fora da máscara
         raise AssertionError(f"resíduo fora das camadas ({stray:.3f} níveis)")
@@ -378,7 +412,7 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
     for k in order:
         p = pieces[k]
         own = downer == k
-        e = eff & (owner == k)
+        e = eff & (owner_e == k)
         region = supp[k] | own | e
         es = e & shaded
         if not region.any():
@@ -419,10 +453,14 @@ def build_layers(photo: np.ndarray, plate_res, pieces: Sequence, depth: np.ndarr
         "efeito_pct": round(100.0 * float(eff.sum()) / area, 3),
         "sombreamento_pct": round(100.0 * float(shaded.sum()) / area, 3),
         "efeito_longe_px": rejected,
+        "placa_corrigida_fantasma_pct": round(100.0 * float(ghost.sum()) / area, 3),
         "tempo_s": round(time.perf_counter() - t0, 2),
     }
     if diff.max() > RECON_TOL:
         warnings.append(f"pilha completa difere da foto em até {int(diff.max())} níveis (esperado <= {RECON_TOL})")
+    if ghost.sum() > GHOST_WARN_FRAC * area:
+        warnings.append(f"{100.0 * ghost.sum() / area:.2f}% da imagem voltou a ser a foto mobiliada na sala vazia "
+                        "(pedaço de móvel sem camada): conferir a placa")
     if corrected.sum() > 0.25 * max(1, int(mask.sum())):
         warnings.append("mais de 25% da máscara de remoção voltou a ser a foto na placa (sombras/luz fortes ou "
                         "peças que não cobrem a máscara)")
@@ -477,7 +515,10 @@ def composite(stack: LayerStack, present: Iterable[int] | Mapping[int, Placement
         if L.delta is None or q.contact <= 0:
             continue
         x0, y0, x1, y1 = L.box
-        out[y0:y1, x0:x1] += L.delta * min(1.0, q.contact)
+        d = L.delta * min(1.0, q.contact)
+        if q.alpha_mul is not None:          # parte ainda não revelada (tapete enrolado) não recebe o delta
+            d = d * np.asarray(q.alpha_mul, np.float32)[..., None]
+        out[y0:y1, x0:x1] += d
     if as_float:
         return out
     return np.clip(np.rint(out), 0, 255).astype(np.uint8)
