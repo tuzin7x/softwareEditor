@@ -105,10 +105,15 @@ def test_registered_is_sorted_by_order_then_title(reg):
 
 
 def test_repository_ships_no_module_yet():
-    """A base para o desenvolvimento paralelo não traz nenhum módulo: o pacote só tem o __init__."""
+    """O pacote de módulos só contém o __init__ e subpacotes válidos (pastas com __init__.py).
+
+    A base do desenvolvimento paralelo não traz nenhum módulo; quando um módulo chegar
+    (ex.: mobilia/modules/lead_finder/), este teste continua passando desde que seja um pacote."""
     pkg = ROOT / "mobilia/modules"
-    extra = [p.name for p in pkg.iterdir() if p.name not in {"__init__.py", "__pycache__"}]
-    assert extra == []
+    invalid = [p.name for p in pkg.iterdir()
+               if p.name not in {"__init__.py", "__pycache__"}
+               and not (p.is_dir() and (p / "__init__.py").is_file())]
+    assert invalid == []
 
 
 def test_discover_imports_submodules_and_skips_broken(reg, tmp_path, monkeypatch):

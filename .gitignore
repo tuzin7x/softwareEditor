@@ -30,6 +30,7 @@ htmlcov/
 # --- segredos e configuração local: chaves de API NUNCA entram no repositório
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 *.p12

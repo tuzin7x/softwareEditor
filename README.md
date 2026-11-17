@@ -97,6 +97,16 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and no
 QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_ui.py tests/test_modules.py     # interface
 ```
 
+```powershell
+# Windows (PowerShell); o offscreen é opcional no Windows
+$env:QT_QPA_PLATFORM = "offscreen"
+python -m pytest -q -m "not slow and not models and not gpu"
+python -m pytest -q tests/test_ui.py tests/test_modules.py
+```
+
+A suíte rápida inteira precisa das bibliotecas da linha `pip install` do `tests.yml`; para os testes da interface
+bastam `numpy pillow PySide6==6.12.0 pytest`.
+
 Os marcadores ficam em `pyproject.toml`:
 
 | Marcador | O teste precisa de |
@@ -105,7 +115,8 @@ Os marcadores ficam em `pyproject.toml`:
 | `models` | pesos dos modelos |
 | `gpu` | placa NVIDIA |
 
-O CI (`.github/workflows/tests.yml`) roda a suíte rápida a cada push e a cada Pull Request.
+O CI (`.github/workflows/tests.yml`) roda uma lista fixa de arquivos de teste rápidos a cada push em `claude/**`,
+`feature/**` e `main`, e em Pull Requests para `claude/**` e `main`.
 
 ## Estrutura
 
@@ -152,6 +163,6 @@ O guia completo está em [`docs/PARALLEL_DEVELOPMENT.md`](docs/PARALLEL_DEVELOPM
 - Assets 3D do modo legado: Poly Haven (CC0) e assets procedurais próprios.
 - Blender/bpy (GPL) roda num processo separado. FFmpeg: GPL, build com x264.
 - Fontes Inter: SIL OFL (`mobilia/ui/fonts/OFL.txt`).
-- As fotos de `tests/fixtures/photos` são CC BY-SA (ver `ATRIBUICOES.md`) e servem só para testes.
+- As fotos de `tests/fixtures/photos` são CC BY-SA (ver [`tests/fixtures/photos/ATRIBUICOES.md`](tests/fixtures/photos/ATRIBUICOES.md)) e servem só para testes.
 - **Fotos e dados de clientes nunca entram no repositório.** O `.gitignore` bloqueia `usuario_*`, `.env`, chaves e
   bancos locais.

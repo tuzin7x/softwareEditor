@@ -4,14 +4,14 @@
 
 - **Repositório:** `tuzin7x/softwareEditor` (público). O pacote Python se chama `mobilia` e o produto se chama
   **7xAi**.
-- **Branch de integração (desenvolvimento):** `claude/sweet-bohr-4uzml2`. Todo o trabalho está nela e foi enviado
-  ao GitHub.
+- **Branch de integração (desenvolvimento):** `claude/sweet-bohr-4uzml2`. Todo o trabalho está nela; a sessão principal
+  envia os commits ao GitHub sem force-push.
 - **`main`:** tem só o commit inicial e **não foi atualizada de propósito**. A reformulação ainda está em
   avaliação; a `main` só recebe a integração quando o usuário aprovar uma versão. Detalhes em
   `docs/PARALLEL_DEVELOPMENT.md`, seção 13.
-- **`ui-7xai`:** branch local antiga, já contida na branch de integração (worktree `/home/user/wt-7xai`). Não
+- **`ui-7xai`:** branch local antiga, já contida na branch de integração (worktree local da sessão principal). Não
   mexer.
-- **`feature/lead-finder`** (planejada): será feita por outra conta, a partir do commit de base indicado em
+- **`feature/lead-finder`** (planejada): será feita por outra conta, a partir da tag `lead-finder-base` indicada em
   `docs/PARALLEL_DEVELOPMENT.md`, e volta por Pull Request para `claude/sweet-bohr-4uzml2`.
 
 ### Últimos commits relevantes
@@ -40,7 +40,8 @@
 - **Ponto de extensão:** o registro de módulos permite abas novas sem editar `app.py`. Sem módulos, a janela não
   muda.
 - **CI:**
-  - `tests.yml` roda os testes rápidos em cada push em `claude/**`, `feature/**` e `main`, e em cada PR;
+  - `tests.yml` roda uma lista fixa de arquivos de teste rápidos em cada push em `claude/**`, `feature/**` e
+    `main`, e em PRs para `claude/**` e `main`;
   - `build-windows.yml` gera o `.exe` e o instalador em cada push em `claude/**` e publica uma prerelease com
     `[release]` ou com o disparo manual "publicar".
 - **Build local:** `GERAR_EXE.bat`, que chama `packaging/build_windows.ps1`.
@@ -64,7 +65,8 @@ Numa nova sessão neste repositório, envie:
 
 > Leia RESUME.md e docs/PARALLEL_DEVELOPMENT.md e continue pelos "Próximos passos".
 
-Testes rápidos: `QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"`. Para um
+Testes rápidos: `QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"` (no
+Windows/PowerShell: `$env:QT_QPA_PLATFORM="offscreen"; python -m pytest -q -m "not slow and not models and not gpu"`). Para um
 contêiner novo de desenvolvimento, use `bash scripts/preparar_ambiente_dev.sh`.
 
 ## Regras permanentes

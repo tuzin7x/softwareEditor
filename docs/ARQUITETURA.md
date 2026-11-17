@@ -809,8 +809,8 @@ Lead Finder:
   importado.
 - `mobilia.modules.discover()` importa os subpacotes. Uma falha vai para `modules.failed` e o subpacote é
   ignorado.
-- `ModuleHost` é o único contato com a janela. O gancho em `app.py` tem 5 linhas: `ModuleHost(self)`,
-  `design_layout(outer)`, `add_nav(head, tag)` e `set_compact(...)`.
+- `ModuleHost` é o único contato com a janela. O gancho em `app.py` é um import e quatro chamadas:
+  `ModuleHost(self)`, `design_layout(outer)`, `add_nav(head, tag)` e `set_compact(...)`.
   - **Sem módulos:** `design_layout` devolve o próprio layout principal, e a janela é idêntica à anterior.
   - **Com módulos:**
     - o cabeçalho ganha um seletor (`Segmented`: "Ambientes" + um botão por módulo), que substitui a frase;
@@ -818,7 +818,7 @@ Lead Finder:
     - cada módulo tem sua página, criada na 1ª abertura;
     - `on_show()` e `on_hide()` são opcionais;
     - o botão "Avançado" só aparece em "Ambientes";
-    - um redesenho em andamento continua em segundo plano.
+    - um redesenho em andamento continua em segundo plano (por construção; ainda sem teste automático).
 - **Empacotamento:** `collect_submodules("mobilia.modules")` em `hiddenimports`.
 - **Testes:** `tests/test_modules.py`.
 - **Regras para quem cria módulos** (arquivos permitidos e proibidos, dados, LGPD):

@@ -34,7 +34,7 @@ Leia nesta ordem: este arquivo, depois o [`README.md`](../README.md), o [`RESUME
 | Item | Valor |
 |---|---|
 | Branch de integração (desenvolvimento) | `claude/sweet-bohr-4uzml2` |
-| Commit de base para o Lead Finder | `BASE_COMMIT_PLACEHOLDER` |
+| Commit de base para o Lead Finder | tag anotada **`lead-finder-base`** (o hash completo é informado pela sessão principal na entrega e aparece em `git rev-parse lead-finder-base^{commit}`) |
 | Branch do novo módulo | `feature/lead-finder` (criada a partir do commit de base) |
 | `main` | **não usar**: está desatualizada de propósito (ver seção 13) |
 
@@ -43,12 +43,17 @@ Para criar a branch:
 ```bash
 git clone https://github.com/tuzin7x/softwareEditor.git
 cd softwareEditor
-git fetch origin
-git switch -c feature/lead-finder BASE_COMMIT_PLACEHOLDER
+git fetch origin --tags
+git switch -c feature/lead-finder lead-finder-base
 git push -u origin feature/lead-finder
 ```
 
-Confira se a base está certa: `git log -1 --oneline` deve mostrar o commit de base, e `mobilia/ui/modules.py` e
+Se a sessão recusar o push de `feature/lead-finder` (algumas sessões só podem enviar branches `claude/...`), use
+`claude/lead-finder` no lugar; o Pull Request e as regras são os mesmos. Observação: push em `claude/**` também
+dispara o `build-windows.yml`, que gera o `.exe` mas não publica nada sem `[release]`.
+
+Confira se a base está certa: `git log -1 --oneline` deve mostrar o commit da tag `lead-finder-base` (o mesmo hash
+informado na entrega), e `mobilia/ui/modules.py` e
 `tests/test_modules.py` devem existir.
 
 ## 3. Arquitetura da interface (PySide6), em resumo
@@ -150,25 +155,31 @@ Regras da interface que valem para qualquer módulo:
    python -m mobilia.modules.lead_finder
    ```
 
-Comportamento garantido pelo registro, e testado:
+Comportamento garantido pelo registro (os três primeiros itens são testados em `tests/test_modules.py`):
 
 - se o import do módulo falhar, a janela abre normalmente e o erro fica em `mobilia.ui.modules.failed`;
 - se a `factory` falhar, a aba mostra um aviso em vez de derrubar o app;
 - trocar de aba não perde o estado do redesenho;
-- um redesenho em andamento continua rodando em segundo plano.
+- um redesenho em andamento continua rodando em segundo plano (por construção: a troca de aba só muda a página
+  visível e não toca no processo do motor; ainda não há teste automático para isso).
 
 ## 5. Arquivos que a segunda conta PODE criar ou modificar
 
 - `mobilia/modules/lead_finder/**`: todo o código do módulo (interface, busca, CRM, mensagens).
-- `tests/test_lead_finder*.py`: testes do módulo. Use as fixtures do padrão de `tests/test_modules.py`, com
-  `QT_QPA_PLATFORM=offscreen` e `MOBILIA_HOME` apontando para uma pasta temporária.
+- `tests/lead_finder/**`: testes do módulo, em arquivos `test_lead_finder_*.py` dentro dessa pasta. Use as
+  fixtures do padrão de `tests/test_modules.py`, com `QT_QPA_PLATFORM=offscreen` e `MOBILIA_HOME` apontando para
+  uma pasta temporária.
+- `tests/test_modules.py`: **só** o teste `test_repository_ships_no_module_yet`, e só se for preciso. Ele já aceita
+  subpacotes válidos (pasta com `__init__.py`), então um `mobilia/modules/lead_finder/` correto passa sem mudança.
 - `docs/LEAD_FINDER*.md`: documentação do módulo.
-- `requirements/lead_finder.txt`: só se for **inevitável**. Prefira a biblioteca padrão (`urllib`, `json`, `csv`,
-  `sqlite3`) e o PySide6 (inclusive `QtNetwork`). Pacote pip novo na interface muda o `.exe`, então justifique no
-  PR.
+- **Dependências:** prefira a biblioteca padrão (`urllib`, `json`, `csv`, `sqlite3`) e o PySide6 (inclusive
+  `QtNetwork`). Não existe arquivo de requisitos próprio do módulo: o `.exe` e o CI só instalam
+  `requirements/ui.txt` e a linha `pip install` do `tests.yml`. Uma dependência nova e **inevitável** precisa
+  entrar nesses dois lugares, senão o módulo cai em `failed` no `.exe` sem aviso e o CI falha. **Não edite esses
+  arquivos:** peça a inclusão à sessão principal no PR, com a justificativa (pacote pip novo muda o `.exe`).
 - Fora disso, **só linhas acrescentadas** e quando não houver alternativa, sempre explicadas no PR. Exemplos:
   - uma entrada em `datas` ou `hiddenimports` de `packaging/7xai.spec`;
-  - um arquivo de teste a mais na lista de `.github/workflows/tests.yml`.
+  - o caminho `tests/lead_finder` a mais na lista de `.github/workflows/tests.yml`.
 
 ## 6. Arquivos e componentes que a segunda conta NÃO DEVE modificar
 
@@ -185,40 +196,74 @@ principal:
 - `mobilia/ui/app.py`, `legacy.py`, `runner.py`, `theme.py`, `brand.py`, `widgets.py`, `design_widgets.py`,
   `setup_dialog.py` e `modules.py`: a integração acontece **só pelo registro**.
 - `packaging/*` (exceto linhas acrescentadas, ver seção 5), `GERAR_EXE.bat`, `.github/workflows/build-windows.yml`.
-- `requirements/runtime-*.txt` e os demais arquivos de requisitos do motor.
+- `requirements/**` (inclusive `ui.txt` e `dev.txt`; ver "Dependências" na seção 5), `pyproject.toml`.
+- `mobilia/__init__.py` (versão), `mobilia/__main__.py`, `mobilia/modules/__init__.py` (descoberta),
+  `mobilia/photo.py`, `mobilia/diagnostics.py`, `mobilia/telemetry.py`.
+- `scripts/**`, `.gitignore`.
 - `tests/test_ui.py`, `tests/test_design.py`, `tests/test_showcase.py`, `tests/conftest.py`, `tests/fake_*.py`,
   `tests/fixtures/**`.
-- `README.md`, `RESUME.md`, `docs/ARQUITETURA.md`: a sessão principal atualiza esses arquivos na integração.
-  Descreva o módulo em `docs/LEAD_FINDER.md`.
+- `README.md`, `RESUME.md`, `docs/ARQUITETURA.md`, este arquivo e os demais `docs/**` (exceto
+  `docs/LEAD_FINDER*.md`): a sessão principal atualiza esses arquivos na integração. Descreva o módulo em
+  `docs/LEAD_FINDER.md`.
 
 Se precisar de algo dessas áreas (um ícone novo em `theme.py`, um helper movido para `widgets.py`, um subcomando no
 motor), **peça no PR ou numa issue**. A sessão principal faz a mudança.
 
 ## 7. Como executar os testes
 
-O ambiente de desenvolvimento é Linux, com Python 3.13. O venv precisa ter `numpy`, porque `tests/conftest.py` o
-importa, além de `PySide6` e `pytest`. Instalação mínima para a interface e os módulos:
+Use Python 3.13, no Linux ou no Windows. O venv precisa ter `numpy`, porque `tests/conftest.py` o importa, além
+de `PySide6` e `pytest`.
+
+**Instalação mínima** — basta para `tests/test_modules.py`, `tests/test_ui.py` e `tests/lead_finder/`:
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
+# Linux / macOS (bash)
+python3.13 -m venv .venv && . .venv/bin/activate
 pip install numpy pillow PySide6==6.12.0 pytest
 ```
 
-Comandos (Qt sem tela: `QT_QPA_PLATFORM=offscreen`):
+```powershell
+# Windows (PowerShell)
+py -3.13 -m venv .venv; .\.venv\Scripts\Activate.ps1
+pip install numpy pillow PySide6==6.12.0 pytest
+```
+
+**Instalação completa** — necessária para a suíte rápida inteira e para `--collect-only`, porque vários arquivos de
+teste do motor importam `cv2`, `scipy`, `shapely`, `OpenEXR` e `imageio` direto. É a mesma linha do `tests.yml`:
 
 ```bash
-# registro de módulos + interface (rápido, ~30 s)
+pip install numpy scipy pillow shapely opencv-python-headless imageio-ffmpeg OpenEXR PySide6==6.12.0 pytest
+```
+
+Comandos no Linux (Qt sem tela: `QT_QPA_PLATFORM=offscreen`):
+
+```bash
+# registro de módulos + interface (rápido, ~30 s) — instalação mínima
 QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_ui.py
 
-# só o seu módulo
-QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_lead_finder*.py
+# só o seu módulo — instalação mínima
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder
 
-# a suíte rápida inteira (sem render, sem modelos de IA, sem GPU)
+# a suíte rápida inteira (sem render, sem modelos de IA, sem GPU) — instalação completa
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 
-# conferir que tudo é coletado (não roda nada)
+# conferir que tudo é coletado (não roda nada) — instalação completa
 python -m pytest --collect-only -q
 ```
+
+Os mesmos comandos no Windows (PowerShell). No Windows o `offscreen` é opcional: sem ele, as janelas dos testes
+aparecem por um instante.
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+python -m pytest -q tests/test_modules.py tests/test_ui.py
+python -m pytest -q tests/lead_finder
+python -m pytest -q -m "not slow and not models and not gpu"
+python -m pytest --collect-only -q
+```
+
+Use o caminho da pasta (`tests/lead_finder`), não um curinga como `tests/test_lead_finder*.py`: o PowerShell não
+expande curingas para o pytest, e no bash o curinga dá erro enquanto nenhum arquivo existir.
 
 Os marcadores ficam em `pyproject.toml`:
 
@@ -241,14 +286,17 @@ anônimas.
    git merge origin/claude/sweet-bohr-4uzml2
    ```
 
-3. Antes de abrir o PR, rode a suíte rápida completa (seção 7) e `tests/test_modules.py`.
+3. Antes de abrir o PR, rode a suíte rápida completa (seção 7, instalação completa), `tests/test_modules.py` e
+   `tests/lead_finder`.
 4. Abra o Pull Request de `feature/lead-finder` para `claude/sweet-bohr-4uzml2`, **nunca para `main`**. Na
    descrição, inclua:
    - o que o módulo faz;
    - a lista de arquivos fora de `mobilia/modules/lead_finder/` que foram tocados, com o motivo;
    - as dependências novas, se houver;
    - como testar.
-5. Os testes rápidos (`tests.yml`) rodam a cada push em `feature/**` e em cada PR. Para gerar um `.exe` de teste da
+5. O `tests.yml` roda uma lista fixa de arquivos de teste rápidos (inclusive `tests/test_ui.py` e
+   `tests/test_modules.py`) a cada push em `claude/**`, `feature/**` e `main`, e em PRs para `claude/**` e `main`.
+   Peça no PR a inclusão de `tests/lead_finder` nessa lista (seção 5). Para gerar um `.exe` de teste da
    branch, use **Actions › Build Windows › Run workflow**, escolhendo `feature/lead-finder` e deixando "publicar"
    desmarcado.
 6. A sessão principal revisa, integra na branch de desenvolvimento e atualiza README, RESUME e ARQUITETURA.
@@ -256,7 +304,7 @@ anônimas.
 ## 9. Conflitos: como evitar e como resolver
 
 **Evitar:** se você seguir as seções 5 e 6, os únicos arquivos compartilhados são linhas acrescentadas no spec ou
-no `tests.yml`. Nesses casos, conflito é raro e trivial.
+no `tests.yml` e, se preciso, o teste `test_repository_ships_no_module_yet` de `tests/test_modules.py`. Nesses casos, conflito é raro e trivial.
 
 **Resolver**, se acontecer um conflito no `git merge origin/claude/sweet-bohr-4uzml2`:
 
@@ -345,8 +393,8 @@ A `main` tem só o commit inicial. Ela **não foi atualizada de propósito**:
 - a reformulação atual (redesenho por IA como fluxo principal) **ainda está em avaliação** e o usuário não aprovou
   a qualidade;
 - um merge agora apresentaria como estável algo que não é;
-- o trabalho está **seguro** na branch de desenvolvimento `claude/sweet-bohr-4uzml2`, enviada ao GitHub, e cada
-  push gera `.exe` pelo CI.
+- o trabalho fica **seguro** na branch de desenvolvimento `claude/sweet-bohr-4uzml2` no GitHub (a sessão principal
+  envia os commits sem force-push), e cada push gera `.exe` pelo CI.
 
 Regra: **`claude/sweet-bohr-4uzml2` é a branch de integração.** A `main` só recebe a integração quando o usuário
 aprovar uma versão, o que coincide com uma release publicada. Nenhuma das duas sessões faz merge na `main` por
