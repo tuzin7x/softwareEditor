@@ -485,6 +485,7 @@ def test_fill_color_follows_light_gradient_not_whole_ring_mean():
     s = q.per_plane["piso"]
     assert s["preenchimento_global_de"] > rp.LIMITS["preenchimento_de_max"], s   # a média do anel engana
     assert s["preenchimento_de"] < s["preenchimento_global_de"], s              # referência local
+    assert s["razao_material"] <= rp.LIMITS["relaxa_area_max"], s               # buraco pequeno x piso visível
     assert s["preenchimento_de"] <= rp.fill_de_limit(s["costura_de"], s["grao_log2"]), s   # costura boa relaxa
     assert not any("destoa" in t for t in q.reasons), q.reasons
     bad = img.copy()

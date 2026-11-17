@@ -89,6 +89,8 @@ LIMITS = {
     "preenchimento_de_max_relaxado": 9.0,   # ... quando a costura é ótima (<= 2) e o grão bom: gradiente de luz
     "costura_relaxa_de": 4.5,        # costura a partir da qual o limite do preenchimento começa a subir
     "grao_relaxa_log2": 0.6,         # |log2 grão| acima disto o limite do preenchimento não sobe
+    "relaxa_area_max": 0.6,          # ... nem quando o preenchimento passa de 60% do material visível do plano
+                                     # (tapete grande removido: o piso de baixo é inventado, não iluminado)
     "costura_sem_plano_max": 16.0,   # ΔE76 da costura do que não tem plano (vãos, protegidos, sobre bancadas)
     "area_gerada_max": 0.70,         # fração da foto reconstruída
     # geometria da sala não achada (HDR, retrato, piso todo coberto): quase todo o preenchimento fica "sem plano",
@@ -814,6 +816,7 @@ def plane_stats(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: 
         name = LABEL_NAMES.get(int(L), f"parede{int(L)}")
         out[name] = {"area_px": int(sel.sum()), "costura_de": round(seam, 2), "preenchimento_de": round(fill, 2),
                      "preenchimento_global_de": round(fill_g, 2),
+                     "razao_material": round(float(sel.sum()) / max(1, int((same & ~mask).sum())), 2),
                      "grao_log2": round(float(np.log2(g_in / g_out)), 2)}
     # o que não tem plano (vãos, protegidos, peças apoiadas em algo que fica): costura local contra o anel inteiro
     # (qualquer material), para que uma mancha ali também conte na nota
@@ -938,7 +941,8 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
                 reasons.append(f"mancha no preenchimento sem plano (ΔE {s['costura_de']:.1f})")
             terms.append(np.clip(1 - (s["costura_de"] - 4.0) / 12.0, 0, 1))
             continue
-        if s["preenchimento_de"] > fill_de_limit(s["costura_de"], s["grao_log2"], relax_fill):
+        relax = relax_fill and s.get("razao_material", 0.0) <= LIMITS["relaxa_area_max"]
+        if s["preenchimento_de"] > fill_de_limit(s["costura_de"], s["grao_log2"], relax):
             reasons.append(f"cor do preenchimento destoa no(a) {name} (ΔE {s['preenchimento_de']:.1f})")
         if s["costura_de"] > LIMITS["costura_de_max"]:
             reasons.append(f"costura visível no(a) {name} (ΔE {s['costura_de']:.1f})")
