@@ -3,7 +3,8 @@
 Imita o protocolo JSON de ``mobilia.cli``:
 - ``design ...``: progress/preview por versão e ``done`` (outputs, before, report, size, seeds). Grava ``args.json`` na
   pasta de saída com os argumentos recebidos (os testes conferem que nenhum argumento de sinal Qt vazou).
-  ``--prompt`` com "falhar" -> evento ``error``; com "devagar" -> etapas lentas (para testar o Cancelar).
+  ``--prompt`` com "falhar" -> evento ``error``; com "devagar" -> etapas lentas (para testar o Cancelar); com
+  "vazio" -> ``done`` com ``aviso`` e ``funcao`` = mobiliar (troca automática do motor).
   ``MOBILIA_FAKE_DESIGN_SRC=<pasta>``: copia as imagens dessa pasta (capturas de tela com imagens reais).
 - ``upscale --image --out``: grava a imagem ampliada (2x, rápido) e ``done`` com ``size``.
 - ``showcase --before --after a b ... --out --format``: grava um MP4 minúsculo e ``done``.
@@ -96,8 +97,12 @@ def design(argv) -> int:
     rep = out / "design.json"
     rep.write_text(json.dumps({"funcao": funcao, "estilo": estilo, "args": argv}, ensure_ascii=False), encoding="utf-8")
     _emit(event="progress", stage="final", fraction=1.0, message="Pronto")
+    extra = {}
+    if "vazio" in prompt:          # como o motor real numa foto de ambiente vazio: vira "Mobiliar" e avisa
+        extra = {"aviso": "Ambiente vazio detectado: o 7xAi mobiliou o ambiente.", "funcao_pedida": funcao}
+        funcao = "mobiliar"
     _emit(event="done", output=outs[0], outputs=outs, before=str(before) if before else None, report=str(rep),
-          funcao=funcao, estilo=estilo, ambiente=a.get("--ambiente"), seeds=list(range(n)), size=[w, h])
+          funcao=funcao, estilo=estilo, ambiente=a.get("--ambiente"), seeds=list(range(n)), size=[w, h], **extra)
     return 0
 
 

@@ -182,5 +182,157 @@ def mask_bbox(mask: np.ndarray, margin_frac: float = 0.25, min_side: int = 0, mu
     return X0, Y0, X1, Y1
 
 
+# ====================================================================================== aberturas: ajustes gerais
+def label_mask(labels: np.ndarray, id2label: dict, names: tuple[str, ...], size: tuple[int, int] | None = None
+               ) -> np.ndarray:
+    """Máscara dos rótulos ADE20K cujo nome base (antes da vírgula) está em ``names`` (ex.: eletrodomésticos)."""
+    lab = np.asarray(labels)
+    ids = [int(i) for i, n in (id2label or {}).items() if str(n).split(",")[0].strip().lower() in names]
+    m = np.isin(lab, ids) if ids else np.zeros(lab.shape, bool)
+    if size is not None and (m.shape[1], m.shape[0]) != tuple(size):
+        m = cv2.resize(m.astype(np.uint8), tuple(size), interpolation=cv2.INTER_NEAREST).astype(bool)
+    return clean_mask(m, min_frac=0.002)
+
+
+def bright_coverings(covering: np.ndarray, rgb: np.ndarray, pct: float = 85.0, min_frac: float = 0.003
+                     ) -> np.ndarray:
+    """Cortinas/persianas claras demais (luz atravessando: cortina transparente na frente de uma janela) — a
+    janela atrás delas quase não aparece na segmentação, então a própria cortina vira a abertura a travar."""
+    cov = np.asarray(covering, bool)
+    out = np.zeros(cov.shape, bool)
+    if not cov.any():
+        return out
+    L = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)[..., 0].astype(np.float32)
+    thr = np.percentile(L, pct)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(cov.astype(np.uint8), connectivity=8)
+    for k in range(1, n):
+        if stats[k, cv2.CC_STAT_AREA] < min_frac * cov.size:
+            continue
+        comp = lab == k
+        if float(np.median(L[comp])) >= thr:
+            out |= comp
+    return out
+
+
+def doorway_views(door: np.ndarray, depth: np.ndarray | None, ratio: float = 1.15, grow: float = 0.6
+                  ) -> np.ndarray:
+    """O vão de uma porta aberta: a segmentação marca só a folha da porta, e a vista para o cômodo ao lado virava
+    uma janela para o jardim. Perto de cada porta (caixa alargada ``grow`` × a largura dela, ou 0,4 × a altura,
+    para os lados), os
+    pixels claramente além do plano da parede em volta (profundidade > ``ratio`` × a da parede) e encostados na
+    porta entram na trava."""
+    dm = np.asarray(door, bool)
+    out = np.zeros(dm.shape, bool)
+    if depth is None or not dm.any():
+        return out
+    z = np.asarray(depth, np.float32)
+    if z.shape != dm.shape:
+        z = cv2.resize(z, (dm.shape[1], dm.shape[0]), interpolation=cv2.INTER_NEAREST)
+    valid = np.isfinite(z) & (z > 1e-4)
+    H, W = dm.shape
+    r = max(2, int(0.03 * np.hypot(H, W)))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(dm.astype(np.uint8), connectivity=8)
+    for k in range(1, n):
+        x, y, w, h = stats[k, :4]
+        if stats[k, cv2.CC_STAT_AREA] < 0.002 * H * W:
+            continue
+        comp = lab == k
+        ring = cv2.dilate(comp.astype(np.uint8), _disk(r)).astype(bool) & ~comp & valid
+        if ring.sum() < 16:
+            continue
+        wall_z = float(np.percentile(z[ring], 30))
+        gx = max(grow * w, 0.4 * h)      # a folha aberta aparece estreita; o vão chega a ~metade da altura
+        X0, X1 = max(0, int(x - gx)), min(W, int(x + w + gx))
+        Y0, Y1 = max(0, int(y - 0.1 * h)), min(H, int(y + h))
+        region = np.zeros_like(dm)
+        region[Y0:Y1, X0:X1] = True
+        deep = region & valid & (z > ratio * wall_z) & ~dm
+        if not deep.any():
+            continue
+        touch = cv2.dilate(comp.astype(np.uint8), _disk(3)).astype(bool)
+        m2, lab2 = cv2.connectedComponents(deep.astype(np.uint8), connectivity=8)
+        hit = np.unique(lab2[touch & deep])
+        for j in hit[hit > 0]:
+            cj = lab2 == j
+            if cj.sum() >= 0.001 * H * W:
+                out |= cj
+    return clean_mask(out)
+
+
+def frame_only(mask: np.ndarray, width_frac: float = 0.012) -> np.ndarray:
+    """Só o contorno (moldura) de uma máscara: o miolo fica livre para o gerador."""
+    m = np.asarray(mask, bool)
+    if not m.any():
+        return m
+    r = max(2, int(width_frac * np.hypot(*m.shape)))
+    return m & ~cv2.erode(m.astype(np.uint8), _disk(r)).astype(bool)
+
+
+def cap_doors(lock: np.ndarray, door: np.ndarray, max_frac: float = 0.12, all_frames: bool = False
+              ) -> tuple[np.ndarray, int]:
+    """Componentes de porta grandes demais (> ``max_frac`` da imagem: box de vidro do chuveiro, guarda-roupa
+    espelhado, painel de vidro) — ou todos, com ``all_frames`` (banheiro) — ficam travados só pela moldura. Colar
+    um box bege inteiro numa sala de mármore dava o aspecto de recorte e até sumia com o vaso sanitário."""
+    lk = np.asarray(lock, bool).copy()
+    dm = np.asarray(door, bool) & lk
+    if not dm.any():
+        return lk, 0
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(dm.astype(np.uint8), connectivity=8)
+    changed = 0
+    for k in range(1, n):
+        if all_frames or stats[k, cv2.CC_STAT_AREA] > max_frac * dm.size:
+            comp = lab == k
+            lk[comp] = False
+            lk |= frame_only(comp)
+            changed += 1
+    return lk, changed
+
+
+def new_openings(gen_groups: np.ndarray, original_openings: np.ndarray, size: tuple[int, int],
+                 min_frac: float = 0.004) -> np.ndarray:
+    """Janela/porta/cortina na imagem gerada onde a foto não tinha abertura (a abertura original, dilatada, fica de
+    fora: cortinas emoldurando a janela existente são bem-vindas). Resolução ``size`` = (largura, altura)."""
+    g = np.asarray(gen_groups)
+    if (g.shape[1], g.shape[0]) != tuple(size):
+        g = cv2.resize(g, tuple(size), interpolation=cv2.INTER_NEAREST)
+    orig = np.asarray(original_openings, bool)
+    if orig.shape != g.shape:
+        orig = cv2.resize(orig.astype(np.uint8), tuple(size), interpolation=cv2.INTER_NEAREST).astype(bool)
+    H, W = g.shape
+    diag = np.hypot(H, W)
+    near_open = cv2.dilate(orig.astype(np.uint8), _disk(int(0.02 * diag))).astype(bool)
+    near_cover = cv2.dilate(orig.astype(np.uint8), _disk(int(0.08 * diag))).astype(bool)
+    hard = np.isin(g, [GROUP_IDS["window"], GROUP_IDS["door"]]) & ~near_open
+    soft = (g == GROUP_IDS["window_covering"]) & ~near_cover
+    return clean_mask(hard | soft, min_frac=min_frac)
+
+
+def anchor_tone(img: np.ndarray, ref: np.ndarray, amount_l: float = 0.35, amount_ab: float = 0.35,
+                max_ab_shift: float = 6.0, chroma_cap: float = 1.15, chroma_floor: float = 18.0) -> np.ndarray:
+    """Ancora a exposição e o balanço de branco da imagem gerada nos da foto (o gerador às vezes devolve tudo
+    amarelado, cinzento ou saturado demais, com cara de CG): puxa ``amount_l`` da média/desvio da luminância e
+    ``amount_ab`` da média de a/b (Lab) na direção da foto, e limita a saturação média a ``chroma_cap`` × a da foto
+    (nunca abaixo de ``chroma_floor``, para um estilo colorido numa sala branca continuar colorido)."""
+    s = cv2.cvtColor(img.astype(np.float32) / 255.0, cv2.COLOR_RGB2Lab)
+    r = cv2.cvtColor(ref.astype(np.float32) / 255.0, cv2.COLOR_RGB2Lab)
+    L, a, b = s[..., 0], s[..., 1], s[..., 2]
+    mi, si = float(L.mean()), float(L.std()) + 1e-3
+    mr, sr = float(r[..., 0].mean()), float(r[..., 0].std()) + 1e-3
+    tm, ts = mi + amount_l * (mr - mi), si + amount_l * (sr - si)
+    L2 = (L - mi) * (ts / si) + tm
+    da = float(np.clip(amount_ab * (r[..., 1].mean() - a.mean()), -max_ab_shift, max_ab_shift))
+    db = float(np.clip(amount_ab * (r[..., 2].mean() - b.mean()), -max_ab_shift, max_ab_shift))
+    a2, b2 = a + da, b + db
+    ci = float(np.hypot(a2, b2).mean())
+    cr = float(np.hypot(r[..., 1], r[..., 2]).mean())
+    cap = max(chroma_cap * cr, chroma_floor)
+    if ci > cap:
+        k = cap / ci
+        a2, b2 = a2 * k, b2 * k
+    out = cv2.cvtColor(np.stack([np.clip(L2, 0, 100), a2, b2], -1).astype(np.float32), cv2.COLOR_Lab2RGB)
+    return np.clip(out * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
 __all__ = ["LOCK_GROUPS", "clean_mask", "lock_mask", "feather_alpha", "match_color", "composite", "lock_openings",
-           "generation_mask", "user_mask", "mask_bbox"]
+           "generation_mask", "user_mask", "mask_bbox", "label_mask", "bright_coverings", "doorway_views",
+           "frame_only", "cap_doors", "new_openings", "anchor_tone"]

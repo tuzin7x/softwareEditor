@@ -6,7 +6,7 @@ Roteiro (30 fps, 10–20 s, H.264 yuv420p pronto para WhatsApp/Instagram):
 2. **Revelação** — uma linha vertical clara (com puxador) atravessa a imagem da direita para a esquerda e revela a
    primeira versão; para no meio por um instante (antes | depois lado a lado) e termina a passada.
 3. **Versões** — cada versão seguinte entra por *crossfade*, sempre com o movimento Ken Burns (zoom entre 1,0 e
-   1,08 e uma panorâmica suave, com aceleração e frenagem suaves).
+   1,12 e uma panorâmica suave, com aceleração e frenagem suaves).
 
 Como todas as versões são a MESMA sala vista da mesma câmera, a câmera é uma só para o vídeo inteiro (função do
 tempo): no *crossfade* e na revelação as duas imagens recebem exatamente o mesmo enquadramento, então paredes,
@@ -170,6 +170,51 @@ def _cover(img: np.ndarray, w: int, h: int) -> np.ndarray:
     return np.ascontiguousarray(img)
 
 
+PAD_BELOW_ASPECT = 1.45     # fonte mais "alta" que isto (4:3, 5:4) no 16x9 ganha laterais desfocadas
+PAD_TO_ASPECT = 1.6         # ...até esta proporção: o recorte para 16:9 perde ~10% da altura, não 25%
+
+
+def _pad_fill(img: np.ndarray, aspect: float) -> tuple[np.ndarray, int]:
+    """Alarga a imagem até ``aspect`` com laterais feitas da própria foto (ampliada, bem desfocada e escurecida) e
+    uma emenda suave — no 16x9 uma foto 4:3 perdia teto e piso no recorte. Devolve a imagem e a margem (px)."""
+    H, W = img.shape[:2]
+    Wn = int(round(H * aspect))
+    if Wn <= W:
+        return img, 0
+    pad = (Wn - W) // 2
+    Wn = W + 2 * pad
+    bg = cv2.resize(img, (Wn, int(round(H * Wn / W))), interpolation=cv2.INTER_AREA)
+    y0 = (bg.shape[0] - H) // 2
+    bg = bg[y0:y0 + H]
+    bg = cv2.GaussianBlur(bg, (0, 0), 0.04 * Wn)
+    bg = (bg.astype(np.float32) * 0.55).astype(np.uint8)
+    out = bg.copy()
+    out[:, pad:pad + W] = img
+    feather = max(2, int(0.012 * W))
+    ramp = np.ones(Wn, np.float32)
+    ramp[:pad] = 0
+    ramp[pad + W:] = 0
+    ramp[pad:pad + feather] = smoothstep(np.linspace(0, 1, feather, dtype=np.float32))
+    ramp[pad + W - feather:pad + W] = smoothstep(np.linspace(1, 0, feather, dtype=np.float32))
+    a = ramp[None, :, None]
+    out = out.astype(np.float32) * a + bg.astype(np.float32) * (1 - a)
+    return np.clip(out + 0.5, 0, 255).astype(np.uint8), pad
+
+
+def unique_labels(names: list[str]) -> list[str]:
+    """Rótulos repetidos (duas versões do mesmo estilo) ganham "· versão 2", "· versão 3"..."""
+    seen: dict[str, int] = {}
+    out = []
+    for n in names:
+        k = n.strip().lower()
+        if not k:
+            out.append(n)
+            continue
+        seen[k] = seen.get(k, 0) + 1
+        out.append(n if seen[k] == 1 else f"{n} · versão {seen[k]}")
+    return out
+
+
 def _change_center(before: np.ndarray, afters: list[np.ndarray]) -> tuple[float, float]:
     """Centro (0..1) de onde o redesenho mais mudou a foto (os móveis novos), para o recorte inteligente."""
     s = 256 / max(before.shape[:2])
@@ -202,7 +247,7 @@ class Camera:
     keys_px: list[float]
     keys_py: list[float]
     max_pan: tuple[float, float]       # amplitude máxima da panorâmica (px na fonte), x e y
-    zoom_max: float = 1.08
+    zoom_max: float = 1.12
 
     def rect(self, t: float) -> tuple[float, float, float, float]:
         """(x0, y0, largura, altura) do recorte no instante t."""
@@ -485,7 +530,7 @@ class Showcase:
     """Gera os quadros do vídeo (``frame(i)``) e o MP4 (``render``)."""
 
     def __init__(self, before, afters: list, fmt: str = "16x9", fps: int = 30, duration: float | None = None,
-                 labels: list[str] | None = None, show_labels: bool = True, brand: bool = True, zoom: float = 1.08):
+                 labels: list[str] | None = None, show_labels: bool = True, brand: bool = True, zoom: float = 1.12):
         self.fmt = norm_format(fmt)
         self.W, self.H = FORMATS[self.fmt]
         self.fps = int(fps)
@@ -493,7 +538,7 @@ class Showcase:
         if not afters:
             raise ValueError("Escolha pelo menos uma versão (depois) para o vídeo.")
         names = list(labels) if labels is not None else [infer_label(a) for a in afters]
-        names = (names + [""] * len(afters))[:len(afters)]
+        names = unique_labels((names + [""] * len(afters))[:len(afters)])
         self.dropped = max(0, len(afters) - MAX_DESIGNS)
         afters, names = afters[:MAX_DESIGNS], names[:MAX_DESIGNS]
         self.labels = names
@@ -503,6 +548,12 @@ class Showcase:
         imgs = [_cover(a, w0, h0) for a in imgs]
         bef = _cover(_load_rgb(before), w0, h0)
         center = _change_center(bef, imgs)
+        if self.fmt == "16x9" and w0 / h0 < PAD_BELOW_ASPECT:
+            padded = [_pad_fill(x, PAD_TO_ASPECT) for x in [bef] + imgs]
+            pad = padded[0][1]
+            bef, imgs = padded[0][0], [p for p, _ in padded[1:]]
+            center = ((pad + center[0] * w0) / (w0 + 2 * pad), center[1])
+            w0 = bef.shape[1]
         # escala da fonte: o maior recorte com a proporção de saída cabe exatamente no quadro de saída (≈1:1)
         k = max(self.W / w0, self.H / h0)
         sw, sh = int(math.ceil(w0 * k)), int(math.ceil(h0 * k))
@@ -603,13 +654,18 @@ class Showcase:
         elif st["kind"] == "wipe":
             b = self._layer(0, M)
             a = self._layer(1, M)
-            self._shade(b)
-            self._shade(a)
-            self._label(b, 0, 1.0)
-            self._label(a, 1, 1.0)
             x = int(round(st["pos"] * self.W))
             out = a
             out[:, :x] = b[:, :x]
+            self._shade(out)
+            # rótulos por cima da composição (nunca cortados pelo divisor): cada um some/entra com a distância
+            # do divisor até ele — o "Antes" se apaga antes de a linha chegar nele, o "Depois" só aparece depois que ela passou
+            fw = 90.0 * self.scale
+            if self.show_labels:
+                bx1 = self.pos_before[0] + self.lab_before.shape[1]
+                ax0 = self.pos_after[0][0]
+                self._label(out, 0, float(smoothstep((x - bx1) / fw)))
+                self._label(out, 1, float(smoothstep((ax0 - x) / fw)))
             if 0 < x < self.W:
                 _blend_sprite(out, self.strip, x - self.strip_half, 0, 1.0)
                 kh, kw = self.knob.shape[:2]

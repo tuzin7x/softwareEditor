@@ -131,7 +131,7 @@ def test_vertical_format_and_camera_motion(imgs):
         assert x0 >= -1e-6 and y0 >= -1e-6 and x0 + w <= sc.cam.src_w + 1e-6 and y0 + h <= sc.cam.src_h + 1e-6
         assert w / h == pytest.approx(1080 / 1920, rel=1e-3)
     zooms = [1080 / w for _, _, w, _ in r]
-    assert zooms[0] == pytest.approx(1.0) and max(zooms) <= 1.08 + 1e-6 and max(zooms) > 1.06
+    assert zooms[0] == pytest.approx(1.0) and max(zooms) <= sc.cam.zoom_max + 1e-6 and max(zooms) > sc.cam.zoom_max - 0.02
     xs = np.array([x0 for x0, *_ in r])
     assert np.abs(np.diff(xs)).max() < 0.05 * sc.cam.src_w      # movimento lento e contínuo
     assert xs.max() - xs.min() > 0.05 * sc.cam.src_w             # mas atravessa a sala (passeio)
@@ -238,3 +238,34 @@ def test_cli_upscale_alias(monkeypatch, capsys, tmp_path):
     assert [e["event"] for e in ev] == ["progress", "progress", "progress", "done"]
     assert ev[0]["fraction"] == 0.0 and all(e["stage"] == "ampliar" for e in ev[:-1])
     assert ev[-1] == {"event": "done", "output": str(tmp_path / "o.jpg"), "size": [384, 256], "s": 0.1}
+
+
+def test_wipe_labels_never_cut_by_divider(imgs):
+    before, afters = imgs
+    sc = S.Showcase(before, afters, "16x9", labels=["Escandinavo", "Luxo", "Boho"], brand=False)
+    plain = S.Showcase(before, afters, "16x9", labels=["Escandinavo", "Luxo", "Boho"], brand=False)
+    orig = plain._label
+    plain._label = lambda frame, idx, alpha: None if idx == 0 else orig(frame, idx, alpha)
+    bx1 = sc.pos_before[0] + sc.lab_before.shape[1]
+    checked = False
+    for i in range(int(sc.tl.wipe[0] * sc.fps), int(sc.tl.wipe[1] * sc.fps)):
+        st = sc.state(i / sc.fps)
+        x = int(round(st["pos"] * sc.W))
+        if sc.pos_before[0] < x <= bx1 + 5:     # a linha passando sobre o rótulo "Antes": ele já sumiu
+            f, p = sc.frame(i), plain.frame(i)
+            y0 = sc.pos_before[1]
+            assert np.abs(f[y0:, :bx1].astype(int) - p[y0:, :bx1].astype(int)).max() <= 2
+            checked = True
+    assert checked
+
+
+def test_duplicate_labels_get_version_suffix():
+    assert S.unique_labels(["Contemporâneo", "Contemporâneo", "Luxo", ""]) == [
+        "Contemporâneo", "Contemporâneo · versão 2", "Luxo", ""]
+
+
+def test_4x3_source_is_padded_not_cropped_hard():
+    before = _stripes()
+    before = cv2.resize(before, (640, 480))
+    sc = S.Showcase(before, [_flat(COLORS[0], 640, 480)], "16x9", show_labels=False, brand=False)
+    assert sc.cam.src_w / sc.cam.src_h == pytest.approx(S.PAD_TO_ASPECT, rel=0.01)

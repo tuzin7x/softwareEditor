@@ -146,6 +146,8 @@ class DesignOutcome:
     report: str | None
     size: tuple[int, int] | None
     seconds: float
+    aviso: str | None = None          # o motor mudou algo por conta própria (ex.: ambiente vazio -> mobiliado)
+    funcao: str | None = None         # a função aplicada (pode diferir da pedida)
 
     @property
     def folder(self) -> str:
@@ -569,7 +571,7 @@ class MainWindow(QMainWindow):
         self.n_seg = Segmented([(1, "1"), (2, "2"), (3, "3"), (4, "4")], 4)
         self.n_seg.setFixedWidth(176)
         self.n_seg.changed.connect(lambda *_a: self._update_style_ready())
-        self.chk_fast = QCheckBox("Prévia rápida")
+        self.chk_fast = QCheckBox("Prévia rápida (resolução menor)")
         self.chk_fast.setToolTip("Resolução menor e menos passos: bom para testar ideias. Use a qualidade final "
                                  "para entregar.")
         vrow.addWidget(vl); vrow.addWidget(self.n_seg); vrow.addStretch(1); vrow.addWidget(self.chk_fast)
@@ -614,6 +616,10 @@ class MainWindow(QMainWindow):
         self.result_title = QLabel(""); self.result_title.setObjectName("result"); self.result_title.setWordWrap(True)
         self.result_info = QLabel(""); self.result_info.setObjectName("hint"); self.result_info.setWordWrap(True)
         pg.head.addWidget(self.result_title); pg.head.addSpacing(6); pg.head.addWidget(self.result_info)
+        self.result_notice = QLabel(""); self.result_notice.setObjectName("notice"); self.result_notice.setWordWrap(True)
+        self.result_notice.setStyleSheet(f"color: {theme.ACCENT}; padding-top: 6px;")
+        self.result_notice.hide()
+        pg.head.addWidget(self.result_notice)
         pg.head.addSpacing(18)
         b = pg.body
         self.selected_label = _section("VERSÃO 1 DE 4")
@@ -823,6 +829,8 @@ class MainWindow(QMainWindow):
             page = self.P_EDIT
         if page == self.P_EDIT and not self.edit_base:
             page = self.P_FUNC
+        if page != self.right.currentIndex():
+            self.statusBar().clearMessage()          # nada de "Geração cancelada" velho em outra tela
         self.right.setCurrentIndex(page)
         if page == self.P_PROGRESS:
             self.left.setCurrentIndex(self.L_PROGRESS)
@@ -970,6 +978,8 @@ class MainWindow(QMainWindow):
             self.room_chips[self.ambiente].setChecked(True)
         self.event_chips[self.evento].setChecked(True)
         self.style_cards[self.estilo].setChecked(True)
+        card = self.style_cards[self.estilo]
+        QTimer.singleShot(0, lambda: self.pages[self.P_STYLE].scroll.ensureWidgetVisible(card, 0, 24))
         self.aspect_seg.set_value(self.formato)
         self.text_summary.setText(self._summary())
         self._update_style_ready()
@@ -1148,9 +1158,13 @@ class MainWindow(QMainWindow):
             if before is None and req.funcao in NEEDS_PHOTO:
                 before = req.photo if req.funcao != "editar_area" else self.edit_base
             size = res.done.get("size")
+            aviso = res.done.get("aviso")
+            applied = res.done.get("funcao")
             self.result = DesignOutcome(req, outs, before, res.done.get("report"),
                                         tuple(size) if isinstance(size, (list, tuple)) and len(size) == 2 else None,
-                                        (res.finished_at or time.time()) - res.started_at)
+                                        (res.finished_at or time.time()) - res.started_at,
+                                        aviso if isinstance(aviso, str) and aviso else None,
+                                        applied if applied in CATALOG["funcoes"] else None)
             self.upscaled = {}
             self.taskbox.hide()
             self._show_result()
@@ -1178,12 +1192,14 @@ class MainWindow(QMainWindow):
         self.result_title.setText(f"{title} · {room}" if req.funcao != "fachada" else f"{title} · Fachada")
         took = int(round(r.seconds))
         took_s = f"{took // 60} min {took % 60:02d} s" if took >= 60 else f"{took} s"
-        dims = f"{r.size[0]} × {r.size[1]} px" if r.size else ""
         k = len(r.outputs)
-        info = [CATALOG["funcoes"][req.funcao], f"{k} {'versão' if k == 1 else 'versões'}"] + ([dims] if dims else [])
+        # sem "768 × 576 px" aqui: a resolução de trabalho não é a de entrega (o "Ampliar 4K" leva a 3840 px)
+        info = [CATALOG["funcoes"][r.funcao or req.funcao], f"{k} {'versão' if k == 1 else 'versões'}"]
         if took >= 1:
             info.append(f"em {took_s}")
         self.result_info.setText("  ·  ".join(info))
+        self.result_notice.setText(r.aviso or "")
+        self.result_notice.setVisible(bool(r.aviso))
         self.thumbs.set_items(r.outputs)
         self.compare.after_label = "DEPOIS"
         self.compare_cap.setText("Arraste sobre a imagem para comparar com a foto original." if r.before else
@@ -1377,6 +1393,8 @@ class MainWindow(QMainWindow):
         if not sel:
             return
         out = str(Path(self.result.folder) / f"antes_depois_{self.video_format}.mp4")
+        # versões já ampliadas entram em 4K: quadros de 1080p nítidos em vez de uma imagem de 768 px esticada
+        sel = [self.upscaled[o] if o in self.upscaled and Path(self.upscaled[o]).is_file() else o for o in sel]
         try:
             args = showcase_args(self.result.before, sel, out, self.video_format)
         except ValueError as e:

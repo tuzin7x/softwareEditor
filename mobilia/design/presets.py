@@ -8,7 +8,7 @@ gerador foi treinado) e uma lista curta de paletas: cada variação usa uma, par
 exatamente o que estes prompts evitam).
 
 Os textos para o usuário (rótulos) ficam em português; os prompts ficam em inglês. O CLIP do SDXL lê só os primeiros
-77 tokens de cada prompt: por isso a ordem é *ambiente + móveis -> estilo -> fotografia* e os textos são curtos.
+77 tokens de cada bloco: por isso a ordem é *ambiente + estilo -> materiais do estilo -> móveis -> fotografia*.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ ROOMS: dict[str, dict] = {
         "en": "living room",
         "furniture": ("a large sofa against the wall, two armchairs, a coffee table on a large area rug, side tables "
                       "with table lamps, a floor lamp, large framed wall art above the sofa, potted plants in the "
-                      "corners, curtains, throw pillows"),
+                      "corners, throw pillows"),
         "empty_negative": "",
     },
     "quarto": {
@@ -29,7 +29,7 @@ ROOMS: dict[str, dict] = {
         "en": "bedroom",
         "furniture": ("a double bed with an upholstered headboard against the wall, layered bedding and pillows, two "
                       "nightstands with table lamps, a large area rug under the bed, a bench at the foot of the bed, "
-                      "framed art above the bed, curtains, a plant"),
+                      "framed art above the bed, a plant"),
         "empty_negative": "",
     },
     "cozinha": {
@@ -51,14 +51,14 @@ ROOMS: dict[str, dict] = {
         "label": "Escritório",
         "en": "home office",
         "furniture": ("a large wooden desk, an ergonomic office chair, a bookshelf full of books and decor, a desk "
-                      "lamp, an area rug, framed wall art, a lounge armchair, a plant, curtains"),
+                      "lamp, an area rug, framed wall art, a lounge armchair, a plant"),
         "empty_negative": "",
     },
     "sala_jantar": {
         "label": "Sala de jantar",
         "en": "dining room",
         "furniture": ("a dining table with six upholstered chairs, a statement pendant chandelier above the table, a "
-                      "sideboard against the wall, a large area rug, framed wall art, a centerpiece vase, curtains"),
+                      "sideboard against the wall, a large area rug, framed wall art, a centerpiece vase"),
         "empty_negative": "",
     },
     "varanda": {
@@ -121,7 +121,7 @@ STYLES: dict[str, Style] = {s.key: s for s in (
           "industrial style building, dark metal cladding, brick, black steel frame windows"),
     Style("classico", "Clássico",
           "classic elegant interior design, wall moldings and wainscoting, tufted sofa, carved wood furniture, "
-          "crystal chandelier, symmetrical arrangement, silk curtains",
+          "crystal chandelier, symmetrical arrangement",
           ("cream and gold palette", "navy and ivory palette", "soft sage and cream palette"),
           "industrial, concrete, rustic",
           "classic neoclassical house, columns, cornices, symmetrical facade"),
@@ -129,7 +129,7 @@ STYLES: dict[str, Style] = {s.key: s for s in (
           "luxury high end interior design, marble surfaces, velvet sofa, brass and gold accents, designer "
           "lighting, plush rug, statement art, five star hotel quality",
           ("ivory, gold and black palette", "emerald green velvet and brass palette", "taupe and champagne palette"),
-          "cheap, plastic, cluttered, worn",
+          "cheap, plastic, cluttered, worn, glossy plastic marble, neon, colored ceiling",
           "luxury modern villa, marble and glass, warm architectural lighting"),
     Style("boho", "Boho",
           "bohemian interior design, rattan and wicker furniture, macrame, layered patterned rugs, many green "
@@ -174,6 +174,25 @@ STYLES: dict[str, Style] = {s.key: s for s in (
           "glossy, ultra modern, chrome",
           "modern farmhouse, white board and batten siding, black windows, metal roof"),
 )}
+
+# vocabulário concreto de cozinha e banheiro por estilo: "sofá de linho" não diz nada num banheiro, e sem isto o
+# estilo sutil (costeiro, japandi) virava só uma troca de cor
+WET: dict[str, str] = {
+    "moderno": "flat panel matte cabinets, quartz countertop, large format porcelain tiles, black fixtures",
+    "contemporaneo": "handleless cabinets, natural stone slab, fluted details, brushed nickel fixtures",
+    "escandinavo": "white cabinets with light oak, white subway tiles, light wood shelves, matte white fixtures",
+    "minimalista": "seamless handleless cabinets, microcement surfaces, hidden storage, slim fixtures",
+    "industrial": "black metal open shelving, concrete countertop, dark subway tiles, exposed pipes, black fixtures",
+    "classico": "raised panel cabinets with moldings, white marble, brass fixtures, ornate framed mirror",
+    "luxo": "book-matched marble slabs, brass fixtures, custom lacquered cabinets, statement lighting",
+    "boho": "terracotta zellige tiles, rattan mirror, wood open shelves, woven baskets, many plants",
+    "japandi": "light ash wood cabinets, stone sink, slatted wood panels, paper lantern, minimal ceramics",
+    "rustico": "reclaimed wood cabinets, natural stone walls, butcher block, copper fixtures",
+    "costeiro": "white shiplap, pale blue and sand tones, rattan, jute, driftwood mirror, seagrass baskets",
+    "tropical": "freijo wood cabinets, green ceramic tiles, natural stone, tropical plants, cane details",
+    "mid_century": "walnut slab cabinets, terrazzo, colorful retro tiles, globe lights, tapered legs",
+    "farmhouse": "white shaker cabinets, apron front sink, butcher block, black fixtures, shiplap",
+}
 
 # ============================================================================================ eventos
 EVENTS: dict[str, dict] = {
@@ -222,39 +241,63 @@ class FunctionPreset:
     keep_layout: bool = False         # o prompt pede manter a disposição
     exterior: bool = False
     event: bool = False
+    # rótulos ADE20K (não grupos) colados de volta como as janelas: eletrodomésticos não somem nem mudam de lugar
+    # numa troca de estilo (geladeira, fogão, forno...). Só nas funções que mantêm a disposição
+    fixed: tuple[str, ...] = ()
+    # janela/porta/cortina nova numa parede que não tinha abertura é refeita como parede lisa (``api._repair``)
+    repair: bool = True
+
+
+APPLIANCES = ("refrigerator", "stove", "oven", "dishwasher", "microwave")
 
 
 FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
-    FunctionPreset("mudar_estilo", "Mudar estilo", strength=0.8, control_scale=0.65, control_end=0.8,
-                   guidance=1.8, keep_layout=True),
-    FunctionPreset("reforma", "Reforma completa", strength=1.0, control_scale=0.45, control_end=0.5,
+    # 0,8 trocava a cozinha inteira de uma sala integrada e sumia com a geladeira; 0,67 com 6 passos quase não
+    # mudava nada (a força caía para 0,5 antes do ``plan_steps``). 0,72 com profundidade forte e longa mantém a
+    # disposição; os eletrodomésticos voltam por cima (``fixed``)
+    FunctionPreset("mudar_estilo", "Mudar estilo", strength=0.72, control_scale=0.75, control_end=0.9,
+                   guidance=1.8, keep_layout=True, fixed=APPLIANCES),
+    # 1,0 com profundidade só na primeira metade inventava janelas em paredes lisas em metade das versões: 0,9 deixa
+    # um pouco da foto e a profundidade vai até 70% do caminho (paredes e aberturas no lugar, móveis novos)
+    FunctionPreset("reforma", "Reforma completa", strength=0.9, control_scale=0.55, control_end=0.7,
                    guidance=2.0),
     FunctionPreset("redesign_simples", "Redesign simples", strength=0.45, control_scale=0.8, control_end=1.0,
-                   guidance=1.5, keep_layout=True),
+                   guidance=1.5, keep_layout=True, fixed=APPLIANCES),
     # profundidade fraca e curta: a da sala VAZIA puxa o gerador para um piso vazio (com 0,5/0,5 metade das versões
     # saía com um tapete e uma cadeira); a estrutura fica presa pelas janelas/portas mantidas nos latentes
     FunctionPreset("mobiliar", "Mobiliar ambiente vazio", strength=1.0, control_scale=0.35, control_end=0.35,
                    guidance=2.8, lock=("window", "door", "window_covering")),
-    FunctionPreset("editar_area", "Editar área", strength=1.0, control_scale=0.35, control_end=0.6,
-                   guidance=1.8, lock=(), needs_mask=True, furnish=False),
+    # sem profundidade: a do objeto antigo redesenhava a silhueta dele (o "fantasma" na borda da máscara)
+    FunctionPreset("editar_area", "Editar área", strength=1.0, control_scale=0.0, control_end=0.0,
+                   guidance=1.8, lock=(), needs_mask=True, furnish=False, repair=False),
     FunctionPreset("fachada", "Fachada", strength=0.72, control_scale=0.7, control_end=0.85, guidance=1.8,
-                   lock=(), exterior=True),
+                   lock=(), exterior=True, repair=False),
     # 0,62 não punha nem a árvore de Natal: a decoração precisa de espaço para aparecer
     FunctionPreset("evento", "Decoração de evento", strength=0.8, control_scale=0.55, control_end=0.6,
-                   guidance=1.8, furnish=False, keep_layout=True, event=True),
+                   guidance=1.8, furnish=False, keep_layout=True, event=True, fixed=APPLIANCES),
     FunctionPreset("texto", "Texto para ambiente", strength=1.0, control_scale=0.0, control_end=0.0, guidance=2.0,
-                   lock=(), needs_photo=False),
+                   lock=(), needs_photo=False, repair=False),
 )}
 
+# funções que, numa foto de ambiente vazio, viram "Mobiliar" (mudar o estilo de uma sala vazia devolvia uma sala
+# vazia com um vaso: exatamente o que o usuário odiou)
+EMPTY_TO_STAGING = ("mudar_estilo", "redesign_simples", "reforma")
+EMPTY_FURNITURE_FRAC = 0.06       # móveis/bancadas abaixo disto (fração da área fora da trava) = ambiente vazio
+
 # ============================================================================================ prompts
-PHOTO_TAIL = ("professional interior design magazine photograph, natural daylight, realistic materials, "
+PHOTO_TAIL = ("professional interior design magazine photograph, {light}, realistic materials, "
               "sharp focus, high detail, photorealistic")
+LIGHT_WINDOWS = "soft daylight from the existing windows"
+LIGHT_NONE = "soft natural light"
 EXTERIOR_TAIL = "professional architectural photograph, daylight, realistic materials, sharp focus, photorealistic"
 
 NEGATIVE_BASE = ("cgi, 3d render, cartoon, illustration, painting, plastic, waxy, oversaturated, lowres, blurry, "
                  "noise, distorted perspective, warped walls, deformed furniture, floating furniture, extra window, "
-                 "extra door, people, text, watermark, messy, cluttered")
+                 "extra door, people, text, letters, typography, logo, watermark, messy, cluttered")
+# aberturas inventadas: cortinas numa parede lisa "explicadas" com uma janela, porta interna virando vidro
+NEGATIVE_OPENINGS = "new window, window on a plain wall, floor-to-ceiling windows, glass wall, curtains on a plain wall"
 NEGATIVE_EMPTY = "empty room, unfurnished, bare floor, sparse, single vase, lonely object in the middle of the room"
+OPEN_KITCHEN = "open-plan kitchen with its cabinets and appliances kept in place"
 
 
 @dataclass(frozen=True)
@@ -305,16 +348,33 @@ def norm_event(key: str) -> str:
     return _norm(key, EVENTS, "Evento")
 
 
+def _style_details(st: Style, room_key: str) -> str:
+    """Materiais e peças do estilo (sem o adjetivo, que já abre o prompt); em cozinha/banheiro, o vocabulário
+    de cozinha/banheiro do estilo no lugar do de sala (sofá de linho num banheiro só confunde)."""
+    if room_key in ("cozinha", "banheiro") and st.key in WET:
+        return WET[st.key]
+    return ", ".join(x.strip() for x in st.prompt.split(",")[1:])
+
+
 def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala", variation: int = 0,
-                 extra: str = "", evento: str | None = None) -> DesignPrompt:
-    """Prompt positivo e negativo para uma variação. ``extra`` é o texto livre do usuário (vai na frente: é o que
-    ele mais quer). ``variation`` escolhe a paleta do estilo (gira entre as opções)."""
+                 extra: str = "", evento: str | None = None, windows: bool = True,
+                 open_kitchen: bool = False) -> DesignPrompt:
+    """Prompt positivo e negativo para uma variação.
+
+    ``extra`` é o texto livre do usuário (vai na frente: é o que ele mais quer; com ele a paleta do estilo sai,
+    para não brigar com a cor que ele pediu). ``variation`` escolhe a paleta do estilo (gira entre as opções).
+    ``windows``: a foto tem janelas (cortinas e luz "das janelas existentes" só então; sem janelas, pedir
+    cortinas fazia o gerador inventar uma janela atrás delas). ``open_kitchen``: sala com cozinha integrada.
+
+    Ordem (o CLIP pesa mais o começo): ambiente + estilo -> materiais e peças do estilo -> paleta -> móveis do
+    ambiente -> fotografia."""
     f = function(funcao)
     rk = norm_room("fachada" if f.exterior else ambiente)
     r = ROOMS[rk]
     st = STYLES[norm_style(estilo)] if estilo else None
-    palette = st.palettes[variation % len(st.palettes)] if st else ""
     extra = " ".join((extra or "").split())
+    palette = st.palettes[variation % len(st.palettes)] if (st and not extra) else ""
+    tail = PHOTO_TAIL.format(light=LIGHT_WINDOWS if windows else LIGHT_NONE)
     parts: list[str] = []
     if extra:
         parts.append(extra)
@@ -327,23 +387,33 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
         neg.append("interior, furniture, indoor")
     elif f.event:
         ev = EVENTS[norm_event(evento or (estilo if estilo in EVENTS else "aniversario"))]
-        parts += [f"photo of a {r['en']} {ev['prompt']}", "same room, same walls and windows", PHOTO_TAIL]
+        parts += [f"photo of a {r['en']} {ev['prompt']}", "same room, same walls and windows",
+                  OPEN_KITCHEN if open_kitchen else "", tail]
+        neg.append(NEGATIVE_OPENINGS)
     elif f.key == "editar_area":
         if st:
-            parts += [st.prompt.split(",")[0], palette]
-        parts.append(f"inside a {r['en']}, seamless, matching lighting and perspective, {PHOTO_TAIL}")
+            parts.append(st.prompt.split(",")[0])
+            if not extra:
+                parts.append(palette)
+        parts.append(f"inside a {r['en']}, seamless, matching lighting and perspective, {tail}")
         neg.append("seam, visible border, mismatched lighting")
     else:
         adj = st.prompt.split(",")[0].replace(" interior design", "").strip() + " " if st else ""
-        lead = {"mobiliar": f"photo of a fully furnished {adj}{r['en']} with {r['furniture']}",
-                "reforma": f"photo of a beautifully redesigned {adj}{r['en']} with {r['furniture']}"}.get(
-            f.key, f"photo of a {adj}{r['en']}, {r['furniture']}")
+        lead = {"mobiliar": f"photo of a fully furnished {adj}{r['en']}",
+                "reforma": f"photo of a beautifully redesigned {adj}{r['en']}"}.get(f.key, f"photo of a {adj}{r['en']}")
         parts.append(lead)
         if st:
-            parts += [", ".join(x.strip() for x in st.prompt.split(",")[1:]), palette]
-        parts.append(PHOTO_TAIL)
+            parts += [_style_details(st, rk), palette]
+        parts.append(("with " if f.key in ("mobiliar", "reforma") else "") + r["furniture"])
+        if windows and f.furnish and rk not in ("cozinha", "banheiro", "varanda"):
+            parts.append("curtains framing the existing windows")
+        if open_kitchen:
+            parts.append(OPEN_KITCHEN)
+        parts.append(tail)
         if f.furnish:
             neg.append(NEGATIVE_EMPTY)
+        if f.needs_photo:
+            neg.append(NEGATIVE_OPENINGS)
         if f.key == "mobiliar":     # o volume é da sala vazia: nada de arquitetura nova
             neg.append("fireplace, radiator, column, new wall, built-in niche")
     if st and st.negative:
@@ -398,6 +468,7 @@ def catalog() -> dict:
             "eventos": {k: e["label"] for k, e in EVENTS.items()}}
 
 
-__all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "Style", "FunctionPreset", "DesignPrompt", "QualityProfile",
+__all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "WET", "APPLIANCES", "EMPTY_TO_STAGING", "EMPTY_FURNITURE_FRAC",
+           "NEGATIVE_OPENINGS", "OPEN_KITCHEN", "Style", "FunctionPreset", "DesignPrompt", "QualityProfile",
            "function", "style", "room", "norm_room", "norm_style", "norm_event", "build_prompt", "with_overrides",
            "quality_profile", "work_size", "catalog", "NEGATIVE_BASE", "NEGATIVE_EMPTY"]

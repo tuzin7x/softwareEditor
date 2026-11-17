@@ -180,7 +180,7 @@ class StyleCard(CardButton):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_compact(self, compact: bool) -> None:
-        self.setFixedHeight(74 if compact else 84)
+        self.setFixedHeight(68 if compact else 84)
 
     def paintEvent(self, e):  # noqa: N802
         p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
@@ -201,7 +201,8 @@ class StyleCard(CardButton):
         p.restore()
         p.setPen(QPen(QColor(255, 255, 255, 20), 1)); p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(sw, 7, 7)
-        p.setFont(_font(12, QFont.DemiBold if self.isChecked() else QFont.Medium))
+        # cartões estreitos (1280×720): fonte um ponto menor em vez de cortar "Minimalista"/"Contemporâneo"
+        p.setFont(_font(12 if r.width() >= 120 else 11, QFont.DemiBold if self.isChecked() else QFont.Medium))
         p.setPen(QColor(theme.TEXT if self.isChecked() else theme.TEXT_2))
         fm = QFontMetrics(p.font())
         name = fm.elidedText(self.label, Qt.ElideRight, int(r.width() - 16))

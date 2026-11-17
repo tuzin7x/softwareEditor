@@ -49,7 +49,7 @@ class FakeEngine:
         return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def _room(W=320, H=240):
+def _room(W=320, H=240, furnished=True):
     """Foto sintética: parede, piso, teto e uma janela na parede (com 'vista' texturizada)."""
     rng = np.random.default_rng(0)
     rgb = np.zeros((H, W, 3), np.uint8)
@@ -62,6 +62,9 @@ def _room(W=320, H=240):
     y0, y1, x0, x1 = H // 4, H // 2 + 10, W // 2, W // 2 + W // 4
     g[y0:y1, x0:x1] = WIN
     rgb[y0:y1, x0:x1] = rng.integers(60, 255, (y1 - y0, x1 - x0, 3), dtype=np.uint8)
+    if furnished:            # um sofá encostado na parede: o ambiente não é "vazio"
+        g[int(H * 0.5):int(H * 0.8), int(W * 0.05):int(W * 0.4)] = FURN
+        rgb[int(H * 0.5):int(H * 0.8), int(W * 0.05):int(W * 0.4)] = (90, 90, 100)
     depth = np.tile(np.linspace(6.0, 2.0, H, dtype=np.float32)[:, None], (1, W))   # piso embaixo = perto
     return rgb, g, depth, (y0, y1, x0, x1)
 
@@ -69,6 +72,24 @@ def _room(W=320, H=240):
 @pytest.fixture()
 def room():
     return _room()
+
+
+class FakeSegmenter:
+    """OneFormer falso da conferência pós-geração (nota/reparo): sem janela nova nenhuma."""
+
+    def __init__(self, device="cpu", long_side=512):
+        pass
+
+    def groups(self, rgb):
+        return np.full(rgb.shape[:2], WALL, np.uint8)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_segmenter(monkeypatch):
+    monkeypatch.setattr(Q, "Segmenter", FakeSegmenter)
 
 
 # ============================================================================ presets
@@ -383,9 +404,15 @@ def test_edit_area_pixel_identical_outside_mask(room, tmp_path):
     res = api.edit_area(rgb, str(mpath), prompt="round wooden coffee table", n=2, seed=4, out_dir=tmp_path / "o",
                         engine=eng, depth=depth)
     assert res.size == (rgb.shape[1], rgb.shape[0])
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    g = rep["margem_px"]
+    assert 0 < g <= 0.012 * np.hypot(*rgb.shape[:2]) + 1
+    import cv2
+
+    outside = cv2.dilate((mask > 0).astype(np.uint8), AL._disk(g)) == 0
     for img in res.images:
         assert img.shape == rgb.shape
-        assert np.array_equal(img[mask == 0], rgb[mask == 0])
+        assert np.array_equal(img[outside], rgb[outside])
         assert np.abs(img[170:200, 60:120].astype(int) - rgb[170:200, 60:120].astype(int)).mean() > 20
     c = eng.calls[0]
     assert "round wooden coffee table" in c["prompt"].positive and c["strength"] >= 0.97
@@ -534,3 +561,156 @@ def test_cli_ampliar_contract(monkeypatch, capsys, tmp_path):
         tmp_path / "o.jpg"), "size": [384, 256], "s": 0.1}
     code = cli.main(["ampliar", "--image", str(tmp_path / "x.jpg"), "--out", str(tmp_path / "o.jpg"), "--json"])
     assert code == 1 and json.loads(capsys.readouterr().out.splitlines()[-1])["event"] == "error"
+
+
+# ============================================================================ rodada 2: correções gerais
+def test_empty_room_switches_style_change_to_staging(tmp_path):
+    rgb, g, depth, _ = _room(furnished=False)
+    assert api.furniture_coverage(g) < P.EMPTY_FURNITURE_FRAC
+    for funcao in ("mudar_estilo", "redesign_simples", "reforma"):
+        eng = FakeEngine()
+        events = []
+        res = api.redesign(rgb, funcao, "costeiro", "sala", n=1, seed=1, out_dir=tmp_path / funcao, engine=eng,
+                           depth=depth, groups=g, long_side=256, progress=events.append)
+        c = eng.calls[0]
+        mob = P.FUNCTIONS["mobiliar"]
+        assert res.funcao == "mobiliar" and c["strength"] == mob.strength
+        assert "fully furnished coastal living room" in c["prompt"].positive
+        done = res.to_event()
+        assert done["funcao_pedida"] == funcao and "vazio" in done["aviso"]
+        assert any("vazio" in e.get("message", "") for e in events)
+    # com móveis, nada muda; e ``auto_empty=False`` respeita a função pedida
+    rgb2, g2, depth2, _ = _room()
+    res = api.redesign(rgb2, "mudar_estilo", "costeiro", n=1, seed=1, out_dir=tmp_path / "x", engine=FakeEngine(),
+                       depth=depth2, groups=g2, long_side=256)
+    assert res.funcao == "mudar_estilo" and "aviso" not in res.to_event()
+    res = api.redesign(rgb, "mudar_estilo", "costeiro", n=1, seed=1, out_dir=tmp_path / "y", engine=FakeEngine(),
+                       depth=depth, groups=g, long_side=256, auto_empty=False)
+    assert res.funcao == "mudar_estilo"
+
+
+def test_prompts_curtains_only_with_windows_and_palette_yields_to_user_text():
+    p = P.build_prompt("reforma", "classico", "sala", 0, windows=False)
+    assert "curtain" not in p.positive and "soft natural light" in p.positive
+    assert "window on a plain wall" in p.negative
+    q = P.build_prompt("reforma", "classico", "sala", 0, windows=True)
+    assert "curtains framing the existing windows" in q.positive and "existing windows" in q.positive
+    e = P.build_prompt("editar_area", "mid_century", "sala", 1, extra="poltrona de couro caramelo")
+    assert not any(pal in e.positive for pal in P.STYLES["mid_century"].palettes)
+    assert e.positive.startswith("poltrona de couro caramelo") and "mid-century" in e.positive
+    b = P.build_prompt("mudar_estilo", "costeiro", "banheiro", 0)
+    assert "shiplap" in b.positive and "sofa" not in b.positive.split("a floating vanity")[0]
+    k = P.build_prompt("mudar_estilo", "tropical", "sala", 0, open_kitchen=True)
+    assert P.OPEN_KITCHEN in k.positive
+    assert "letters" in p.negative
+
+
+def test_bright_curtain_becomes_lock_and_dark_one_does_not():
+    rgb = np.full((100, 100, 3), 120, np.uint8)
+    cov = np.zeros((100, 100), bool)
+    cov[10:60, 10:30] = True
+    rgb[10:60, 10:30] = 250                    # cortina com luz atravessando
+    cov[10:60, 60:80] = True
+    rgb[10:60, 60:80] = 60                     # cortina escura
+    m = AL.bright_coverings(cov, rgb)
+    assert m[30, 20] and not m[30, 70]
+
+
+def test_doorway_view_is_locked_next_to_the_door_leaf():
+    H, W = 120, 160
+    z = np.full((H, W), 3.0, np.float32)       # parede a 3 m
+    door = np.zeros((H, W), bool)
+    door[30:110, 60:75] = True                 # folha da porta
+    z[30:110, 75:100] = 7.0                    # o cômodo do lado, visto pelo vão
+    z[10:20, 130:150] = 9.0                    # algo fundo longe da porta (não entra)
+    v = AL.doorway_views(door, z)
+    assert v[70, 85] and not v[15, 140] and not v[70, 20]
+
+
+def test_big_door_and_bathroom_doors_lock_only_their_frame():
+    lock = np.zeros((100, 100), bool)
+    door = np.zeros((100, 100), bool)
+    door[10:90, 20:70] = True                  # 40% da imagem: box de vidro
+    lock |= door
+    capped, n = AL.cap_doors(lock, door)
+    assert n == 1 and not capped[50, 45] and capped[10, 45] and capped[50, 20]
+    small = np.zeros((100, 100), bool)
+    small[40:70, 80:90] = True
+    capped, n = AL.cap_doors(small.copy(), small)
+    assert n == 0 and capped[55, 85]
+    capped, n = AL.cap_doors(small.copy(), small, all_frames=True)
+    assert n == 1 and not capped[55, 85]
+
+
+def test_new_openings_ignore_existing_ones_and_curtains_beside_them():
+    orig = np.zeros((100, 100), bool)
+    orig[20:50, 20:40] = True
+    gen = np.full((100, 100), WALL, np.uint8)
+    gen[20:50, 20:40] = WIN                    # a janela original
+    gen[20:50, 42:47] = GROUP_IDS["window_covering"]   # cortina ao lado dela
+    assert not AL.new_openings(gen, orig, (100, 100)).any()
+    gen[30:60, 70:95] = WIN                    # janela inventada numa parede lisa
+    new = AL.new_openings(gen, orig, (100, 100))
+    assert new[45, 80] and not new[30, 30]
+
+
+def test_redesign_repairs_invented_window(tmp_path):
+    rgb, g, depth, _ = _room()
+    eng = FakeEngine()
+
+    def fake_groups(img):
+        out = np.full(img.shape[:2], WALL, np.uint8)
+        h, w = out.shape
+        out[int(h * 0.2):int(h * 0.45), int(w * 0.05):int(w * 0.3)] = WIN     # parede lisa à esquerda
+        return out
+
+    res = api.redesign(rgb, "reforma", "luxo", n=1, seed=2, out_dir=tmp_path, engine=eng, depth=depth, groups=g,
+                       long_side=256, rank_fn=fake_groups)
+    assert len(eng.calls) == 2                               # versão + reparo
+    rep_call = eng.calls[1]
+    assert "plain painted wall" in rep_call["prompt"].positive and "window" in rep_call["prompt"].negative
+    H, W = rep_call["mask"].shape
+    assert rep_call["mask"][int(H * 0.3), int(W * 0.15)] and not rep_call["mask"][int(H * 0.9), int(W * 0.9)]
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["reparos"] and Path(res.outputs[0]).is_file()
+    # sem reparo pedido: uma chamada só
+    eng2 = FakeEngine()
+    api.redesign(rgb, "reforma", "luxo", n=1, seed=2, out_dir=tmp_path / "s", engine=eng2, depth=depth, groups=g,
+                 long_side=256, rank_fn=fake_groups, repair=False)
+    assert len(eng2.calls) == 1
+
+
+def test_appliances_are_pasted_back_from_labels(tmp_path):
+    from mobilia.analysis.segmentation import SegmentationResult, labels_to_groups
+
+    rgb, _, depth, _ = _room()
+    H, W = rgb.shape[:2]
+    names = {0: "wall", 1: "floor", 2: "refrigerator, icebox", 3: "windowpane, window", 4: "sofa, couch, lounge",
+             5: "cabinet"}
+    labels = np.zeros((H, W), np.uint8)
+    labels[int(H * 0.65):] = 1
+    labels[60:200, 10:60] = 2                  # geladeira
+    labels[60:120, 160:240] = 3
+    labels[130:200, 100:150] = 4
+    seg = SegmentationResult(labels, labels_to_groups(labels, names), names)
+    rgb[60:200, 10:60] = (230, 230, 235)
+    eng = FakeEngine()
+    res = api.redesign(rgb, "mudar_estilo", "industrial", "cozinha", n=1, seed=3, out_dir=tmp_path, engine=eng,
+                       depth=depth, groups=seg, long_side=320)
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["trava"]["eletrodomesticos"] > 0.05
+    Wr, Hr = res.size
+    base = np.asarray(Image.open(res.before))
+    sx, sy = Wr / W, Hr / H
+    core = (slice(int(80 * sy), int(180 * sy)), slice(int(20 * sx), int(50 * sx)))
+    assert np.abs(res.images[0][core].astype(int) - base[core].astype(int)).mean() < 30     # só o casamento de cor
+
+
+def test_anchor_tone_pulls_cast_back_but_keeps_style_color():
+    ref = np.full((64, 64, 3), (200, 200, 200), np.uint8)
+    yellow = np.full((64, 64, 3), (230, 200, 120), np.uint8)
+    out = AL.anchor_tone(yellow, ref)
+    assert out[..., 2].mean() > yellow[..., 2].mean()        # menos amarelo
+    assert out[..., 0].mean() - out[..., 2].mean() > 20      # mas ainda quente (âncora parcial)
+    same = AL.anchor_tone(ref, ref)
+    assert np.abs(same.astype(int) - ref.astype(int)).max() <= 2

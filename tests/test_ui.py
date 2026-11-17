@@ -687,3 +687,17 @@ def test_gate_choice_mode_a(app, lwin, tmp_path, monkeypatch):
     assert "--mode" in lwin.runner.command_for(lwin.last_request)
     assert _wait(app, lambda: lwin.right.currentIndex() == 2)
     assert lwin.last_job.mode == "A"
+
+
+def test_engine_notice_shown_on_results(app, win):
+    """O motor trocou a função (foto de ambiente vazio -> Mobiliar): a tela de resultados diz isso."""
+    win.load_photo(str(FX)); app.processEvents()
+    win.function_cards["mudar_estilo"].click(); app.processEvents()
+    win.n_seg.buttons[1].click()
+    win.prompt.setPlainText("vazio")
+    win.btn_generate.click(); app.processEvents()
+    assert _wait(app, lambda: win.page() == win.P_RESULTS)
+    assert win.result.aviso and win.result.funcao == "mobiliar"
+    assert win.result_notice.isVisible() and "vazio" in win.result_notice.text()
+    assert "Mobiliar" in win.result_info.text() and " px" not in win.result_info.text()
+    assert win.statusBar().currentMessage() == ""
