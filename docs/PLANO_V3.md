@@ -43,6 +43,24 @@ A "exatidão" vale nos quadros mestres e na resolução do vídeo. O `load_photo
 
 **Entrada:** foto da sala vazia e tipo de ambiente (como hoje). **Saída:** o vídeo começa na foto exata e as peças entram até a sala mobiliada.
 
+### 2.0 Requisito do usuário (17/11/2026) e avaliação dos assets atuais
+
+**Requisito:** no modo A os móveis precisam parecer **100% fotografados dentro do imóvel**: nada de visual de videogame, desenho,
+3D simplificado ou material artificial. O 3D pode ser usado **por dentro** (posição, escala, profundidade, sombras de contato,
+ordem e tempo da animação), mas **nenhum pixel final pode vir de render CG**. A foto continua intacta fora dos móveis e das sombras,
+e os móveis surgem e se montam progressivamente.
+
+**Avaliação dos assets atuais (procedurais + Poly Haven CC0 no Cycles): não atingem esse padrão.**
+- Procedurais (`assets/procedural.py`: cama, cortina, tapete, luminárias, pilha de livros, mesa): geometria e materiais simples; leem
+  como CG mesmo com a calibração de luz da V2. Servem só como volume para posição e profundidade.
+- Poly Haven CC0 (fotoescaneados em parte): os melhores do catálogo, mas o render inteiro ainda foi rejeitado ("parece 3D") e o
+  crítico confirmou. Motivo: integração de luz, materiais e microdetalhe de foto, não só a qualidade da malha.
+- Assets 3D comerciais "archviz" de alto nível (tipo bibliotecas pagas) melhorariam, mas (a) quase todas proíbem redistribuir os
+  modelos dentro de um software e (b) ainda dependem de render CG, que é exatamente o que o usuário não quer ver.
+- **Conclusão:** o caminho é o deste capítulo: o 3D (procedural + Poly Haven) vira **só passe de geometria** (Z/normais/máscaras
+  por peça) e os pixels finais vêm do modelo de difusão fotográfico guiado por essa geometria. Os assets atuais continuam úteis e
+  não precisam ser trocados para isso; a qualidade fotográfica vem da geração, não da malha.
+
 ### 2.1 Pipeline
 
 1. **Análise (existente):** MoGe-2, OneFormer e `build_room_model`.
@@ -63,7 +81,8 @@ A "exatidão" vale nos quadros mestres e na resolução do vídeo. O `load_photo
 
 - Hoje (R2): 4,5/10. Metas da V3: hires pass, seleção de sementes, sem acessórios pequenos e oclusão resolvida. Alvo: ≥ 7/10 numa sala típica.
 - Mudar o produto (o sofá sair diferente do planejado) **não é defeito** no modo A: o cliente vende o imóvel, não o sofá. O layout só garante escala e posição.
-- Fallback: se nenhuma semente passar na nota mínima, usar o motor v2 (Cycles) e avisar no relatório.
+- Fallback: **nunca** voltar a mostrar render CG (requisito de 17/11). Se nenhuma semente passar na nota mínima: mais sementes,
+  depois layout simplificado (menos peças, só as grandes), e se ainda falhar terminar com aviso claro na tela e no relatório.
 
 ---
 
