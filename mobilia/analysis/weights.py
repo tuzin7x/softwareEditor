@@ -81,15 +81,20 @@ def ensure_local(repo_id: str) -> float:
 
 
 def prefetch_models(progress: Callable[[float, str], None] | None = None, v3: bool = True,
-                    sdxl: bool = False) -> None:
+                    sdxl: bool = False, design: bool = True) -> None:
     """Baixa (ou confere no cache) todos os pesos usados pela análise. Idempotente.
 
-    ``v3``: inclui os pesos do modo B (SAM 2.1 e big-lama, com SHA-256 conferido). ``sdxl``: inclui o refino SDXL
-    da sala vazia (+7,4 GB; perfil "B com SDXL")."""
+    ``design``: pesos do redesenho de ambientes, o fluxo principal (``DESIGN_WEIGHTS``: SDXL Lightning, codificadores
+    de texto, VAE fp16-fix, ControlNet de profundidade e o ampliador 4x; ~7,5 GB). ``v3``: inclui os pesos do modo B
+    legado (SAM 2.1 e big-lama, com SHA-256 conferido). ``sdxl``: só o refino SDXL da sala vazia do modo B (já
+    incluído em ``design``)."""
     from huggingface_hub import hf_hub_download, snapshot_download
 
     repos = model_repos()
-    v3w = (V3_WEIGHTS if v3 else ()) + (SDXL_WEIGHTS if sdxl else ())
+    v3w: tuple = (V3_WEIGHTS if v3 else ())
+    for w in (DESIGN_WEIGHTS if design else ()) + (SDXL_WEIGHTS if sdxl else ()):
+        if w not in v3w:
+            v3w += (w,)
     n = len(repos) + 1 + len(v3w)
     for i, repo in enumerate(repos):
         if progress:
@@ -436,3 +441,21 @@ def sdxl_installed(required: tuple | None = None) -> bool:
         return True
     except WeightsError:
         return False
+
+
+# ============================================================================ ampliador 4x ("Ampliar 4K")
+# Real-ESRGAN x4plus (RRDBNet), licença BSD-3-Clause, arquivo oficial da versão 0.1.0 do projeto. Arquitetura
+# reimplementada em ``mobilia/design/upscale.py`` (sem a dependência basicsr).
+ESRGAN_WEIGHT = FileWeight(
+    key="realesrgan_x4plus", filename="RealESRGAN_x4plus.pth", subdir="realesrgan",
+    sha256="4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1", size=67040989,
+    urls=("https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",),
+    label="Real-ESRGAN x4 (ampliar 4K)", licenca="BSD-3-Clause")
+
+# Redesenho de ambientes (fluxo principal): o que ``mobilia/design`` usa além da análise (MoGe-2 e OneFormer, em
+# ``model_repos``).
+DESIGN_WEIGHTS: tuple = SDXL_WEIGHTS + (ESRGAN_WEIGHT,)
+
+
+def esrgan_path(offline: bool = False) -> Path:
+    return ensure_file_weight(ESRGAN_WEIGHT, offline=offline)

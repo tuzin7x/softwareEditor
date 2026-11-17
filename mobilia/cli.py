@@ -6,6 +6,10 @@ Uso:
   python -m mobilia.cli analyze --photo sala.jpg --out pasta/
   python -m mobilia.cli prefetch [--modelos] [--ativos] [--res 1k,2k] [--json]
   python -m mobilia.cli aquecer [--sem-blender] [--sem-modelos] [--json]
+  python -m mobilia.cli design --photo sala.jpg --funcao mudar_estilo --estilo escandinavo --ambiente sala
+                               [--n 4] [--seed 7] [--mask area.png] [--prompt "texto"] [--evento natal]
+                               [--out-dir pasta/] [--quality rapido|final] [--json]
+  python -m mobilia.cli ampliar --image versao.jpg --out versao_4k.jpg [--lado 3840] [--json]
 
 Com ``--json`` cada evento de progresso é impresso como uma linha JSON (protocolo em
 mobilia/jobs.py) — é assim que a interface gráfica acompanha o trabalho.
@@ -167,6 +171,81 @@ def _cmd_warmup(a) -> int:
     return 0
 
 
+def _cmd_design(a) -> int:
+    """Redesenho de ambiente por IA (fluxo principal): N versões novas da mesma foto.
+
+    Eventos (``--json``): ``progress`` (stage, fraction, message), ``preview`` (path, index) a cada versão pronta,
+    ``log`` e, no fim, ``done`` com ``outputs`` (lista de JPEGs), ``output`` (o primeiro), ``before`` (a foto no
+    tamanho das versões), ``report`` (design.json), ``funcao``, ``estilo``, ``ambiente``, ``seeds`` e ``size``;
+    em falha, ``error`` (message, detail)."""
+    from .design import api, presets
+
+    def human(ev):
+        if ev["event"] == "progress":
+            print(f"[{ev['fraction'] * 100:5.1f}%] {ev['message']}", flush=True)
+        elif ev["event"] == "preview":
+            print(f"Versão {ev['index'] + 1}: {ev['path']}", flush=True)
+        elif ev["event"] in ("log", "error"):
+            print(f"{ev['event'].upper()}: {ev['message']}", flush=True)
+        elif ev["event"] == "done":
+            print("Pronto:\n  " + "\n  ".join(ev["outputs"]), flush=True)
+
+    def emit(ev):
+        if a.json:
+            print(json.dumps(ev, ensure_ascii=False), flush=True)
+        else:
+            human(ev)
+
+    try:
+        f = presets.function(a.funcao)
+        if not a.estilo and f.key not in ("evento", "editar_area"):
+            a.estilo = "moderno"
+        common = dict(n=a.n, seed=a.seed, out_dir=a.out_dir, quality=a.quality, progress=emit, device=a.device)
+        if f.key == "texto":
+            res = api.text_to_design(a.prompt or "", a.estilo, a.ambiente, aspect=a.formato, **common)
+        else:
+            if not a.photo:
+                raise ValueError("Escolha a foto do ambiente (--photo).")
+            if not os.path.isfile(a.photo):
+                raise FileNotFoundError(f"Foto não encontrada: {a.photo}")
+            if f.key == "editar_area":
+                if not a.mask:
+                    raise ValueError("Pinte a área a editar (--mask).")
+                res = api.edit_area(a.photo, a.mask, a.prompt or "", a.estilo, a.ambiente, **common)
+            else:
+                res = api.redesign(a.photo, f.key, a.estilo, a.ambiente, prompt=a.prompt or "", evento=a.evento,
+                                   **common)
+        emit(res.to_event())
+        return 0
+    except KeyboardInterrupt:
+        emit({"event": "error", "message": "Cancelado pelo usuário.", "detail": ""})
+        return 130
+    except Exception as e:  # erro reportado à UI com detalhe técnico
+        emit({"event": "error", "message": str(e) or e.__class__.__name__, "detail": traceback.format_exc()})
+        return 1
+
+
+def _cmd_upscale(a) -> int:
+    """"Ampliar 4K" de uma versão escolhida. Eventos: ``progress`` e ``done`` (output, size, s)."""
+    from .design.upscale import upscale
+
+    emit = _json_or_human(a)
+    try:
+        if not os.path.isfile(a.image):
+            raise FileNotFoundError(f"Imagem não encontrada: {a.image}")
+        _, info = upscale(a.image, a.out, long_side=a.lado, device=a.device,
+                          progress=lambda f: emit({"event": "progress", "stage": "ampliar", "fraction": round(f, 3),
+                                                   "message": "Ampliando para 4K"}))
+        emit({"event": "done", "output": a.out, "size": info["para"], "s": info["s"]})
+        if not a.json:
+            print(f"Pronto: {a.out} ({info['para'][0]}x{info['para'][1]})", flush=True)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        ev = {"event": "error", "message": str(e) or e.__class__.__name__, "detail": traceback.format_exc()}
+        print(json.dumps(ev, ensure_ascii=False) if a.json else f"ERRO: {ev['message']}", flush=True)
+        return 1
+
+
 def _cmd_hardware(a) -> int:
     from .hardware import choose_profile, detect_hardware
 
@@ -226,6 +305,29 @@ def main(argv=None) -> int:
     aq.add_argument("--json", action="store_true")
     aq.add_argument("--sem-blender", action="store_true")
     aq.add_argument("--sem-modelos", action="store_true")
+    d = sub.add_parser("design", help="redesenho do ambiente por IA (N versões novas da mesma foto)")
+    d.add_argument("--photo", default=None, help="foto do ambiente (não usada em --funcao texto)")
+    d.add_argument("--funcao", default="mudar_estilo",
+                   help="mudar_estilo | reforma | redesign_simples | mobiliar | editar_area | fachada | evento | texto")
+    d.add_argument("--estilo", default=None, help="moderno, escandinavo, luxo... (veja mobilia/design/presets.py)")
+    d.add_argument("--ambiente", default="sala",
+                   help="sala | quarto | cozinha | banheiro | escritorio | sala_jantar | varanda | fachada")
+    d.add_argument("--evento", default=None, help="função evento: aniversario | casamento | natal | ...")
+    d.add_argument("--n", type=int, default=4, help="quantas versões (padrão 4)")
+    d.add_argument("--seed", type=int, default=None, help="semente (padrão: aleatória)")
+    d.add_argument("--mask", default=None, help="PNG da área a editar (branco = editar), função editar_area")
+    d.add_argument("--prompt", default="", help="texto livre (o que o cliente quer)")
+    d.add_argument("--formato", default="paisagem", help="função texto: paisagem | retrato | quadrado | 16:9 | 9:16")
+    d.add_argument("--out-dir", default=None, help="pasta de saída (padrão: <dados>/jobs/design_<data>)")
+    d.add_argument("--quality", default="final", choices=["rapido", "final"])
+    d.add_argument("--device", default="auto", help="auto | cuda | cpu")
+    d.add_argument("--json", action="store_true", help="eventos de progresso em JSON (uso pela UI)")
+    up = sub.add_parser("ampliar", help="amplia uma versão para 4K (Real-ESRGAN x4)")
+    up.add_argument("--image", required=True)
+    up.add_argument("--out", required=True)
+    up.add_argument("--lado", type=int, default=3840, help="lado maior final (0 = 4x sem reduzir)")
+    up.add_argument("--device", default="auto")
+    up.add_argument("--json", action="store_true")
     rc = sub.add_parser("recompor", help="refaz composição e MP4 de um trabalho já renderizado "
                                        "(precisa dos EXR: gere o trabalho com MOBILIA_MANTER_EXR=1)")
     rc.add_argument("--work-dir", required=True)
@@ -237,7 +339,8 @@ def main(argv=None) -> int:
 
     apply_gpu_cache_env(os.environ)
     return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch,
-            "prefetch": _cmd_prefetch, "aquecer": _cmd_warmup, "recompor": _cmd_recompose}[a.cmd](a)
+            "prefetch": _cmd_prefetch, "aquecer": _cmd_warmup, "recompor": _cmd_recompose,
+            "design": _cmd_design, "ampliar": _cmd_upscale}[a.cmd](a)
 
 
 if __name__ == "__main__":

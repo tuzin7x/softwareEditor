@@ -169,7 +169,7 @@ def test_prefetch_includes_v3_weights(monkeypatch):
     got = []
     monkeypatch.setattr(weights, "ensure_weight", lambda w, offline=False: got.append(w.key))
     steps = []
-    weights.prefetch_models(lambda f, name: steps.append(f))
+    weights.prefetch_models(lambda f, name: steps.append(f), design=False)
     assert got == ["sam2", "big_lama"]
     assert steps == sorted(steps) and steps[-1] < 1.0
 

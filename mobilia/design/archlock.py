@@ -1,0 +1,186 @@
+"""Trava da arquitetura: janelas, portas (e, no "Mobiliar", o teto) da foto original voltam por cima da imagem
+gerada, com borda suave e casamento leve de cor/brilho.
+
+O SDXL redesenha o ambiente inteiro; mesmo com o ControlNet de profundidade ele às vezes desloca, apaga ou duplica
+uma janela. Aqui a abertura é segmentada (OneFormer, grupos ``window``/``door`` de ``analysis/segmentation.py``) e,
+depois da geração, os pixels ORIGINAIS dela são compostos de volta:
+
+* a máscara é limpa (componentes minúsculos fora, buracos fechados) e a composição usa uma rampa pela distância à
+  borda (``feather_alpha``): alpha = 1 dentro, 0 fora da faixa, nada de halo além dela;
+* antes de colar, a abertura original recebe um casamento de cor de baixa frequência com o que o gerador pôs no
+  mesmo lugar (``match_color``, limitado), para a vista da janela não "brigar" com a luz nova do ambiente.
+
+As mesmas rotinas servem ao "Editar área": a máscara do usuário vira uma rampa suave e tudo fora dela é
+pixel-idêntico à foto.
+"""
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from ..analysis.segmentation import GROUP_IDS
+
+LOCK_GROUPS = ("window", "door")
+
+
+def _disk(r: int) -> np.ndarray:
+    r = max(1, int(r))
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+
+
+def clean_mask(mask: np.ndarray, min_frac: float = 0.0008, close_frac: float = 0.006) -> np.ndarray:
+    """Tira componentes menores que ``min_frac`` da imagem e fecha frestas (``close_frac`` da diagonal)."""
+    m = np.asarray(mask, bool)
+    if not m.any():
+        return m
+    H, W = m.shape
+    r = max(1, int(close_frac * np.hypot(H, W)))
+    m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, _disk(r)).astype(bool)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    keep = np.zeros(n, bool)
+    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_frac * H * W
+    return keep[lab]
+
+
+def lock_mask(groups: np.ndarray, which: tuple[str, ...] = LOCK_GROUPS, size: tuple[int, int] | None = None
+              ) -> np.ndarray:
+    """Máscara (bool) dos grupos travados, opcionalmente redimensionada para ``size`` = (largura, altura)."""
+    g = np.asarray(groups)
+    m = np.zeros(g.shape, bool)
+    for name in which:
+        m |= g == GROUP_IDS[name]
+    if size is not None and (m.shape[1], m.shape[0]) != tuple(size):
+        m = cv2.resize(m.astype(np.uint8), tuple(size), interpolation=cv2.INTER_NEAREST).astype(bool)
+    return clean_mask(m)
+
+
+def feather_alpha(mask: np.ndarray, radius: float, inside: float = 0.5) -> np.ndarray:
+    """Alpha float32 em [0, 1] com rampa suave (smoothstep) de largura ``radius`` px ao redor da borda da máscara.
+
+    ``inside`` = fração da rampa que fica dentro da máscara (0 = rampa toda por fora, a máscara inteira com alpha
+    1; 1 = rampa toda por dentro, nada fora da máscara muda). Fora da faixa o alpha é exatamente 0."""
+    m = np.asarray(mask, bool)
+    if not m.any():
+        return np.zeros(m.shape, np.float32)
+    if radius <= 0:
+        return m.astype(np.float32)
+    d_out = cv2.distanceTransform((~m).astype(np.uint8), cv2.DIST_L2, 5)     # distância até a máscara (fora)
+    d_in = cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 5)         # distância até a borda (dentro)
+    sd = np.where(m, -d_in + 0.5, d_out - 0.5)                               # negativo dentro
+    lo, hi = -radius * inside, radius * (1 - inside)
+    t = np.clip((hi - sd) / max(hi - lo, 1e-6), 0, 1)
+    a = t * t * (3 - 2 * t)
+    a[sd >= hi] = 0.0
+    return a.astype(np.float32)
+
+
+def match_color(src: np.ndarray, ref: np.ndarray, mask: np.ndarray, sigma: float, max_shift: float = 8.0,
+                amount: float = 0.6) -> np.ndarray:
+    """Desloca a cor de baixa frequência de ``src`` (Lab) na direção de ``ref`` dentro de ``mask``.
+
+    O deslocamento é a média (na máscara) de ``passa-baixa(ref) - passa-baixa(src)`` × ``amount``, limitado a
+    ``max_shift`` unidades Lab por canal — é uma correção de exposição/tom global da abertura, não uma troca de
+    conteúdo."""
+    m = np.asarray(mask, bool)
+    if not m.any():
+        return src
+    s = cv2.cvtColor(src.astype(np.float32) / 255.0, cv2.COLOR_RGB2Lab)
+    r = cv2.cvtColor(ref.astype(np.float32) / 255.0, cv2.COLOR_RGB2Lab)
+    if sigma > 0:
+        s_lp = cv2.GaussianBlur(s, (0, 0), sigma)
+        r_lp = cv2.GaussianBlur(r, (0, 0), sigma)
+    else:
+        s_lp, r_lp = s, r
+    shift = np.clip((r_lp[m] - s_lp[m]).mean(axis=0) * amount, -max_shift, max_shift)
+    out = s + shift[None, None, :].astype(np.float32)
+    rgb = cv2.cvtColor(out, cv2.COLOR_Lab2RGB)
+    return np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
+def composite(base: np.ndarray, top: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """``base·(1-α) + top·α`` em uint8; onde α = 0 o resultado é exatamente ``base`` e onde α = 1, ``top``."""
+    a = np.clip(alpha, 0, 1).astype(np.float32)[..., None]
+    out = base.astype(np.float32) * (1 - a) + top.astype(np.float32) * a
+    out = np.clip(out + 0.5, 0, 255).astype(np.uint8)
+    z = a[..., 0] <= 0
+    o = a[..., 0] >= 1
+    out[z] = base[z]
+    out[o] = top[o]
+    return out
+
+
+def lock_openings(generated: np.ndarray, original: np.ndarray, mask: np.ndarray, feather_frac: float = 0.006,
+                  color_match: bool = True) -> tuple[np.ndarray, dict]:
+    """Compõe as aberturas originais (``mask``, mesma resolução de ``generated``) sobre a imagem gerada.
+
+    Cada componente da máscara recebe o próprio casamento de cor. Devolve a imagem e um resumo (pixels travados,
+    componentes, deslocamento médio de cor aplicado)."""
+    H, W = mask.shape
+    assert generated.shape[:2] == (H, W) and original.shape[:2] == (H, W)
+    m = np.asarray(mask, bool)
+    if not m.any():
+        return generated, {"componentes": 0, "fracao": 0.0}
+    diag = float(np.hypot(H, W))
+    radius = max(2.0, feather_frac * diag)
+    src = original
+    n, lab = cv2.connectedComponents(m.astype(np.uint8), connectivity=8)
+    if color_match:
+        src = original.copy()
+        for k in range(1, n):
+            comp = lab == k
+            src_k = match_color(original, generated, comp, sigma=max(2.0, 0.01 * diag))
+            src[comp] = src_k[comp]
+            # a faixa da rampa fora do componente também usa a versão casada (sem degrau de cor na borda)
+            ring = cv2.dilate(comp.astype(np.uint8), _disk(int(radius) + 1)).astype(bool) & ~comp
+            src[ring] = src_k[ring]
+    alpha = feather_alpha(m, radius, inside=0.5)
+    out = composite(generated, src, alpha)
+    return out, {"componentes": int(n - 1), "fracao": round(float(m.mean()), 4),
+                 "raio_px": round(radius, 1)}
+
+
+def generation_mask(lock: np.ndarray, erode_frac: float = 0.004) -> np.ndarray:
+    """Máscara do que o gerador pode refazer quando há trava: tudo menos o miolo das aberturas (o miolo é erodido
+    para o gerador ainda poder redesenhar o contorno e casar a borda)."""
+    lk = np.asarray(lock, bool)
+    if not lk.any():
+        return np.ones(lk.shape, bool)
+    r = max(1, int(erode_frac * np.hypot(*lk.shape)))
+    core = cv2.erode(lk.astype(np.uint8), _disk(r)).astype(bool)
+    return ~core
+
+
+def user_mask(mask: np.ndarray, size: tuple[int, int] | None = None, threshold: int = 128) -> np.ndarray:
+    """Máscara do pincel do usuário (PNG cinza/RGBA: branco = editar) em bool, opcionalmente redimensionada."""
+    m = np.asarray(mask)
+    if m.ndim == 3:
+        m = m[..., 3] if m.shape[2] == 4 and m[..., 3].min() < 255 and m[..., :3].max() == m[..., :3].min() \
+            else m[..., :3].max(axis=2)
+    m = m >= threshold if m.dtype != bool else m
+    if size is not None and (m.shape[1], m.shape[0]) != tuple(size):
+        m = cv2.resize(m.astype(np.uint8), tuple(size), interpolation=cv2.INTER_NEAREST).astype(bool)
+    return m
+
+
+def mask_bbox(mask: np.ndarray, margin_frac: float = 0.25, min_side: int = 0, multiple: int = 8
+              ) -> tuple[int, int, int, int]:
+    """Caixa (x0, y0, x1, y1) da máscara com margem de contexto, quadrada o bastante para o SDXL e dentro da
+    imagem."""
+    H, W = mask.shape
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return 0, 0, W, H
+    x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+    bw, bh = x1 - x0, y1 - y0
+    side = max(bw, bh) * (1 + 2 * margin_frac)
+    side = max(side, min_side, 0.35 * max(H, W))
+    cw, ch = min(W, max(bw * (1 + 2 * margin_frac), side * 0.75)), min(H, max(bh * (1 + 2 * margin_frac), side * 0.75))
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    X0 = int(np.clip(cx - cw / 2, 0, W - cw))
+    Y0 = int(np.clip(cy - ch / 2, 0, H - ch))
+    X1, Y1 = int(min(W, X0 + round(cw))), int(min(H, Y0 + round(ch)))
+    return X0, Y0, X1, Y1
+
+
+__all__ = ["LOCK_GROUPS", "clean_mask", "lock_mask", "feather_alpha", "match_color", "composite", "lock_openings",
+           "generation_mask", "user_mask", "mask_bbox"]
