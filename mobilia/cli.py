@@ -179,8 +179,9 @@ def _cmd_design(a) -> int:
 
     Eventos (``--json``): ``progress`` (stage, fraction, message), ``preview`` (path, index) a cada versão pronta,
     ``log`` e, no fim, ``done`` com ``outputs`` (lista de JPEGs), ``output`` (o primeiro), ``before`` (a foto no
-    tamanho das versões), ``report`` (design.json), ``funcao``, ``estilo``, ``ambiente``, ``seeds`` e ``size``;
-    em falha, ``error`` (message, detail)."""
+    tamanho das versões), ``report`` (design.json), ``funcao``, ``estilo``, ``ambiente``, ``seeds`` e ``size`` —
+    mais ``aviso`` e ``funcao_pedida`` quando o motor trocou de função (foto de ambiente vazio -> "Mobiliar"); em
+    falha, ``error`` (message, detail)."""
     from .design import api, presets
 
     def human(ev):
@@ -191,6 +192,8 @@ def _cmd_design(a) -> int:
         elif ev["event"] in ("log", "error"):
             print(f"{ev['event'].upper()}: {ev['message']}", flush=True)
         elif ev["event"] == "done":
+            if ev.get("aviso"):
+                print(ev["aviso"], flush=True)
             print("Pronto:\n  " + "\n  ".join(ev["outputs"]), flush=True)
 
     def emit(ev):
@@ -217,7 +220,8 @@ def _cmd_design(a) -> int:
                 res = api.edit_area(a.photo, a.mask, a.prompt or "", a.estilo, a.ambiente, **common)
             else:
                 res = api.redesign(a.photo, f.key, a.estilo, a.ambiente, prompt=a.prompt or "", evento=a.evento,
-                                   **common)
+                                   repair=False if a.sem_reparo else None, auto_empty=not a.manter_funcao,
+                                   refine={"auto": None, "sim": True, "nao": False}[a.refino], **common)
         emit(res.to_event())
         return 0
     except KeyboardInterrupt:
@@ -356,6 +360,12 @@ def main(argv=None) -> int:
     d.add_argument("--mask", default=None, help="PNG da área a editar (branco = editar), função editar_area")
     d.add_argument("--prompt", default="", help="texto livre (o que o cliente quer)")
     d.add_argument("--formato", default="paisagem", help="função texto: paisagem | retrato | quadrado | 16:9 | 9:16")
+    d.add_argument("--sem-reparo", action="store_true",
+                   help="não refazer como parede as janelas/portas que o gerador inventar")
+    d.add_argument("--manter-funcao", action="store_true",
+                   help="não trocar para 'Mobiliar' quando a foto for de um ambiente vazio")
+    d.add_argument("--refino", default="auto", choices=["auto", "sim", "nao"],
+                   help="passada de detalhe a 1,5x (auto: só na GPU, qualidade final)")
     d.add_argument("--out-dir", default=None, help="pasta de saída (padrão: <dados>/jobs/design_<data>)")
     d.add_argument("--quality", default="final", choices=["rapido", "final"])
     d.add_argument("--device", default="auto", help="auto | cuda | cpu")
