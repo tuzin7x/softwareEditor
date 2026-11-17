@@ -239,6 +239,23 @@ quadros: cada quadro é marco + camada dele, e a sombra da camada é cortada com
 - **Resultado na foto de teste:** 4 paredes (resíduo 0,6–3,9 cm), 4 janelas alinhadas à imagem,
   câmera a 1,63 m, pé-direito 2,45 m (ver `tests/fixtures/rooms/stafford/overlay_debug.jpg`).
 
+### 4.1 Sala vazia do modo B (`removal/plate.py`, PT-V3-3)
+
+- **Máscara de efeitos em 2 passadas:** peças dilatadas + candidatos (anel e faixa espelhada abaixo dos pés;
+  para planejados também na parede, onde cai a luz do LED). Ficam só os candidatos em que a foto difere de
+  uma placa provisória e que tocam a peça; separados em sombra (mais escuro) e luz/reflexo (mais claro).
+- **Ray-cast na caixa vazia** (`RoomModel`): piso, teto, parede *i*, "outro" (visto por porta) e
+  **protegido** (janela/porta/cortina: nunca recebe textura de parede; inpainting local). Uma parede da caixa
+  cujo trecho visível é piso na segmentação é corrigida para piso (erro comum em cozinhas planejadas).
+- **Preenchimento por plano** em vistas retificadas com a máscara inteira como buraco: grade periódica
+  (azulejo) ou LaMa + grão, casamento de tom (mediana Lab do anel), membrana tipo Poisson e corte de ilhas.
+  Parede quase toda escondida: pintura lisa (cor mediana + gradiente de luz ajustado de forma robusta);
+  rodapé detectado no perfil por altura e redesenhado reto. Objetos pequenos da parede (tomadas) não servem
+  de contexto.
+- **Nota (`PlateQuality`)** por plano: ΔE de costura local, razão de grão, distância/continuidade da linha
+  parede/piso e OneFormer rodado de novo na placa. **Portão:** reprovada → refaz mantendo os planejados →
+  se ainda reprovada, aviso (modo A ou outra foto). `scripts/avaliar_placa.py` mede isso num conjunto.
+
 ## 5. Render 3D sobre a foto (validado com testes reais no Blender 5.3)
 
 Comportamentos do Cycles **verificados empiricamente** (`tests/test_render_camera.py` e experimentos
