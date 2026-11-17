@@ -29,6 +29,7 @@ Tudo em numpy (CPU). A composição por quadro em GPU (torch) é o PT-V3-7; aqui
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
@@ -63,12 +64,16 @@ class Placement:
     """Como uma peça aparece num quadro. ``dx``/``dy`` (px inteiros) deslocam o RGBA e o sombreamento (o
     reflexo acompanha a peça); ``shade`` (0..1) e ``contact`` (0..1) são as intensidades do sombreamento e do
     delta de contato (que fica na posição de repouso); ``alpha_mul`` (recorte do tamanho da caixa, 0..1)
-    revela só parte da peça no lugar (tapete desenrolando)."""
+    revela só parte da peça no lugar (tapete desenrolando). ``scale`` (<= 1) encolhe RGBA e sombreamento em torno
+    de ``anchor`` (x, y em pixels absolutos da posição de repouso; padrão: centro da base da caixa), antes do
+    deslocamento: "escala no ponto de contato" da coreografia (PT-V3-6)."""
     dx: int = 0
     dy: int = 0
     shade: float = 1.0
     contact: float = 1.0
     alpha_mul: np.ndarray | None = None
+    scale: float = 1.0
+    anchor: tuple[float, float] | None = None
 
 
 @dataclass
@@ -479,6 +484,32 @@ def _paste_slices(box, dx, dy, H, W):
     return (slice(cy0, cy1), slice(cx0, cx1)), (slice(cy0 - Y0, cy1 - Y0), slice(cx0 - X0, cx1 - X0))
 
 
+def _scaled(L: Layer, q: Placement):
+    """(alpha, cor, sombreamento, caixa) da camada com ``alpha_mul`` e ``scale`` aplicados. Com escala, a caixa
+    é a da peça encolhida em torno de ``anchor`` (coordenadas absolutas, pode ficar fora da caixa)."""
+    a, c, sh = L.alpha, L.color, L.shade
+    if q.alpha_mul is not None:
+        m = np.asarray(q.alpha_mul, np.float32)
+        a, c = a * m, c * m[..., None]
+    if q.scale >= 1.0 - 1e-6:
+        return a, c, sh, L.box
+    x0, y0, x1, y1 = L.box
+    ax, ay = q.anchor if q.anchor is not None else ((x0 + x1) / 2.0, float(y1 - 1))
+    s = float(q.scale)
+    X0, Y0 = int(math.floor(ax + s * (x0 - ax))), int(math.floor(ay + s * (y0 - ay)))
+    X1, Y1 = int(math.ceil(ax + s * (x1 - ax))) + 1, int(math.ceil(ay + s * (y1 - ay))) + 1
+    # destino (X, Y) <- origem absoluta a + s·(p − a); em coordenadas locais das duas caixas
+    M = np.float32([[s, 0, ax + s * (x0 - ax) - X0], [0, s, ay + s * (y0 - ay) - Y0]])
+    size = (X1 - X0, Y1 - Y0)
+    warp = lambda img, border: cv2.warpAffine(img, M, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                                              borderValue=border)
+    a2 = warp(np.ascontiguousarray(a, np.float32), 0)
+    c2 = warp(np.ascontiguousarray(c, np.float32), (0, 0, 0))
+    c2 = np.minimum(np.maximum(c2, 0.0), 255.0 * a2[..., None])     # interpolação linear mantém C <= 255·A
+    sh2 = None if sh is None else warp(np.ascontiguousarray(sh, np.float32), (1, 1, 1))
+    return a2, c2, sh2, (X0, Y0, X1, Y1)
+
+
 def composite(stack: LayerStack, present: Iterable[int] | Mapping[int, Placement], as_float: bool = False
               ) -> np.ndarray:
     """Quadro com as camadas ``present`` (índices de ``stack.layers``; um dict dá a :class:`Placement` de cada
@@ -489,26 +520,25 @@ def composite(stack: LayerStack, present: Iterable[int] | Mapping[int, Placement
     if not pl:
         return stack.plate.astype(np.float32) if as_float else stack.plate.copy()
     out = stack.plate.astype(np.float32)
+    views = {i: _scaled(stack.layers[i], pl[i]) for i in pl}
     for i in sorted(pl):
         L, q = stack.layers[i], pl[i]
-        if L.shade is None or q.shade <= 0:
+        shade, box = views[i][2], views[i][3]
+        if shade is None or q.shade <= 0:
             continue
-        s = _paste_slices(L.box, q.dx, q.dy, H, W)
+        s = _paste_slices(box, q.dx, q.dy, H, W)
         if s is None:
             continue
         dst, src = s
-        sh = L.shade[src]
+        sh = shade[src]
         out[dst] *= sh if q.shade >= 1 else 1.0 - q.shade * (1.0 - sh)
     for i in sorted(pl):                       # layers já estão na ordem de pintura
         L, q = stack.layers[i], pl[i]
-        s = _paste_slices(L.box, q.dx, q.dy, H, W)
+        s = _paste_slices(views[i][3], q.dx, q.dy, H, W)
         if s is None:
             continue
         dst, src = s
-        a, c = L.alpha[src], L.color[src]
-        if q.alpha_mul is not None:
-            m = np.asarray(q.alpha_mul, np.float32)[src]
-            a, c = a * m, c * m[..., None]
+        a, c = views[i][0][src], views[i][1][src]
         out[dst] = c + (1.0 - a[..., None]) * out[dst]
     for i in sorted(pl):
         L, q = stack.layers[i], pl[i]

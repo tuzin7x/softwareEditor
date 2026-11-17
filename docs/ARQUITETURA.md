@@ -280,6 +280,31 @@ quadros: cada quadro é marco + camada dele, e a sombra da camada é cortada com
   pilha completa = foto (0 níveis nas fixtures), quadro vazio = placa corrigida byte a byte e 0% de pixels
   fora de alpha ∪ anel ∪ efeito mudando entre o 1º e o último quadro (o protótipo tinha 7,1%).
 
+### 4.3 Coreografia 2D do modo B (`layers2d/choreo.py`, PT-V3-6)
+
+A camada de uma peça só tem o que a foto mostra: o pedaço atrás de outra peça (ou fora do quadro) não existe.
+A coreografia nunca deixa esse corte à vista, e `verify` mede isso **em todos os quadros** ("pixel oculto
+visível": pontos logo além da borda da peça que pertencem a quem está na frente dela ou ficam fora do quadro;
+após o movimento eles têm de cair fora do quadro ou sob outra peça presente).
+
+- **Unidades:** a peça pequena apoiada noutra entra junto com o apoio (almofada + sofá); a bancada assentada
+  na base pousa depois dela (a aresta "base na frente da bancada" sai da cópia local de `front`); ciclos de
+  oclusão quebram na aresta mais fraca ou viram bloco rígido; peça que só poderia "surgir" tenta entrar em bloco
+  com quem a cobre (manta + poltrona deslizando da borda).
+- **Ordem:** de frente para trás (a de trás começa só depois de quem a cobre pousar). Entre as livres: tapete
+  livre, planejados (base/ilha/eletros/louças → bancada → aéreos/coifa), soltos (os mais perto primeiro),
+  quadros e decoração.
+- **Movimentos** (cada candidato testado ponto a ponto no caminho inteiro): tapete desenrola no lugar; peça de
+  borda desliza de fora do quadro (lateral e de baixo antes do topo, nunca cai); peça coberta sobe por trás
+  (amplitude ≤ 40% da peça e ≤ 15% do quadro, ≥ 5% da peça) ou escala 0,94→1 no ponto de contato; peça isolada
+  cai ≤ 25% do quadro com quique; planejados sobem do chão / aéreos descem do teto **recortados na linha do
+  piso/teto** (nada aparece além dela); último recurso: surge no lugar (opacidade 100%, nunca fade).
+- **Contato:** o sombreamento acompanha a peça e cresce conforme ela chega; o delta de contato (parado na
+  posição de repouso) só entra com a peça pousada.
+- **Tempo:** sala vazia ≤ 0,5 s (0,4 s), total 7–10 s (até 12 s com muitos planejados), dissolução final de 4
+  quadros (só o arredondamento da pilha, ≤ 2 níveis) e ≥ 1 s de foto exata. `frame_at`/`render_frames`
+  (numpy, CPU) começam na placa corrigida e terminam `array_equal` à foto; a versão em GPU é o PT-V3-7.
+
 ## 5. Render 3D sobre a foto (validado com testes reais no Blender 5.3)
 
 Comportamentos do Cycles **verificados empiricamente** (`tests/test_render_camera.py` e experimentos
