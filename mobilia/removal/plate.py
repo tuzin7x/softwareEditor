@@ -88,6 +88,10 @@ LIMITS = {
     "preenchimento_de_max": 6.0,     # ΔE76 média do preenchimento x média do anel, por plano (aceite: <= 3)
     "costura_sem_plano_max": 16.0,   # ΔE76 da costura do que não tem plano (vãos, protegidos, sobre bancadas)
     "area_gerada_max": 0.70,         # fração da foto reconstruída
+    # geometria da sala não achada (HDR, retrato, piso todo coberto): quase todo o preenchimento fica "sem plano",
+    # que só tem o limite frouxo de costura. Área grande e maioria sem plano = não medido -> reprova
+    "sem_plano_area_min": 0.30,      # área gerada (fração da foto) a partir da qual a regra vale
+    "sem_plano_frac_max": 0.50,      # fração da área gerada que fica "sem plano" (vãos, protegidos, plano perdido)
     "redetectado_area_min": 0.005,   # móvel reencontrado pelo OneFormer na placa (> 0,5% da foto)
 }
 
@@ -700,10 +704,12 @@ class PlateQuality:
     redetected: list = field(default_factory=list)   # [{rotulo, area_pct}] reencontrados pelo OneFormer
     reasons: list = field(default_factory=list)       # motivos de reprovação (português)
     raw_score: float | None = None                    # nota antes do teto de 59 (compara duas placas reprovadas)
+    unplanned: float = 0.0                            # fração da área gerada sem plano medido
 
     def to_dict(self) -> dict:
         return {"nota": round(self.score, 1), "aprovada": self.ok, "por_plano": self.per_plane,
                 "linha_parede_piso": self.line, "area_gerada_pct": round(100 * self.area_generated, 2),
+                "sem_plano_pct": round(100 * self.unplanned, 1),
                 "moveis_reencontrados": self.redetected, "motivos": list(self.reasons)}
 
 
@@ -876,6 +882,15 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
     reasons = []
     terms = []
     H, W = mask.shape
+    n_mask = int(mask.sum())
+    unplanned = float((mask & np.isin(labels, (OTHER, PROTECTED))).sum()) / n_mask if n_mask else 0.0
+    if area >= LIMITS["sem_plano_area_min"]:
+        # cor média certa e estrutura errada (névoa, fantasma translúcido, parede inventada) passam pela costura;
+        # sem plano medido não há como aprovar uma sala tão grande inventada
+        if unplanned >= LIMITS["sem_plano_frac_max"]:
+            reasons.append(f"geometria da sala não encontrada: {100 * unplanned:.0f}% do preenchimento sem plano "
+                           f"medido ({100 * area:.0f}% da foto)")
+        terms.append(np.clip(1 - (unplanned - 0.2) / 0.3, 0, 1))
     for L in np.unique(labels[mask]):
         if L in (OTHER, PROTECTED):
             continue
@@ -918,7 +933,7 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         terms.append(0.0 if red else 1.0)
     raw = 100.0 * float(np.mean(terms)) if terms else 50.0
     score = min(raw, 59.0) if reasons else raw
-    return PlateQuality(score, not reasons, per, line, area, red, reasons, raw)
+    return PlateQuality(score, not reasons, per, line, area, red, reasons, raw, unplanned)
 
 
 # ============================================================================================================

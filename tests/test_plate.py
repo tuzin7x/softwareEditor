@@ -437,3 +437,27 @@ def test_gate_never_prefers_wide_mask_that_breaks_area_limit(monkeypatch):
                              on_attempt=lambda name, res: areas.update({name: res.quality.area_generated}))
     assert areas["mascara_ampla"] == 0.72 and areas["crua_por_plano"] == 0.30     # a máscara larga "melhorou" a nota
     assert r.info["estrategia_portao"] != "mascara_ampla" and r.quality.area_generated == 0.30
+
+
+def test_gate_rejects_large_fill_without_measured_plane():
+    """Robustez r1 (falsos aceites): geometria da sala não achada (HDR, retrato, piso todo coberto) deixa quase todo
+    o preenchimento "sem plano", que só tem o limite frouxo de costura. Área gerada >= 30% com a maioria sem plano
+    reprova; a mesma área medida por plano, ou uma área pequena sem plano, não é afetada por esta regra."""
+    room = _room()
+    img, groups, box = _render(room)
+    H, W = groups.shape
+    m = np.zeros((H, W), bool)
+    m[60:300, 40:440] = True                                       # ~56% da foto
+    plate = img.copy()                                             # preenchimento perfeito (cor/costura certas)
+    lab = np.where(m, rp.OTHER, box.label)
+    q = rp.assess(img, plate, m, lab, groups, box)
+    assert q.unplanned > 0.99 and q.to_dict()["sem_plano_pct"] > 99
+    assert not q.ok and any("geometria da sala" in s for s in q.reasons), q.reasons
+    # mesma área com os planos da caixa: a regra não dispara
+    q2 = rp.assess(img, plate, m, box.label, groups, box)
+    assert not any("geometria da sala" in s for s in q2.reasons), q2.reasons
+    # área pequena (6%) toda sem plano: regra não vale (ex.: bancada/vaidade de banheiro aprovada)
+    s = np.zeros((H, W), bool)
+    s[150:210, 150:320] = True
+    q3 = rp.assess(img, plate, s, np.where(s, rp.OTHER, box.label), groups, box)
+    assert not any("geometria da sala" in t for t in q3.reasons), q3.reasons
