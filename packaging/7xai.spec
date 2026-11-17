@@ -22,7 +22,8 @@ excludes = ["torch", "torchvision", "numpy", "scipy", "cv2", "bpy", "transformer
             "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf"]
 
 a = Analysis([str(ROOT / "packaging" / "launcher.py")], pathex=[str(ROOT)], datas=datas,
-             hiddenimports=["mobilia.ui.app", "mobilia.ui.setup_dialog", "mobilia.bootstrap",
+             hiddenimports=["mobilia.ui.app", "mobilia.ui.legacy", "mobilia.ui.design_widgets", "mobilia.ui.widgets",
+                            "mobilia.ui.setup_dialog", "mobilia.bootstrap",
                             "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"],
              excludes=excludes, noarchive=False)
 pyz = PYZ(a.pure)

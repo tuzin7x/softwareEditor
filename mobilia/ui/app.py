@@ -1,735 +1,788 @@
-"""Janela principal do 7xAi (PySide6).
+"""Janela principal do 7xAi (PySide6): redesenho de ambientes por IA.
 
-Fluxo único e simples: 1) importar a foto  2) escolher o ambiente  3) gerar  4) assistir e exportar.
+Fluxo: 1) foto  2) função (mudar estilo, reforma, mobiliar, editar área, fachada, evento, texto)  3) ambiente e
+estilo  4) gerar N versões (o motor roda em outro processo: ``mobilia.cli design --json``)  5) resultados com
+comparador antes/depois, "Editar área", "Ampliar 4K" (``upscale``), "Vídeo antes e depois" (``showcase``), salvar e
+abrir a pasta. O vídeo de montagem antigo (modos A/B) fica em "Avançado (vídeo de montagem, legado)" (``legacy.py``).
+
+Regra dos botões: todo ``clicked`` é ligado por ``widgets.on_click`` (descarta o ``checked`` do sinal) e os pedidos
+ao motor são validados em ``DesignRequest.validate`` antes de virar linha de comando.
 """
 from __future__ import annotations
 
-import html
-import json
 import os
 import shutil
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QPointF, QRectF, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap)
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QListView, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-                               QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QStyle, QStyleOption, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QListView, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPushButton, QScrollArea, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import APP_NAME, __version__, bootstrap, diagnostics, runtime
-from ..jobs import ROOM_TYPES, STAGES, JobRequest
+from .. import APP_NAME, __version__, bootstrap, runtime
 from . import brand, theme
-from .runner import HardwareProbe, JobRunner, QueuedJob
+from .design_widgets import (FUNCTION_INFO, FUNCTION_ORDER, STYLE_HINTS, BeforeAfterView, FunctionCard, MaskEditor,
+                             Segmented, StyleCard, ThumbStrip, VariantGrid, chip, cover_pixmap)
+from .legacy import StageList
+from .runner import CliResult, CliTask, HardwareProbe
+from .widgets import (PHOTO_FILTER, DropZone, ImageView, StatusBar, StepHeader, human_size, on_click, paint_chip,
+                      rule, tracked_label)
 
-PHOTO_FILTER = "Fotos (*.jpg *.jpeg *.png *.webp *.tif *.tiff *.heic)"
-TAGLINE = "Decoração virtual em vídeo, a partir de uma única foto"
+__all__ = ["MainWindow", "DesignRequest", "DesignOutcome", "CATALOG", "main", "upscale_args", "showcase_args",
+           # reexportados (código antigo importava daqui)
+           "PHOTO_FILTER", "DropZone", "ImageView", "StatusBar", "StepHeader", "human_size", "paint_chip"]
+
+TAGLINE = "Redesenho de ambientes por IA, a partir de uma única foto"
+
+# Mesmas chaves e rótulos de ``mobilia.design.presets.catalog()`` (conferido em tests/test_ui.py). A interface não
+# importa o pacote do motor: ele traz numpy/OpenCV/PyTorch, que ficam fora do executável da interface.
+CATALOG: dict[str, dict[str, str]] = {
+    "funcoes": {"mudar_estilo": "Mudar estilo", "reforma": "Reforma completa", "redesign_simples": "Redesign simples",
+                "mobiliar": "Mobiliar ambiente vazio", "editar_area": "Editar área", "fachada": "Fachada",
+                "evento": "Decoração de evento", "texto": "Texto para ambiente"},
+    "estilos": {"moderno": "Moderno", "contemporaneo": "Contemporâneo", "escandinavo": "Escandinavo",
+                "minimalista": "Minimalista", "industrial": "Industrial", "classico": "Clássico", "luxo": "Luxo",
+                "boho": "Boho", "japandi": "Japandi", "rustico": "Rústico", "costeiro": "Costeiro",
+                "tropical": "Tropical brasileiro", "mid_century": "Mid-century", "farmhouse": "Fazenda moderna"},
+    "ambientes": {"sala": "Sala de estar", "quarto": "Quarto", "cozinha": "Cozinha", "banheiro": "Banheiro",
+                  "escritorio": "Escritório", "sala_jantar": "Sala de jantar", "varanda": "Varanda",
+                  "fachada": "Fachada"},
+    "eventos": {"aniversario": "Aniversário", "casamento": "Casamento", "natal": "Natal",
+                "festa_infantil": "Festa infantil", "cha_de_bebe": "Chá de bebê", "reveillon": "Réveillon"},
+}
+ROOM_SHORT = {"sala": "Sala", "quarto": "Quarto", "cozinha": "Cozinha", "banheiro": "Banheiro",
+              "escritorio": "Escritório", "sala_jantar": "Jantar", "varanda": "Varanda", "fachada": "Fachada"}
+ASPECTS = {"paisagem": "Paisagem", "retrato": "Retrato", "quadrado": "Quadrado"}
+QUALITIES = ("final", "rapido")
+NEEDS_PHOTO = {k for k in CATALOG["funcoes"] if k != "texto"}
+VIDEO_FORMATS = {"16x9": ("Horizontal 16:9", "1920 × 1080 · YouTube, TV e apresentações"),
+                 "9x16": ("Vertical 9:16", "1080 × 1920 · Reels, Stories, TikTok e WhatsApp")}
+DESIGN_STAGES = [("preparo", "Preparando a foto"), ("analise", "Analisando o ambiente"),
+                 ("geracao", "Gerando as versões"), ("final", "Finalizando")]
+TEXT_STAGES = [("preparo", "Preparando"), ("geracao", "Gerando as versões"), ("final", "Finalizando")]
 
 
-def human_size(nbytes: int) -> str:
-    """Tamanho de arquivo legível ("850 KB", "12.4 MB"); vazio quando desconhecido."""
-    if nbytes <= 0:
-        return ""
-    if nbytes < 1_000_000:
-        return f"{max(1, round(nbytes / 1000))} KB"
-    return f"{nbytes / 1e6:.1f} MB"
+# =============================================================================================== pedido
+
+@dataclass
+class DesignRequest:
+    """Pedido ao motor (``mobilia.cli design``). ``validate`` barra valores fora do catálogo e tipos errados (um
+    ``False`` vindo de um sinal ``clicked(bool)`` nunca vira ``--n False`` nem ``--funcao False``)."""
+
+    funcao: str
+    estilo: str | None
+    ambiente: str
+    n: int
+    out_dir: str
+    photo: str | None = None
+    prompt: str = ""
+    evento: str | None = None
+    mask: str | None = None
+    formato: str = "paisagem"
+    quality: str = "final"
+    seed: int | None = None
+
+    def validate(self) -> "DesignRequest":
+        def check(cond, msg):
+            if not cond:
+                raise ValueError(msg)
+
+        check(isinstance(self.funcao, str) and self.funcao in CATALOG["funcoes"], f"Função inválida: {self.funcao!r}")
+        check(self.estilo is None or (isinstance(self.estilo, str) and self.estilo in CATALOG["estilos"]),
+              f"Estilo inválido: {self.estilo!r}")
+        check(isinstance(self.ambiente, str) and self.ambiente in CATALOG["ambientes"],
+              f"Ambiente inválido: {self.ambiente!r}")
+        check(type(self.n) is int and 1 <= self.n <= 4, f"Número de versões inválido: {self.n!r}")
+        check(self.evento is None or (isinstance(self.evento, str) and self.evento in CATALOG["eventos"]),
+              f"Evento inválido: {self.evento!r}")
+        check(isinstance(self.formato, str) and self.formato in ASPECTS, f"Formato inválido: {self.formato!r}")
+        check(self.quality in QUALITIES, f"Qualidade inválida: {self.quality!r}")
+        check(self.seed is None or type(self.seed) is int, f"Semente inválida: {self.seed!r}")
+        check(isinstance(self.prompt, str), "Descrição inválida")
+        check(isinstance(self.out_dir, str) and bool(self.out_dir), "Pasta de saída inválida")
+        if self.funcao in NEEDS_PHOTO:
+            check(isinstance(self.photo, str) and Path(self.photo).is_file(), "Escolha a foto do ambiente.")
+        if self.funcao == "editar_area":
+            check(isinstance(self.mask, str) and Path(self.mask).is_file(), "Pinte a área a editar.")
+        if self.funcao == "evento":
+            check(self.evento is not None, "Escolha o evento.")
+        return self
+
+    def args(self) -> list[str]:
+        """Argumentos de ``mobilia.cli design`` (sem o nome do subcomando)."""
+        self.validate()
+        a = ["--funcao", self.funcao, "--ambiente", self.ambiente, "--n", str(self.n), "--out-dir", self.out_dir,
+             "--quality", self.quality]
+        if self.funcao in NEEDS_PHOTO:
+            a += ["--photo", self.photo]
+        if self.estilo:
+            a += ["--estilo", self.estilo]
+        if self.evento:
+            a += ["--evento", self.evento]
+        if self.mask and self.funcao == "editar_area":
+            a += ["--mask", self.mask]
+        if self.funcao == "texto":
+            a += ["--formato", self.formato]
+        if self.prompt.strip():
+            a += ["--prompt", self.prompt.strip()]
+        if self.seed is not None:
+            a += ["--seed", str(self.seed)]
+        return a + ["--json"]
 
 
-def paint_chip(p: QPainter, x: float, y: float, text: str, dot: str | None = theme.ACCENT,
-               align_right: bool = False) -> QRectF:
-    """Etiqueta translúcida sobre a imagem (ex.: "FOTO ORIGINAL"). Devolve o retângulo desenhado."""
-    f = QFont(p.font())
-    f.setPixelSize(11); f.setWeight(QFont.DemiBold)
-    f.setLetterSpacing(QFont.AbsoluteSpacing, 1.2)
-    fm = QFontMetrics(f)
-    pad, dot_w = 11, (14 if dot else 0)
-    w = pad * 2 + dot_w + fm.horizontalAdvance(text)
-    h = 26
-    r = QRectF(x - w if align_right else x, y, w, h)
-    p.save()
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setPen(QPen(QColor(255, 255, 255, 26), 1))
-    p.setBrush(QColor(10, 10, 12, 196))
-    p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), h / 2, h / 2)
-    if dot:
-        p.setPen(Qt.NoPen); p.setBrush(QColor(dot))
-        p.drawEllipse(QPointF(r.left() + pad + 3, r.center().y()), 3, 3)
-    p.setFont(f); p.setPen(QColor(theme.TEXT))
-    p.drawText(r.adjusted(pad + dot_w, 0, -pad + 2, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
-    p.restore()
-    return r
+@dataclass
+class DesignOutcome:
+    """Versões prontas de um pedido (evento ``done`` do motor)."""
+
+    request: DesignRequest
+    outputs: list[str]
+    before: str | None
+    report: str | None
+    size: tuple[int, int] | None
+    seconds: float
+
+    @property
+    def folder(self) -> str:
+        return str(Path(self.outputs[0]).parent) if self.outputs else self.request.out_dir
 
 
-class ImageView(QLabel):
-    """Mostra uma imagem inteira, preservando a proporção, com cantos arredondados e etiqueta opcional."""
+def upscale_args(image: str, out: str) -> list[str]:
+    return ["--image", str(image), "--out", str(out), "--json"]
 
-    RADIUS = 10
 
-    def __init__(self, text: str = "", caption: str = ""):
-        super().__init__(text)
-        self._pm: QPixmap | None = None
-        self._scaled: QPixmap | None = None
-        self.caption = caption
-        self.corner_hint = ""
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(320, 240)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+def showcase_args(before: str, afters: list[str], out: str, fmt: str) -> list[str]:
+    if fmt not in VIDEO_FORMATS:
+        raise ValueError(f"Formato de vídeo inválido: {fmt!r}")
+    if not afters or not all(isinstance(a, str) for a in afters):
+        raise ValueError("Escolha ao menos uma versão para o vídeo.")
+    return ["--before", str(before), "--after", *[str(a) for a in afters], "--out", str(out), "--format", fmt,
+            "--json"]
 
-    def set_image(self, path: str) -> bool:
-        pm = QPixmap(path)
-        if pm.isNull():
-            return False
-        self._pm = pm
-        self._rescale()
-        return True
 
-    def resizeEvent(self, e):  # noqa: N802
-        super().resizeEvent(e)
-        self._rescale()
+# =============================================================================================== peças
 
-    def _rescale(self):
-        if self._pm is None:
-            return
-        dpr = self.devicePixelRatioF()
-        target = self._pm.size().scaled(self.size() - QSize(8, 8), Qt.KeepAspectRatio)
-        if target.isEmpty():
-            return
-        img = self._pm.scaled(target * dpr, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        out = QPixmap(img.size()); out.fill(Qt.transparent)
-        p = QPainter(out); p.setRenderHint(QPainter.Antialiasing)
-        clip = QPainterPath(); clip.addRoundedRect(QRectF(out.rect()), self.RADIUS * dpr, self.RADIUS * dpr)
-        p.setClipPath(clip); p.drawPixmap(0, 0, img); p.end()
-        out.setDevicePixelRatio(dpr)
-        self._scaled = out
+class Stepper(QWidget):
+    """Passos do fluxo no topo: número (ou visto), rótulo e filete; clicar volta a um passo já alcançado."""
+
+    step_clicked = Signal(int)
+    LABELS = ("Foto", "Função", "Ajustes", "Gerar", "Resultados")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current = 0
+        self.reachable = {0}
+        self.done: set[int] = set()
+        self.setFixedHeight(34)
+        self._hit: list[tuple[QRectF, int]] = []
+        self.setMouseTracking(True)
+
+    def set_state(self, current: int, reachable: set[int], done: set[int]) -> None:
+        self.current, self.reachable, self.done = current, set(reachable), set(done)
         self.update()
-
-    def paintEvent(self, e):  # noqa: N802
-        if self._scaled is None:
-            return super().paintEvent(e)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        sz = self._scaled.deviceIndependentSize()
-        r = QRectF((self.width() - sz.width()) / 2, (self.height() - sz.height()) / 2, sz.width(), sz.height())
-        p.drawPixmap(r.topLeft(), self._scaled)
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1)); p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
-        if self.caption:
-            paint_chip(p, r.left() + 14, r.top() + 14, self.caption)
-        if self.corner_hint:
-            paint_chip(p, r.right() - 14, r.bottom() - 40, self.corner_hint, dot=None, align_right=True)
-        p.end()
-
-
-class DropZone(QFrame):
-    """Área de importação: clique ou arraste uma foto."""
-
-    def __init__(self, on_file):
-        super().__init__()
-        self.setObjectName("drop")
-        self.setProperty("filled", False)
-        self.on_file = on_file
-        self.setAcceptDrops(True)
-        self.setCursor(Qt.PointingHandCursor)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 14, 14, 14)
-        self.view = ImageView(caption="FOTO ORIGINAL")
-        self.view.corner_hint = "Clique para trocar a foto"
-        self.stack = QStackedWidget()
-        self.stack.addWidget(self._build_empty())
-        self.stack.addWidget(self.view)
-        lay.addWidget(self.stack)
-
-    def _build_empty(self) -> QWidget:
-        w = QWidget()
-        w.setAttribute(Qt.WA_TranslucentBackground)
-        col = QVBoxLayout(w)
-        col.setContentsMargins(24, 24, 24, 18)
-        col.addStretch(3)
-        art = QLabel(); art.setPixmap(theme.empty_state_art()); art.setAlignment(Qt.AlignCenter)
-        self.hint = QLabel("Comece pela foto do ambiente vazio")
-        self.hint.setObjectName("headline"); self.hint.setAlignment(Qt.AlignCenter)
-        body = QLabel("Arraste a imagem para cá ou escolha um arquivo.")
-        body.setObjectName("body"); body.setAlignment(Qt.AlignCenter)
-        btn = QPushButton("  Escolher foto"); btn.setObjectName("outline")
-        btn.setIcon(theme.line_icon("import", 16, theme.ACCENT_HI)); btn.setIconSize(QSize(16, 16))
-        btn.setCursor(Qt.PointingHandCursor); btn.setMinimumWidth(176)
-        btn.clicked.connect(lambda: self.mousePressEvent(None))
-        formats = QLabel("JPG  ·  PNG  ·  WEBP  ·  TIFF  ·  HEIC")
-        formats.setObjectName("caption"); formats.setAlignment(Qt.AlignCenter)
-        theme.tracked(formats, 0.6)
-        trust = QWidget(); tl = QHBoxLayout(trust); tl.setContentsMargins(0, 0, 0, 0); tl.setSpacing(8)
-        shield = QLabel(); shield.setPixmap(theme.line_icon("shield", 16, theme.OK).pixmap(16, 16))
-        tt = QLabel("Sua foto fica intacta: só os móveis surgem dentro dela."); tt.setObjectName("trust")
-        tl.addStretch(1); tl.addWidget(shield); tl.addWidget(tt); tl.addStretch(1)
-        tip = QLabel("Dica: fotografe o cômodo inteiro, na altura do peito, com a luz natural do dia.")
-        tip.setObjectName("caption"); tip.setAlignment(Qt.AlignCenter); tip.setWordWrap(True)
-        col.addWidget(art); col.addSpacing(26)
-        col.addWidget(self.hint); col.addSpacing(10)
-        col.addWidget(body); col.addSpacing(24)
-        col.addWidget(btn, 0, Qt.AlignHCenter); col.addSpacing(14)
-        col.addWidget(formats)
-        col.addStretch(4)
-        col.addWidget(trust); col.addSpacing(8)
-        col.addWidget(tip)
-        return w
-
-    def show_photo(self, path: str) -> bool:
-        ok = self.view.set_image(path)
-        self.stack.setCurrentIndex(1 if ok else 0)
-        self._set_filled(ok)
-        return ok
-
-    def show_empty(self) -> None:
-        self.stack.setCurrentIndex(0)
-        self._set_filled(False)
-
-    def _set_filled(self, filled: bool) -> None:
-        self.setProperty("filled", filled); self.style().unpolish(self); self.style().polish(self)
-
-    def dragEnterEvent(self, e):  # noqa: N802
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-            self.setProperty("hover", True); self.style().polish(self)
-
-    def dragLeaveEvent(self, e):  # noqa: N802
-        self.setProperty("hover", False); self.style().polish(self)
-
-    def dropEvent(self, e):  # noqa: N802
-        self.setProperty("hover", False); self.style().polish(self)
-        for u in e.mimeData().urls():
-            if u.isLocalFile():
-                self.on_file(u.toLocalFile())
-                break
 
     def mousePressEvent(self, e):  # noqa: N802
-        path, _ = QFileDialog.getOpenFileName(self, "Importar foto", "", PHOTO_FILTER)
-        if path:
-            self.on_file(path)
+        for r, i in self._hit:
+            if r.contains(e.position()) and i in self.reachable and i != self.current:
+                self.step_clicked.emit(i)
+                return
 
-
-class PosterView(ImageView):
-    """Último quadro do vídeo com um botão de play: aparece até o player mostrar o primeiro quadro
-    (ou no lugar dele, se o sistema não tiver backend de vídeo). Clicar abre o vídeo no player do sistema."""
-
-    def __init__(self, on_click):
-        super().__init__()
-        self.on_click = on_click
-        self.corner_hint = "Clique para assistir"
-        self.setCursor(Qt.PointingHandCursor)
-
-    def mousePressEvent(self, e):  # noqa: N802
-        self.on_click()
+    def mouseMoveEvent(self, e):  # noqa: N802
+        hand = any(r.contains(e.position()) and i in self.reachable and i != self.current for r, i in self._hit)
+        self.setCursor(Qt.PointingHandCursor if hand else Qt.ArrowCursor)
 
     def paintEvent(self, e):  # noqa: N802
-        super().paintEvent(e)
-        if self._scaled is None:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        c = QPointF(self.width() / 2, self.height() / 2)
-        p.setPen(QPen(QColor(255, 255, 255, 60), 1)); p.setBrush(QColor(10, 10, 12, 190))
-        p.drawEllipse(c, 34, 34)
-        tri = QPainterPath(QPointF(c.x() - 9, c.y() - 14)); tri.lineTo(c.x() + 15, c.y()); tri.lineTo(c.x() - 9, c.y() + 14)
-        tri.closeSubpath()
-        p.setPen(Qt.NoPen); p.setBrush(QColor(theme.ACCENT_HI)); p.drawPath(tri)
-        p.end()
-
-
-class VideoView(QWidget):
-    """Player em loop do vídeo gerado (QtMultimedia), com pôster até o primeiro quadro chegar."""
-
-    def __init__(self):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self.stack = QStackedWidget()
-        lay.addWidget(self.stack)
-        self.poster = PosterView(self.open_external)
-        self.stack.addWidget(self.poster)
-        self.player = None
-        self.widget = None
-        try:
-            from PySide6.QtMultimedia import QMediaPlayer
-            from PySide6.QtMultimediaWidgets import QVideoWidget
-
-            self.widget = QVideoWidget()
-            self.player = QMediaPlayer(self)
-            self.player.setVideoOutput(self.widget)
-            self.player.setLoops(QMediaPlayer.Infinite)
-            self.stack.addWidget(self.widget)
-            self.widget.videoSink().videoFrameChanged.connect(self._first_frame)
-        except Exception:  # sem backend de mídia: o pôster fica no lugar (clique abre o player do sistema)
-            self.player = None
-        self.source: str | None = None
-
-    def _first_frame(self, *_):
-        if self.widget is not None and self.stack.currentWidget() is not self.widget:
-            self.stack.setCurrentWidget(self.widget)
-
-    def play(self, path: str, poster: str | None = None) -> None:
-        self.source = path
-        self.stack.setCurrentWidget(self.poster)
-        if poster:
-            self.poster.set_image(poster)
-        if self.player is not None:
-            self.player.setSource(QUrl.fromLocalFile(path))
-            self.player.play()
-
-    def open_external(self) -> None:
-        if self.source:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self.source))
-
-    def stop(self) -> None:
-        if self.player is not None:
-            self.player.stop()
-
-
-class StageList(QWidget):
-    """Linha do tempo das etapas: marcador (pendente / atual / feita) ligado por um filete."""
-
-    def __init__(self):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
-        self._pix = {s: theme.status_pixmap(s) for s in ("pending", "current", "done")}
-        self._lay = lay
-        self.rows = {}
-        self.marks = {}
-        self.order: list[str] = []
-        self.set_stages([(k, label) for k, label, _ in STAGES])
-
-    def set_stages(self, stages) -> None:
-        """Troca a lista de etapas (o motor anuncia o modo B, que tem etapas próprias)."""
-        stages = [(str(k), str(label)) for k, label in stages]
-        if [k for k, _ in stages] == self.order and all(self.rows[k][1] == lb for k, lb in stages):
-            return
-        while self._lay.count():
-            it = self._lay.takeAt(0)
-            sub = it.layout()
-            if sub is not None:
-                while sub.count():
-                    w = sub.takeAt(0).widget()
-                    if w is not None:
-                        w.deleteLater()
-        self.rows, self.marks = {}, {}
-        for key, label in stages:
-            row = QHBoxLayout(); row.setSpacing(12)
-            mark = QLabel(); mark.setFixedSize(18, 18); mark.setPixmap(self._pix["pending"])
-            lb = QLabel(label); lb.setObjectName("muted")
-            row.addWidget(mark); row.addWidget(lb, 1)
-            self._lay.addLayout(row)
-            self.rows[key] = (lb, label)
-            self.marks[key] = mark
-        self.order = [k for k, _ in stages]
-        self._idx = -1
-        self.reset()
-
-    def _style(self, key: str, state: str) -> None:
-        lb, _ = self.rows[key]
-        self.marks[key].setPixmap(self._pix[state])
-        color, weight = {"done": (theme.TEXT_2, 400), "current": (theme.TEXT, 600),
-                         "pending": (theme.MUTED, 400)}[state]
-        lb.setStyleSheet(f"color: {color}; font-weight: {weight};")
-
-    def set_current(self, stage: str) -> None:
-        if stage not in self.rows:
-            return
-        self._idx = self.order.index(stage)
-        for i, k in enumerate(self.order):
-            self._style(k, "done" if i < self._idx else "current" if i == self._idx else "pending")
-        self.update()
-
-    def reset(self) -> None:
-        self._idx = -1
-        for k in self.order:
-            self._style(k, "pending")
-        self.update()
-
-    def paintEvent(self, e):  # noqa: N802
-        super().paintEvent(e)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        marks = [self.marks[k].geometry() for k in self.order]
-        for i in range(len(marks) - 1):
-            a, b = marks[i], marks[i + 1]
-            color = QColor(theme.OK if i < self._idx else theme.HAIRLINE_STRONG)
-            if i < self._idx:
-                color.setAlphaF(0.45)
-            p.setPen(QPen(color, 1.2))
-            x = a.center().x() + 0.5
-            p.drawLine(QPointF(x, a.bottom() - 1), QPointF(x, b.top() + 2))
-        p.end()
-
-
-class StepHeader(QWidget):
-    """Cabeçalho de passo: número em latão, título espaçado e um visto quando concluído."""
-
-    def __init__(self, num: str, title: str):
-        super().__init__()
-        row = QHBoxLayout(self); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(10)
-        n = QLabel(num); n.setObjectName("stepnum"); theme.tracked(n, 0.8)
-        t = QLabel(title); t.setObjectName("section"); theme.tracked(t)
-        self.done = QLabel(); self.done.setPixmap(theme.status_pixmap("done", 18)); self.done.setFixedSize(18, 18)
-        self.done.setToolTip("Concluído")
-        self.done.setVisible(False)
-        row.addWidget(n); row.addWidget(t); row.addStretch(1); row.addWidget(self.done)
-
-    def set_done(self, done: bool) -> None:
-        self.done.setVisible(done)
-
-
-class StatusBar(QStatusBar):
-    """Rodapé: a mensagem alinhada à margem da janela (o QStatusBar fixa 6 px à esquerda)."""
-
-    INDENT = 32
-    DOT_W = 16
-
-    def __init__(self):
-        super().__init__()
-        self.dot = theme.MUTED          # estado da GPU: sálvia pronta, latão modo CPU, vermelho erro
-        self.dot_tip = ""
-
-    def set_dot(self, color: str, tip: str = "") -> None:
-        self.dot = color; self.dot_tip = tip
-        self.update()
-
-    def paintEvent(self, e):  # noqa: N802
-        msg = self.currentMessage()
-        p = QPainter(self)
-        opt = QStyleOption(); opt.initFrom(self)
-        self.style().drawPrimitive(QStyle.PE_PanelStatusBar, opt, p, self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(Qt.NoPen)
-        halo = QColor(self.dot); halo.setAlphaF(0.22)
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        f = QFont("Inter"); f.setPixelSize(12); f.setWeight(QFont.Medium)
+        fn = QFont("Inter Display"); fn.setPixelSize(11); fn.setWeight(QFont.DemiBold)
+        fm = QFontMetrics(f)
+        n = len(self.LABELS)
+        widths = [26 + 8 + fm.horizontalAdvance(t) for t in self.LABELS]
+        gap = max(24.0, (self.width() - sum(widths)) / max(1, n - 1)) if n > 1 else 0
+        gap = min(gap, 72.0)
+        total = sum(widths) + gap * (n - 1)
+        x = (self.width() - total) / 2
         cy = self.height() / 2
-        p.setBrush(halo); p.drawEllipse(QPointF(self.INDENT + 4, cy), 5, 5)
-        p.setBrush(QColor(self.dot)); p.drawEllipse(QPointF(self.INDENT + 4, cy), 3, 3)
-        left = self.INDENT + self.DOT_W
-        right = self.width() - 12
-        for w in self.findChildren(QWidget):
-            if w.parent() is self and w.isVisible() and w.geometry().left() > self.INDENT:
-                right = min(right, w.geometry().left() - 16)
-        if msg:
-            p.setPen(self.palette().windowText().color())
-            text = self.fontMetrics().elidedText(msg, Qt.ElideMiddle, max(0, right - left))
-            p.drawText(left, 0, right - left, self.height(), Qt.AlignLeft | Qt.AlignVCenter, text)
+        self._hit = []
+        for i, (label, w) in enumerate(zip(self.LABELS, widths)):
+            c = QPointF(x + 11, cy)
+            cur, dn, reach = i == self.current, i in self.done and i != self.current, i in self.reachable
+            if cur:
+                p.setPen(Qt.NoPen); p.setBrush(QColor(theme.ACCENT)); p.drawEllipse(c, 11, 11)
+                p.setPen(QColor(theme.ON_ACCENT))
+            elif dn:
+                bg = QColor(theme.OK); bg.setAlphaF(0.16)
+                p.setPen(Qt.NoPen); p.setBrush(bg); p.drawEllipse(c, 11, 11)
+            else:
+                p.setPen(QPen(QColor(theme.HAIRLINE_STRONG), 1)); p.setBrush(QColor(theme.SURFACE))
+                p.drawEllipse(c, 10.5, 10.5)
+                p.setPen(QColor(theme.TEXT_2 if reach else theme.MUTED))
+            if dn:
+                p.setPen(QPen(QColor(theme.OK), 1.6, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(QPointF(c.x() - 4, c.y() + 0.3), QPointF(c.x() - 1, c.y() + 3.2))
+                p.drawLine(QPointF(c.x() - 1, c.y() + 3.2), QPointF(c.x() + 4.4, c.y() - 3))
+            else:
+                p.setFont(fn)
+                p.drawText(QRectF(c.x() - 11, c.y() - 11, 22, 22), Qt.AlignCenter, str(i + 1))
+            p.setFont(f)
+            p.setPen(QColor(theme.TEXT if cur else theme.TEXT_2 if reach else theme.MUTED))
+            tr = QRectF(x + 30, 0, w - 30, self.height())
+            p.drawText(tr, Qt.AlignLeft | Qt.AlignVCenter, label)
+            self._hit.append((QRectF(x - 4, 0, w + 8, self.height()), i))
+            if i < n - 1:
+                lc = QColor(theme.OK if i in self.done else theme.HAIRLINE_STRONG)
+                if i in self.done:
+                    lc.setAlphaF(0.45)
+                p.setPen(QPen(lc, 1.2))
+                p.drawLine(QPointF(x + w + 10, cy), QPointF(x + w + gap - 10, cy))
+            x += w + gap
         p.end()
 
 
-def _rule() -> QFrame:
-    r = QFrame(); r.setObjectName("rule"); r.setFixedHeight(1)
-    return r
+def _section(text: str) -> QLabel:
+    lb = tracked_label(text)
+    lb.setContentsMargins(0, 0, 0, 0)
+    return lb
 
 
-def _tracked(text: str) -> QLabel:
-    lb = QLabel(text); lb.setObjectName("section")
-    return theme.tracked(lb)
+def _scroll(inner: QWidget) -> QScrollArea:
+    sc = QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QFrame.NoFrame)
+    sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    sc.setWidget(inner)
+    sc.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+    return sc
 
+
+def _button(text: str, icon: str | None = None, kind: str | None = None, icon_color: str = theme.TEXT_2) -> QPushButton:
+    b = QPushButton(("  " + text) if icon else text)
+    if kind:
+        b.setObjectName(kind)
+    if icon:
+        b.setIcon(theme.line_icon(icon, 16, icon_color)); b.setIconSize(QSize(16, 16))
+    b.setCursor(Qt.PointingHandCursor)
+    return b
+
+
+class Page(QFrame):
+    """Cartão do painel direito: cabeçalho fixo, corpo rolável e rodapé fixo (botões principais sempre visíveis)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("card")
+        self.outer = QVBoxLayout(self); self.outer.setContentsMargins(24, 22, 24, 22); self.outer.setSpacing(0)
+        self.head = QVBoxLayout(); self.head.setSpacing(0)
+        self.inner = QWidget(); self.inner.setObjectName("pagebody")
+        self.body = QVBoxLayout(self.inner); self.body.setContentsMargins(0, 0, 0, 0); self.body.setSpacing(0)
+        self.scroll = _scroll(self.inner)
+        # com a barra de rolagem visível, o corpo recua para ela não cobrir os cartões; sem ela, o corpo usa a
+        # largura toda e fica alinhado com os botões do rodapé
+        self.scroll.verticalScrollBar().rangeChanged.connect(
+            lambda _lo, hi: self.body.setContentsMargins(0, 0, 14 if hi > 0 else 0, 0))
+        self.foot = QVBoxLayout(); self.foot.setSpacing(10)
+        self.outer.addLayout(self.head)
+        self.outer.addWidget(self.scroll, 1)
+        self.outer.addSpacing(14)
+        self.outer.addLayout(self.foot)
+
+    def set_compact(self, compact: bool) -> None:
+        m = 16 if compact else 24
+        self.outer.setContentsMargins(m, m - 2, m, m - 2)
+
+
+# =============================================================================================== janela
 
 class MainWindow(QMainWindow):
+    P_PHOTO, P_FUNC, P_STYLE, P_PROGRESS, P_RESULTS, P_EDIT, P_VIDEO = range(7)
+    L_DROP, L_TEXT, L_PROGRESS, L_RESULT, L_MASK = range(5)
+    COMPACT_BELOW = 790
+
     def __init__(self):
         super().__init__()
         theme.load_fonts()
-        self.setWindowTitle(f"{APP_NAME}")
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(theme.window_icon())
-        self.resize(1360, 820)
         self.photo_path: str | None = None
-        self.room: str | None = None
-        self.runner = JobRunner(self)
-        self.runner.progress.connect(self._on_progress)
-        self.runner.forecast.connect(self._on_forecast)
-        self.runner.preview.connect(self._on_preview)
-        self.runner.finished.connect(self._on_finished)
-        self.runner.mode.connect(self._on_mode)
-        self.last_request: JobRequest | None = None
-        self.started_at = 0.0
-        self.last_output: str | None = None
-        self.last_job: QueuedJob | None = None
-        self.last_diagnostic: Path | None = None
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._tick)
-        self.last_preview: str | None = None
-        self._gaps: list[tuple[object, int, int]] = []   # (espaçador, normal, compacto)
+        self.funcao: str | None = None
+        self.estilo: str = "moderno"
+        self.ambiente: str = "sala"
+        self.evento: str = "aniversario"
+        self.formato: str = "paisagem"
+        self.result: DesignOutcome | None = None
+        self.selected = 0
+        self.edit_base: str | None = None
+        self.last_request: DesignRequest | None = None
+        self.last_task: CliResult | None = None       # último trabalho de ação (ampliar / vídeo)
+        self.upscaled: dict[str, str] = {}             # versão -> arquivo 4K
+        self.videos: list[str] = []
+        self.legacy_window = None
+        self._back_page = self.P_STYLE
         self._compact: bool | None = None
+        self.started_at = 0.0
 
-        root = QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
-        outer = QVBoxLayout(root)
-        self.outer = outer
-        outer.setContentsMargins(32, 20, 32, 20)
-        outer.setSpacing(18)
+        self.design = CliTask(self)
+        self.design.progress.connect(self._on_progress)
+        self.design.preview.connect(self._on_preview)
+        self.design.finished.connect(self._on_design_finished)
+        self.side = CliTask(self)
+        self.side.progress.connect(self._on_side_progress)
+        self.side.finished.connect(self._on_side_finished)
+        self.timer = QTimer(self); self.timer.timeout.connect(self._tick)
+
+        root = QWidget(); root.setObjectName("root"); self.setCentralWidget(root)
+        outer = QVBoxLayout(root); self.outer = outer
+        outer.setContentsMargins(32, 18, 32, 18); outer.setSpacing(14)
         outer.addLayout(self._build_header())
-
-        body = QHBoxLayout(); body.setSpacing(20)
-        outer.addLayout(body, 1)
-        # ---- esquerda: foto / vídeo (o palco)
+        self.stepper = Stepper(); self.stepper.step_clicked.connect(self._on_step_clicked)
+        outer.addWidget(self.stepper)
+        body = QHBoxLayout(); body.setSpacing(20); outer.addLayout(body, 1)
         self.left = QStackedWidget()
-        self.drop = DropZone(self.load_photo)
-        self.live = ImageView(caption="PRÉVIA AO VIVO")
-        lcard = QFrame(); lcard.setObjectName("stage")
-        ll = QVBoxLayout(lcard); ll.setContentsMargins(14, 14, 14, 12); ll.setSpacing(10); ll.addWidget(self.live)
-        lcap = QLabel("Prévia ao vivo: os móveis surgem dentro da sua foto, que continua intacta.")
-        lcap.setObjectName("stagecap"); lcap.setAlignment(Qt.AlignCenter)
-        ll.addWidget(lcap)
-        self.video = VideoView()
-        vcard = QFrame(); vcard.setObjectName("stage")
-        vl = QVBoxLayout(vcard); vl.setContentsMargins(18, 16, 18, 18); vl.setSpacing(14)
-        vhead = QHBoxLayout()
-        vtag = _tracked("VÍDEO FINAL"); vtag.setStyleSheet(f"color: {theme.ACCENT_HI};")
-        self.video_name = QLabel(""); self.video_name.setObjectName("caption")
-        vhead.addWidget(vtag); vhead.addStretch(1); vhead.addWidget(self.video_name)
-        vcap = QLabel("Foto original, preservada pixel a pixel: só os móveis e as sombras são novos.")
-        vcap.setObjectName("stagecap"); vcap.setAlignment(Qt.AlignCenter)
-        vl.addLayout(vhead); vl.addWidget(self.video, 1); vl.addWidget(vcap)
-        self.left.addWidget(self.drop); self.left.addWidget(lcard); self.left.addWidget(vcard)
+        self.left.addWidget(self._build_drop())
+        self.left.addWidget(self._build_text_stage())
+        self.left.addWidget(self._build_progress_stage())
+        self.left.addWidget(self._build_result_stage())
+        self.left.addWidget(self._build_mask_stage())
         body.addWidget(self.left, 1)
-        # ---- direita: passos / progresso / resultado
-        self.right = QStackedWidget()
-        self.right.setFixedWidth(392)
-        self.right.addWidget(self._build_setup())
-        self.right.addWidget(self._build_progress())
-        self.right.addWidget(self._build_result())
+        self.right = QStackedWidget(); self.right.setFixedWidth(424)
+        self.pages: list[Page] = []
+        for build in (self._page_photo, self._page_function, self._page_style, self._page_progress,
+                      self._page_results, self._page_edit, self._page_video):
+            pg = build(); self.pages.append(pg); self.right.addWidget(pg)
         body.addWidget(self.right)
 
-        sb = StatusBar()
-        self.setStatusBar(sb)
-        sb.setSizeGripEnabled(False)
-        self.sb = sb
-        ver = QLabel(f"{APP_NAME}  {__version__}")
-        sb.addPermanentWidget(ver)
+        sb = StatusBar(); self.setStatusBar(sb); sb.setSizeGripEnabled(False); self.sb = sb
+        sb.addPermanentWidget(QLabel(f"{APP_NAME}  {__version__}"))
         sb.showMessage("Detectando GPU…")
-        self.probe = HardwareProbe(self)
-        self.probe.done.connect(self._on_hardware)
-        self._update_ready()
+        self.probe = HardwareProbe(self); self.probe.done.connect(self._on_hardware)
+        self.go(self.P_PHOTO)
         self._fit_to_screen()
 
-    def _fit_to_screen(self) -> None:
-        """Tamanho inicial que cabe na tela (até 1360x820): em notebooks 1366x768 ou com escala de 125%
-        a janela já abre no modo compacto, sem passar da área útil (barra de tarefas descontada)."""
-        w, h = 1360, 820
-        scr = self.screen()
-        g = scr.availableGeometry() if scr is not None else None
-        if g is not None and g.width() > 0 and g.height() > 0:
-            w, h = min(w, g.width() - 32), min(h, g.height() - 48)    # moldura e barra de título
-        # o modo é escolhido ANTES do primeiro resize: o mínimo do layout normal (~725 px de altura)
-        # não deixaria a janela abrir menor que isso numa tela baixa
-        self.set_compact(h < self.COMPACT_BELOW)
-        self.resize(max(w, 640), max(h, 480))
-
-    # ------------------------------------------------------------------ páginas
+    # ------------------------------------------------------------------------------------------ montagem
     def _build_header(self) -> QHBoxLayout:
-        head = QHBoxLayout(); head.setSpacing(0); head.setContentsMargins(2, 6, 0, 2)
+        head = QHBoxLayout(); head.setSpacing(0); head.setContentsMargins(2, 4, 0, 0)
         mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(30)); mark.setToolTip(APP_NAME)
         mark.setAccessibleName(APP_NAME)
-        rule = QFrame(); rule.setObjectName("vrule"); rule.setFixedSize(1, 22)
+        vr = QFrame(); vr.setObjectName("vrule"); vr.setFixedSize(1, 22)
         tag = QLabel(TAGLINE); tag.setObjectName("tagline")
         lock = QLabel(); lock.setPixmap(theme.line_icon("chip", 14, theme.MUTED).pixmap(14, 14))
         priv = QLabel("Processado no seu computador"); priv.setObjectName("privacy")
-        priv.setToolTip("A foto e o vídeo não saem do seu PC: tudo é gerado aqui, na sua placa de vídeo.")
+        priv.setToolTip("A foto e as imagens não saem do seu PC: tudo é gerado aqui, na sua placa de vídeo.")
+        self.btn_legacy = _button("Avançado (vídeo de montagem, legado)", "settings", "ghost")
+        self.btn_legacy.setToolTip("Abre o modo antigo: vídeo em que os móveis 3D entram na foto (modos A/B).")
+        on_click(self.btn_legacy, self.open_legacy)
         head.addWidget(mark, 0, Qt.AlignVCenter)
-        head.addSpacing(22); head.addWidget(rule, 0, Qt.AlignVCenter); head.addSpacing(22)
+        head.addSpacing(22); head.addWidget(vr, 0, Qt.AlignVCenter); head.addSpacing(22)
         head.addWidget(tag, 0, Qt.AlignVCenter); head.addStretch(1)
+        head.addWidget(self.btn_legacy, 0, Qt.AlignVCenter); head.addSpacing(18)
         head.addWidget(lock, 0, Qt.AlignVCenter); head.addSpacing(8); head.addWidget(priv, 0, Qt.AlignVCenter)
         return head
 
-    def _gap(self, lay, normal: int, compact: int | None = None) -> None:
-        """Espaço vertical que encolhe no modo compacto (notebooks de 768 px de altura)."""
-        lay.addSpacing(normal)
-        self._gaps.append((lay.itemAt(lay.count() - 1).spacerItem(), normal,
-                           round(normal * 0.5) if compact is None else compact))
+    def _stage(self) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame(); card.setObjectName("stage")
+        lay = QVBoxLayout(card); lay.setContentsMargins(16, 14, 16, 14); lay.setSpacing(10)
+        return card, lay
 
-    def _build_setup(self) -> QWidget:
-        w = QFrame(); w.setObjectName("card")
-        lay = QVBoxLayout(w); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(0)
-        self.step_photo = StepHeader("01", "FOTO DO AMBIENTE")
-        self.btn_import = QPushButton("  Importar foto…")
-        self.btn_import.setToolTip("Escolher a foto do ambiente, vazio ou mobiliado (JPG, PNG, WEBP, TIFF ou HEIC). "
-                                   "O 7xAi detecta sozinho: vazio recebe móveis; mobiliado começa vazio e os "
-                                   "próprios móveis da foto voltam um a um")
-        self.btn_import.setIcon(theme.line_icon("photo", 16, theme.TEXT_2)); self.btn_import.setIconSize(QSize(16, 16))
-        self.btn_import.clicked.connect(lambda: self.drop.mousePressEvent(None))
-        self.photo_label = QLabel("Nenhuma foto selecionada"); self.photo_label.setObjectName("hint")
-        self.step_room = StepHeader("02", "TIPO DE AMBIENTE")
-        grid = QGridLayout(); grid.setSpacing(8)
-        self.room_group = QButtonGroup(self); self.room_group.setExclusive(True)
-        self.room_buttons = {}
-        for i, (key, label) in enumerate(ROOM_TYPES.items()):
-            b = QToolButton(); b.setObjectName("room"); b.setCheckable(True)
-            b.setText(label); b.setIcon(theme.room_icon(key)); b.setIconSize(QSize(40, 40))
-            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); b.setMinimumSize(104, 90)
-            b.setFixedHeight(90)
-            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(lambda _=False, k=key: self.select_room(k))
-            self.room_group.addButton(b); self.room_buttons[key] = b
-            grid.addWidget(b, i // 3, i % 3)
-        self.step_quality = StepHeader("03", "QUALIDADE")
-        self.quality = QComboBox(); self.quality.setView(QListView())
-        self.quality.addItem("Final (recomendado com GPU)", "final")
-        self.quality.addItem("Prévia rápida", "previa")
-        self.quality.addItem("Automática", "auto")
-        self.ready_hint = QLabel(""); self.ready_hint.setObjectName("hint"); self.ready_hint.setAlignment(Qt.AlignCenter)
-        self.btn_generate = QPushButton("Gerar vídeo"); self.btn_generate.setObjectName("primary")
-        self.btn_generate.setCursor(Qt.PointingHandCursor)
-        # clicked(bool) mandaria checked=False como "mode": sempre chama sem argumentos
-        self.btn_generate.clicked.connect(lambda _checked=False: self.generate())
-        g = lambda n: self._gap(lay, n)  # noqa: E731
-        lay.addWidget(self.step_photo); g(14)
-        lay.addWidget(self.btn_import); g(10); lay.addWidget(self.photo_label)
-        g(22); lay.addWidget(_rule()); g(22)
-        lay.addWidget(self.step_room); g(14); lay.addLayout(grid)
-        g(22); lay.addWidget(_rule()); g(22)
-        lay.addWidget(self.step_quality); g(14); lay.addWidget(self.quality)
-        lay.addStretch(1)
-        lay.addWidget(self.ready_hint); g(12)
-        lay.addWidget(self.btn_generate)
-        self._cards = [lay]
-        return w
+    def _build_drop(self) -> QWidget:
+        self.drop = DropZone(self.load_photo, headline="Comece pela foto do ambiente",
+                             trust="A foto não sai do seu computador: tudo é gerado aqui.",
+                             tip="Vale cômodo vazio ou mobiliado, interno ou fachada. Fotografe o ambiente inteiro, "
+                                 "na altura do peito, com luz natural.")
+        return self.drop
 
-    def _build_progress(self) -> QWidget:
-        w = QFrame(); w.setObjectName("card")
-        lay = QVBoxLayout(w); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(0)
+    def _build_text_stage(self) -> QWidget:
+        card, lay = self._stage()
+        lay.addStretch(3)
+        art = QLabel(); art.setPixmap(theme.function_pixmap("texto", 96, theme.ACCENT)); art.setAlignment(Qt.AlignCenter)
+        h = QLabel("Criar a partir de um texto"); h.setObjectName("headline"); h.setAlignment(Qt.AlignCenter)
+        b = QLabel("Sem foto: o 7xAi cria o ambiente do zero com o tipo de cômodo, o estilo e a sua descrição.")
+        b.setObjectName("body"); b.setAlignment(Qt.AlignCenter); b.setWordWrap(True)
+        self.text_summary = QLabel(""); self.text_summary.setObjectName("caption"); self.text_summary.setAlignment(Qt.AlignCenter)
+        lay.addWidget(art); lay.addSpacing(22); lay.addWidget(h); lay.addSpacing(10); lay.addWidget(b)
+        lay.addSpacing(16); lay.addWidget(self.text_summary)
+        lay.addStretch(4)
+        return card
+
+    def _build_progress_stage(self) -> QWidget:
+        card, lay = self._stage()
         head = QHBoxLayout()
-        s = _tracked("GERANDO O VÍDEO")
-        self.elapsed = QLabel(""); self.elapsed.setObjectName("hint")
-        head.addWidget(s); head.addStretch(1); head.addWidget(self.elapsed)
-        self.bar = QProgressBar(); self.bar.setRange(0, 1000); self.bar.setTextVisible(False)
-        self.pct = QLabel(); self.pct.setObjectName("pct"); self._set_pct(0.0)
-        self.msg = QLabel("Preparando…"); self.msg.setWordWrap(True); self.msg.setObjectName("body")
-        # previsão do tempo total (controle de orçamento do render, PT7): aparece após o quadro final
-        self.forecast = QLabel(""); self.forecast.setObjectName("hint"); self.forecast.setWordWrap(True); self.forecast.hide()
-        # aviso "primeira execução — mais lenta" (estado da instalação, ver bootstrap.first_run_notice)
-        self.notice = QLabel(""); self.notice.setObjectName("notice"); self.notice.setWordWrap(True)
-        self.notice.hide()
-        self.stages = StageList()
-        self.btn_cancel = QPushButton("Cancelar"); self.btn_cancel.setObjectName("danger")
-        self.btn_cancel.clicked.connect(self.cancel)
-        g = lambda n: self._gap(lay, n)  # noqa: E731
-        lay.addLayout(head); g(18)
-        lay.addWidget(self.pct); g(10); lay.addWidget(self.bar)
-        g(14); lay.addWidget(self.msg)
-        g(8); lay.addWidget(self.forecast)
-        g(16); lay.addWidget(self.notice)
-        g(20); lay.addWidget(_rule()); g(20)
-        lay.addWidget(self.stages)
-        self._cards.append(lay)
-        lay.addStretch(1)
-        lay.addWidget(self.btn_cancel)
-        return w
+        t = tracked_label("VERSÕES"); t.setStyleSheet(f"color: {theme.ACCENT_HI};")
+        self.grid_caption = QLabel(""); self.grid_caption.setObjectName("caption")
+        head.addWidget(t); head.addStretch(1); head.addWidget(self.grid_caption)
+        self.variants = VariantGrid()
+        cap = QLabel("Cada versão aparece aqui assim que fica pronta.")
+        cap.setObjectName("stagecap"); cap.setAlignment(Qt.AlignCenter)
+        lay.addLayout(head); lay.addWidget(self.variants, 1); lay.addWidget(cap)
+        return card
 
-    def _build_result(self) -> QWidget:
-        w = QFrame(); w.setObjectName("card")
-        lay = QVBoxLayout(w); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(0)
+    def _build_result_stage(self) -> QWidget:
+        card, lay = self._stage()
+        head = QHBoxLayout()
+        t = tracked_label("ANTES E DEPOIS"); t.setStyleSheet(f"color: {theme.ACCENT_HI};")
+        self.compare_name = QLabel(""); self.compare_name.setObjectName("caption")
+        head.addWidget(t); head.addStretch(1); head.addWidget(self.compare_name)
+        self.compare = BeforeAfterView()
+        self.thumbs = ThumbStrip(); self.thumbs.selected.connect(self.select_variant)
+        self.compare_cap = QLabel("Arraste sobre a imagem para comparar com a foto original.")
+        self.compare_cap.setObjectName("stagecap"); self.compare_cap.setAlignment(Qt.AlignCenter)
+        lay.addLayout(head); lay.addWidget(self.compare, 1); lay.addWidget(self.compare_cap); lay.addWidget(self.thumbs)
+        return card
+
+    def _build_mask_stage(self) -> QWidget:
+        card, lay = self._stage()
+        head = QHBoxLayout()
+        t = tracked_label("EDITAR ÁREA"); t.setStyleSheet(f"color: {theme.ACCENT_HI};")
+        self.mask_name = QLabel(""); self.mask_name.setObjectName("caption")
+        head.addWidget(t); head.addStretch(1); head.addWidget(self.mask_name)
+        self.mask = MaskEditor(); self.mask.changed.connect(self._update_edit_ready)
+        cap = QLabel("Pinte sobre o que quer trocar. Fora da área pintada, a imagem fica idêntica.")
+        cap.setObjectName("stagecap"); cap.setAlignment(Qt.AlignCenter)
+        lay.addLayout(head); lay.addWidget(self.mask, 1); lay.addWidget(cap)
+        return card
+
+    # --- páginas do painel direito
+    def _page_photo(self) -> Page:
+        pg = Page()
+        self.step_photo = StepHeader("01", "FOTO DO AMBIENTE")
+        pg.head.addWidget(self.step_photo); pg.head.addSpacing(16)
+        intro = QLabel("Envie a foto de um cômodo, vazio ou mobiliado, ou da fachada. O 7xAi cria versões novas do "
+                       "mesmo ambiente: paredes, janelas, portas e perspectiva ficam; móveis, materiais e estilo "
+                       "mudam.")
+        intro.setObjectName("body"); intro.setWordWrap(True)
+        self.btn_import = _button("Importar foto…", "photo")
+        on_click(self.btn_import, self.choose_photo)
+        self.photo_label = QLabel("Nenhuma foto selecionada"); self.photo_label.setObjectName("hint")
+        pg.body.addWidget(intro); pg.body.addSpacing(20)
+        pg.body.addWidget(self.btn_import); pg.body.addSpacing(10); pg.body.addWidget(self.photo_label)
+        pg.body.addSpacing(22); pg.body.addWidget(rule()); pg.body.addSpacing(18)
+        nt = _section("SEM FOTO?")
+        nb = QLabel("Descreva o ambiente e o 7xAi cria do zero."); nb.setObjectName("hint"); nb.setWordWrap(True)
+        self.btn_text_mode = _button("Criar a partir de um texto", "sparkle", "outline", theme.ACCENT_HI)
+        on_click(self.btn_text_mode, self.choose_function, "texto")
+        pg.body.addWidget(nt); pg.body.addSpacing(8); pg.body.addWidget(nb); pg.body.addSpacing(12)
+        pg.body.addWidget(self.btn_text_mode)
+        pg.body.addStretch(1)
+        self.photo_ready = QLabel(""); self.photo_ready.setObjectName("hint"); self.photo_ready.setAlignment(Qt.AlignCenter)
+        self.btn_photo_next = _button("Continuar", kind="primary")
+        on_click(self.btn_photo_next, self.go, self.P_FUNC)
+        pg.foot.addWidget(self.photo_ready); pg.foot.addWidget(self.btn_photo_next)
+        return pg
+
+    def _page_function(self) -> Page:
+        pg = Page()
+        pg.head.addWidget(StepHeader("02", "O QUE VOCÊ QUER FAZER")); pg.head.addSpacing(14)
+        grid = QGridLayout(); grid.setSpacing(10)
+        self.function_group = QButtonGroup(self); self.function_group.setExclusive(True)
+        self.function_cards: dict[str, FunctionCard] = {}
+        for i, key in enumerate(FUNCTION_ORDER):
+            title, desc = FUNCTION_INFO[key]
+            c = FunctionCard(key, title, desc)
+            on_click(c, self.choose_function, key)
+            self.function_group.addButton(c); self.function_cards[key] = c
+            grid.addWidget(c, i // 2, i % 2)
+        pg.body.addLayout(grid)
+        pg.body.addSpacing(12)
+        self.func_hint = QLabel(""); self.func_hint.setObjectName("hint"); self.func_hint.setWordWrap(True)
+        pg.body.addWidget(self.func_hint)
+        pg.body.addStretch(1)
+        self.btn_func_back = _button("Trocar a foto", "back", "ghost")
+        on_click(self.btn_func_back, self.go, self.P_PHOTO)
+        pg.foot.addWidget(self.btn_func_back)
+        return pg
+
+    def _page_style(self) -> Page:
+        pg = Page()
+        self.style_header = StepHeader("03", "AMBIENTE E ESTILO")
+        pg.head.addWidget(self.style_header); pg.head.addSpacing(10)
+        frow = QHBoxLayout(); frow.setSpacing(8)
+        self.func_label = QLabel(""); self.func_label.setObjectName("hint")
+        self.btn_change_func = QPushButton("Trocar"); self.btn_change_func.setObjectName("link")
+        self.btn_change_func.setCursor(Qt.PointingHandCursor)
+        on_click(self.btn_change_func, self.go, self.P_FUNC)
+        frow.addWidget(self.func_label); frow.addWidget(self.btn_change_func); frow.addStretch(1)
+        pg.head.addLayout(frow); pg.head.addSpacing(14)
+        b = pg.body
+        # ambiente
+        self.room_box = QWidget(); rl = QVBoxLayout(self.room_box); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(0)
+        rl.addWidget(_section("TIPO DE AMBIENTE")); rl.addSpacing(10)
+        rg = QGridLayout(); rg.setSpacing(8)
+        self.room_group = QButtonGroup(self); self.room_group.setExclusive(True)
+        self.room_chips = {}
+        for i, key in enumerate(k for k in CATALOG["ambientes"] if k != "fachada"):
+            c = chip(ROOM_SHORT[key], theme.room_icon(key, 24), 24, 62)
+            c.setToolTip(CATALOG["ambientes"][key])
+            on_click(c, self.select_room, key)
+            self.room_group.addButton(c); self.room_chips[key] = c
+            rg.addWidget(c, i // 4, i % 4)
+        rl.addLayout(rg); rl.addSpacing(20)
+        b.addWidget(self.room_box)
+        # evento
+        self.event_box = QWidget(); el = QVBoxLayout(self.event_box); el.setContentsMargins(0, 0, 0, 0); el.setSpacing(0)
+        el.addWidget(_section("EVENTO")); el.addSpacing(10)
+        eg = QGridLayout(); eg.setSpacing(8)
+        self.event_group = QButtonGroup(self); self.event_group.setExclusive(True)
+        self.event_chips = {}
+        for i, (key, label) in enumerate(CATALOG["eventos"].items()):
+            c = chip(label)
+            on_click(c, self.select_event, key)
+            self.event_group.addButton(c); self.event_chips[key] = c
+            eg.addWidget(c, i // 3, i % 3)
+        el.addLayout(eg); el.addSpacing(20)
+        b.addWidget(self.event_box)
+        # formato (texto)
+        self.aspect_box = QWidget(); al = QVBoxLayout(self.aspect_box); al.setContentsMargins(0, 0, 0, 0); al.setSpacing(0)
+        al.addWidget(_section("FORMATO DA IMAGEM")); al.addSpacing(10)
+        self.aspect_seg = Segmented(list(ASPECTS.items()), "paisagem")
+        self.aspect_seg.changed.connect(self.select_aspect)
+        al.addWidget(self.aspect_seg); al.addSpacing(20)
+        b.addWidget(self.aspect_box)
+        # estilo
+        self.style_box = QWidget(); sl = QVBoxLayout(self.style_box); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(0)
+        srow = QHBoxLayout(); srow.addWidget(_section("ESTILO")); srow.addStretch(1)
+        self.style_name = QLabel(""); self.style_name.setObjectName("hint"); srow.addWidget(self.style_name)
+        sl.addLayout(srow); sl.addSpacing(10)
+        sg = QGridLayout(); sg.setSpacing(8)
+        self.style_group = QButtonGroup(self); self.style_group.setExclusive(True)
+        self.style_cards: dict[str, StyleCard] = {}
+        for i, (key, label) in enumerate(CATALOG["estilos"].items()):
+            c = StyleCard(key, label)
+            on_click(c, self.select_style, key)
+            self.style_group.addButton(c); self.style_cards[key] = c
+            sg.addWidget(c, i // 3, i % 3)
+        sl.addLayout(sg); sl.addSpacing(20)
+        b.addWidget(self.style_box)
+        # descrição
+        self.prompt_title = _section("DETALHES (OPCIONAL)")
+        self.prompt = QPlainTextEdit(); self.prompt.setFixedHeight(68)
+        self.prompt.setPlaceholderText("Ex.: sofá verde-musgo, piso de madeira clara, muitas plantas")
+        b.addWidget(self.prompt_title); b.addSpacing(10); b.addWidget(self.prompt)
+        b.addStretch(1)
+        # rodapé: versões + qualidade + gerar
+        vrow = QHBoxLayout(); vrow.setSpacing(12)
+        vl = QLabel("Versões"); vl.setObjectName("muted")
+        self.n_seg = Segmented([(1, "1"), (2, "2"), (3, "3"), (4, "4")], 4)
+        self.n_seg.setFixedWidth(176)
+        self.n_seg.changed.connect(lambda *_a: self._update_style_ready())
+        self.chk_fast = QCheckBox("Prévia rápida")
+        self.chk_fast.setToolTip("Resolução menor e menos passos: bom para testar ideias. Use a qualidade final "
+                                 "para entregar.")
+        vrow.addWidget(vl); vrow.addWidget(self.n_seg); vrow.addStretch(1); vrow.addWidget(self.chk_fast)
+        self.style_ready = QLabel(""); self.style_ready.setObjectName("hint"); self.style_ready.setAlignment(Qt.AlignCenter)
+        self.style_ready.setWordWrap(True)
+        self.btn_generate = _button("Gerar 4 versões", "sparkle", "primary", theme.ON_ACCENT)
+        on_click(self.btn_generate, self.generate)
+        pg.foot.addLayout(vrow); pg.foot.addWidget(self.style_ready); pg.foot.addWidget(self.btn_generate)
+        return pg
+
+    def _page_progress(self) -> Page:
+        pg = Page()
+        head = QHBoxLayout()
+        self.progress_title = tracked_label("GERANDO AS VERSÕES")
+        self.elapsed = QLabel(""); self.elapsed.setObjectName("hint")
+        head.addWidget(self.progress_title); head.addStretch(1); head.addWidget(self.elapsed)
+        pg.head.addLayout(head); pg.head.addSpacing(18)
+        self.pct = QLabel(); self.pct.setObjectName("pct"); self._set_pct(0.0)
+        self.bar = QProgressBar(); self.bar.setRange(0, 1000); self.bar.setTextVisible(False)
+        self.msg = QLabel("Preparando…"); self.msg.setObjectName("body"); self.msg.setWordWrap(True)
+        self.progress_summary = QLabel(""); self.progress_summary.setObjectName("hint"); self.progress_summary.setWordWrap(True)
+        self.notice = QLabel(""); self.notice.setObjectName("notice"); self.notice.setWordWrap(True); self.notice.hide()
+        self.stages = StageList(); self.stages.set_stages(DESIGN_STAGES)
+        b = pg.body
+        b.addWidget(self.pct); b.addSpacing(10); b.addWidget(self.bar); b.addSpacing(14); b.addWidget(self.msg)
+        b.addSpacing(6); b.addWidget(self.progress_summary)
+        b.addSpacing(16); b.addWidget(self.notice)
+        b.addSpacing(20); b.addWidget(rule()); b.addSpacing(20)
+        b.addWidget(self.stages); b.addStretch(1)
+        self.btn_cancel = _button("Cancelar", kind="danger")
+        on_click(self.btn_cancel, self.cancel)
+        pg.foot.addWidget(self.btn_cancel)
+        return pg
+
+    def _page_results(self) -> Page:
+        pg = Page()
         head = QHBoxLayout(); head.setSpacing(10)
         badge = QLabel(); badge.setPixmap(theme.status_pixmap("done", 18)); badge.setFixedSize(18, 18)
-        s = _tracked("VÍDEO PRONTO"); s.setStyleSheet(f"color: {theme.OK};")
+        s = tracked_label("VERSÕES PRONTAS"); s.setStyleSheet(f"color: {theme.OK};")
         head.addWidget(badge); head.addWidget(s); head.addStretch(1)
-        self.result_title = QLabel("Seu vídeo está pronto"); self.result_title.setObjectName("result")
-        self.result_title.setWordWrap(True)
+        pg.head.addLayout(head); pg.head.addSpacing(12)
+        self.result_title = QLabel(""); self.result_title.setObjectName("result"); self.result_title.setWordWrap(True)
         self.result_info = QLabel(""); self.result_info.setObjectName("hint"); self.result_info.setWordWrap(True)
-        self.result_meta = QLabel(""); self.result_meta.setObjectName("hint")
-        seal = QFrame(); seal.setObjectName("sealbox")
-        sl = QHBoxLayout(seal); sl.setContentsMargins(12, 11, 12, 11); sl.setSpacing(10)
-        sico = QLabel(); sico.setPixmap(theme.line_icon("check", 16, theme.ACCENT_HI).pixmap(16, 16))
-        sico.setAlignment(Qt.AlignTop); sico.setFixedWidth(16)
-        stext = QLabel(self.SEAL_A)
-        stext.setObjectName("seal"); stext.setWordWrap(True)
-        self.seal_text = stext
-        # aviso do portão de qualidade do modo B (vídeo gerado a pedido com a sala vazia reprovada)
-        self.result_warning = QLabel(""); self.result_warning.setObjectName("notice")
-        self.result_warning.setWordWrap(True); self.result_warning.hide()
-        sl.addWidget(sico); sl.addWidget(stext, 1)
-        # narrativa de designer (PT12): por que cada peça foi escolhida e onde ficou
-        self.notes_title = _tracked("ESCOLHAS DO DESIGNER")
-        self.result_notes = QLabel(""); self.result_notes.setObjectName("body"); self.result_notes.setWordWrap(True)
-        self.result_notes.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.result_notes.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        st = _tracked("TEMPO POR ETAPA")
-        self.result_times = QLabel(""); self.result_times.setObjectName("muted"); self.result_times.setWordWrap(True)
-        self.result_times.setTextFormat(Qt.RichText)
-        self.result_times.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-        # observações abaixo da tabela (ex.: "primeira execução"), em rótulo próprio para quebrar linha sem corte
-        self.result_times_note = QLabel(""); self.result_times_note.setObjectName("hint")
-        self.result_times_note.setWordWrap(True); self.result_times_note.hide()
-        self.btn_export = QPushButton("  Exportar MP4…"); self.btn_export.setObjectName("primary")
-        self.btn_export.setIcon(theme.line_icon("export", 16, theme.ON_ACCENT)); self.btn_export.setIconSize(QSize(16, 16))
-        self.btn_export.clicked.connect(self.export)
-        self.btn_folder = QPushButton("  Abrir pasta"); self.btn_folder.clicked.connect(self.open_folder)
-        self.btn_folder.setIcon(theme.line_icon("folder", 16, theme.TEXT_2))
-        self.btn_diag = QPushButton("  Copiar diagnóstico")
-        self.btn_diag.setIcon(theme.line_icon("copy", 16, theme.TEXT_2))
-        self.btn_diag.setToolTip("Cria um .zip com o relatório de tempos e os registros desta geração "
-                                 "e copia o arquivo para a área de transferência.")
-        self.btn_diag.clicked.connect(lambda: self.copy_diagnostic())
-        row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self.btn_folder, 1); row.addWidget(self.btn_diag, 1)
-        self.chk_diag_photo = QCheckBox("Incluir a foto no diagnóstico")
-        self.btn_new = QPushButton("  Começar com outra foto"); self.btn_new.setObjectName("ghost")
-        self.btn_new.setIcon(theme.line_icon("plus", 16, theme.TEXT_2))
-        self.btn_new.clicked.connect(self.new_photo)
-        g = lambda n: self._gap(lay, n)  # noqa: E731
-        lay.addLayout(head); g(12)
-        lay.addWidget(self.result_title); g(8)
-        lay.addWidget(self.result_info); lay.addSpacing(4); lay.addWidget(self.result_meta)
-        g(16); lay.addWidget(self.result_warning); lay.addWidget(seal)
-        # escolhas do designer + tempos numa única área rolável: nada é cortado nem sobreposto
-        details = QWidget(); details.setObjectName("details")
-        dl = QVBoxLayout(details); dl.setContentsMargins(0, 0, 6, 0); dl.setSpacing(0)
-        self._dgap_notes = QWidget(); self._dgap_notes.setFixedHeight(10)
-        dl.addWidget(self.notes_title); dl.addWidget(self._dgap_notes); dl.addWidget(self.result_notes)
-        self._dgap_times = QWidget(); self._dgap_times.setFixedHeight(22); dl.addWidget(self._dgap_times)
-        dl.addWidget(st); dl.addSpacing(10); dl.addWidget(self.result_times)
-        dl.addSpacing(6); dl.addWidget(self.result_times_note); dl.addStretch(1)
-        self.notes_scroll = QScrollArea(); self.notes_scroll.setWidgetResizable(True)
-        self.notes_scroll.setFrameShape(QFrame.NoFrame); self.notes_scroll.setWidget(details)
-        self.notes_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.notes_scroll.setMinimumHeight(120)
-        self.notes_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
-        g(22); lay.addWidget(self.notes_scroll, 1); g(16)
-        g(16)
-        lay.addWidget(self.btn_export); g(10); lay.addLayout(row)
-        g(12); lay.addWidget(self.chk_diag_photo)
-        g(14); lay.addWidget(_rule()); g(10)
-        lay.addWidget(self.btn_new)
-        self._cards.append(lay)
-        return w
+        pg.head.addWidget(self.result_title); pg.head.addSpacing(6); pg.head.addWidget(self.result_info)
+        pg.head.addSpacing(18)
+        b = pg.body
+        self.selected_label = _section("VERSÃO 1 DE 4")
+        b.addWidget(self.selected_label); b.addSpacing(12)
+        self.btn_save = _button("Salvar imagem…", "save", "primary", theme.ON_ACCENT)
+        on_click(self.btn_save, self.save_image)
+        b.addWidget(self.btn_save); b.addSpacing(10)
+        grid = QGridLayout(); grid.setSpacing(8)
+        self.btn_edit = _button("Editar área", "brush")
+        self.btn_edit.setToolTip("Pinte uma parte desta versão e troque só ela (ex.: o sofá, o quadro, o piso).")
+        on_click(self.btn_edit, self.start_edit_from_result)
+        self.btn_upscale = _button("Ampliar 4K", "expand")
+        self.btn_upscale.setToolTip("Amplia esta versão para 3840 px no lado maior.")
+        on_click(self.btn_upscale, self.upscale_selected)
+        self.btn_video = _button("Vídeo antes e depois", "video")
+        self.btn_video.setToolTip("Vídeo curto: a foto original se transforma nas versões escolhidas (MP4).")
+        on_click(self.btn_video, self.go, self.P_VIDEO)
+        self.btn_folder = _button("Abrir pasta", "folder")
+        on_click(self.btn_folder, self.open_folder)
+        for i, w in enumerate((self.btn_edit, self.btn_upscale, self.btn_video, self.btn_folder)):
+            grid.addWidget(w, i // 2, i % 2)
+        b.addLayout(grid)
+        # trabalho de ação em andamento / concluído (ampliar, vídeo)
+        b.addSpacing(16)
+        self.taskbox = QFrame(); self.taskbox.setObjectName("taskbox")
+        tl = QVBoxLayout(self.taskbox); tl.setContentsMargins(14, 12, 14, 12); tl.setSpacing(8)
+        trow = QHBoxLayout()
+        self.task_title = QLabel(""); self.task_title.setStyleSheet("font-weight: 600;")
+        self.task_pct = QLabel(""); self.task_pct.setObjectName("hint")
+        trow.addWidget(self.task_title); trow.addStretch(1); trow.addWidget(self.task_pct)
+        self.task_bar = QProgressBar(); self.task_bar.setRange(0, 1000); self.task_bar.setTextVisible(False)
+        self.task_msg = QLabel(""); self.task_msg.setObjectName("hint"); self.task_msg.setWordWrap(True)
+        arow = QHBoxLayout(); arow.setSpacing(8)
+        self.btn_task_open = _button("Abrir", "arrow"); on_click(self.btn_task_open, self.open_task_output)
+        self.btn_task_export = _button("Exportar…", "export"); on_click(self.btn_task_export, self.export_task_output)
+        self.btn_task_cancel = _button("Cancelar", kind="danger"); on_click(self.btn_task_cancel, self.cancel_side)
+        arow.addWidget(self.btn_task_open, 1); arow.addWidget(self.btn_task_export, 1); arow.addWidget(self.btn_task_cancel, 1)
+        tl.addLayout(trow); tl.addWidget(self.task_bar); tl.addWidget(self.task_msg); tl.addLayout(arow)
+        self.taskbox.hide()
+        b.addWidget(self.taskbox)
+        b.addSpacing(18); b.addWidget(rule()); b.addSpacing(14)
+        b.addWidget(_section("NÃO GOSTOU? TENTE DE NOVO")); b.addSpacing(10)
+        row = QHBoxLayout(); row.setSpacing(8)
+        self.btn_again = _button("Novas versões", "refresh")
+        self.btn_again.setToolTip("Mesmas escolhas, outras sementes: versões diferentes.")
+        on_click(self.btn_again, self.generate_again)
+        self.btn_restyle = _button("Outro estilo", "back")
+        on_click(self.btn_restyle, self.go, self.P_STYLE)
+        row.addWidget(self.btn_again, 1); row.addWidget(self.btn_restyle, 1)
+        b.addLayout(row)
+        b.addStretch(1)
+        self.btn_new = _button("Começar com outra foto", "plus", "ghost")
+        on_click(self.btn_new, self.new_photo)
+        pg.foot.addWidget(self.btn_new)
+        return pg
 
-    SEAL_A = ("Fora dos móveis e das sombras, a sua foto foi preservada pixel a pixel "
-              "(verificado em cada quadro).")
-    SEAL_B = ("O vídeo termina idêntico à sua foto, na resolução do vídeo (verificado byte a byte). A sala vazia "
-              "do início foi reconstruída pelo 7xAi só onde havia móveis: é imagem ilustrativa.")
-    NOTES_A = "ESCOLHAS DO DESIGNER"
+    def _page_edit(self) -> Page:
+        pg = Page()
+        pg.head.addWidget(StepHeader("03", "EDITAR ÁREA")); pg.head.addSpacing(12)
+        b = pg.body
+        intro = QLabel("Pinte sobre o que quer trocar e diga o que deve aparecer no lugar.")
+        intro.setObjectName("body"); intro.setWordWrap(True)
+        b.addWidget(intro); b.addSpacing(18)
+        b.addWidget(_section("FERRAMENTA")); b.addSpacing(10)
+        self.tool_seg = Segmented([("pincel", "Pincel"), ("borracha", "Borracha")], "pincel")
+        self.tool_seg.changed.connect(self.set_tool)
+        b.addWidget(self.tool_seg); b.addSpacing(14)
+        srow = QHBoxLayout(); srow.setSpacing(12)
+        sl = QLabel("Tamanho"); sl.setObjectName("muted")
+        self.brush_slider = QSlider(Qt.Horizontal); self.brush_slider.setRange(8, 200); self.brush_slider.setValue(48)
+        self.brush_value = QLabel("48 px"); self.brush_value.setObjectName("hint"); self.brush_value.setFixedWidth(48)
+        self.brush_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.brush_slider.valueChanged.connect(self.set_brush_size)
+        srow.addWidget(sl); srow.addWidget(self.brush_slider, 1); srow.addWidget(self.brush_value)
+        b.addLayout(srow); b.addSpacing(12)
+        urow = QHBoxLayout(); urow.setSpacing(8)
+        self.btn_undo = _button("Desfazer", "undo"); on_click(self.btn_undo, self.mask.undo)
+        self.btn_clear = _button("Limpar", "trash"); on_click(self.btn_clear, self.mask.clear)
+        urow.addWidget(self.btn_undo, 1); urow.addWidget(self.btn_clear, 1)
+        b.addLayout(urow)
+        b.addSpacing(20); b.addWidget(rule()); b.addSpacing(18)
+        b.addWidget(_section("O QUE COLOCAR NA ÁREA")); b.addSpacing(10)
+        self.edit_prompt = QPlainTextEdit(); self.edit_prompt.setFixedHeight(68)
+        self.edit_prompt.setPlaceholderText("Ex.: poltrona de couro caramelo; mesa de centro redonda de madeira")
+        b.addWidget(self.edit_prompt); b.addSpacing(14)
+        b.addWidget(_section("ESTILO")); b.addSpacing(10)
+        self.edit_style = QComboBox(); self.edit_style.setView(QListView())
+        self.edit_style.addItem("Seguir o estilo da imagem", None)
+        for key, label in CATALOG["estilos"].items():
+            self.edit_style.addItem(label, key)
+        b.addWidget(self.edit_style)
+        b.addStretch(1)
+        vrow = QHBoxLayout(); vrow.setSpacing(12)
+        vl = QLabel("Versões"); vl.setObjectName("muted")
+        self.edit_n = Segmented([(1, "1"), (2, "2"), (3, "3"), (4, "4")], 2)
+        self.edit_n.setFixedWidth(176)
+        vrow.addWidget(vl); vrow.addWidget(self.edit_n); vrow.addStretch(1)
+        self.edit_ready = QLabel(""); self.edit_ready.setObjectName("hint"); self.edit_ready.setAlignment(Qt.AlignCenter)
+        self.btn_edit_generate = _button("Gerar na área pintada", "sparkle", "primary", theme.ON_ACCENT)
+        on_click(self.btn_edit_generate, self.generate_edit)
+        self.btn_edit_back = _button("Voltar", "back", "ghost")
+        on_click(self.btn_edit_back, self.leave_edit)
+        pg.foot.addLayout(vrow); pg.foot.addWidget(self.edit_ready); pg.foot.addWidget(self.btn_edit_generate)
+        pg.foot.addWidget(self.btn_edit_back)
+        return pg
+
+    def _page_video(self) -> Page:
+        pg = Page()
+        pg.head.addWidget(StepHeader("05", "VÍDEO ANTES E DEPOIS")); pg.head.addSpacing(12)
+        b = pg.body
+        intro = QLabel("A foto original se revela nas versões escolhidas, com transições suaves e um leve "
+                       "movimento de câmera. MP4 pronto para WhatsApp e Instagram.")
+        intro.setObjectName("body"); intro.setWordWrap(True)
+        b.addWidget(intro); b.addSpacing(18)
+        b.addWidget(_section("FORMATO")); b.addSpacing(10)
+        self.format_group = QButtonGroup(self); self.format_group.setExclusive(True)
+        self.format_chips = {}
+        frow = QHBoxLayout(); frow.setSpacing(8)
+        for key, (title, desc) in VIDEO_FORMATS.items():
+            c = chip(f"{title}\n{desc.split(' · ')[0]}", height=58)
+            c.setAccessibleName(title)
+            c.setToolTip(desc)
+            on_click(c, self.select_video_format, key)
+            self.format_group.addButton(c); self.format_chips[key] = c
+            frow.addWidget(c)
+        b.addLayout(frow); b.addSpacing(8)
+        self.format_desc = QLabel(""); self.format_desc.setObjectName("hint"); self.format_desc.setWordWrap(True)
+        b.addWidget(self.format_desc); b.addSpacing(18)
+        b.addWidget(_section("VERSÕES NO VÍDEO")); b.addSpacing(10)
+        self.video_list = QWidget(); self.video_list_lay = QVBoxLayout(self.video_list)
+        self.video_list_lay.setContentsMargins(0, 0, 0, 0); self.video_list_lay.setSpacing(8)
+        self.video_checks: list[QCheckBox] = []
+        b.addWidget(self.video_list)
+        b.addStretch(1)
+        self.video_ready = QLabel(""); self.video_ready.setObjectName("hint"); self.video_ready.setAlignment(Qt.AlignCenter)
+        self.btn_video_generate = _button("Gerar vídeo", "video", "primary", theme.ON_ACCENT)
+        on_click(self.btn_video_generate, self.generate_video)
+        self.btn_video_back = _button("Voltar aos resultados", "back", "ghost")
+        on_click(self.btn_video_back, self.go, self.P_RESULTS)
+        pg.foot.addWidget(self.video_ready); pg.foot.addWidget(self.btn_video_generate); pg.foot.addWidget(self.btn_video_back)
+        self.video_format = "16x9"
+        self.select_video_format("16x9")
+        return pg
 
     def _set_pct(self, frac: float) -> None:
         self.pct.setText(f'<span style="font-size:60px; font-weight:300;">{frac * 100:.0f}</span>'
                          f'<span style="font-size:34px; font-weight:300; color:{theme.ACCENT};">%</span>')
 
-    # ------------------------------------------------------------------ ações
-    COMPACT_BELOW = 790   # px lógicos: 1366x768 maximizado (barra de tarefas incluída) fica abaixo
+    # ------------------------------------------------------------------------------------------ tela
+    def _fit_to_screen(self) -> None:
+        w, h = 1360, 840
+        scr = self.screen()
+        g = scr.availableGeometry() if scr is not None else None
+        if g is not None and g.width() > 0 and g.height() > 0:
+            w, h = min(w, g.width() - 32), min(h, g.height() - 48)
+        self.set_compact(h < self.COMPACT_BELOW)
+        self.resize(max(w, 640), max(h, 480))
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
         self.set_compact(self.height() < self.COMPACT_BELOW)
 
     def set_compact(self, compact: bool) -> None:
-        """Layout compacto para telas baixas: menos respiro, ladrilhos menores (tudo continua visível)."""
-        if compact == self._compact or not hasattr(self, "stages"):
+        """Telas baixas (1366x768): menos respiro e cartões menores; o corpo de cada página rola."""
+        if compact == self._compact:
             return
         self._compact = compact
-        for sp, normal, small in self._gaps:
-            sp.changeSize(0, small if compact else normal)
-        m = 16 if compact else 24
-        for lay in self._cards:
-            lay.setContentsMargins(m, m, m, m)
-            lay.invalidate()
-        self.outer.setContentsMargins(*((24, 10, 24, 10) if compact else (32, 20, 32, 20)))
-        self.outer.setSpacing(12 if compact else 18)
-        for b in self.room_buttons.values():
-            b.setFixedHeight(70 if compact else 90)
-            b.setIconSize(QSize(30, 30) if compact else QSize(40, 40))
+        self.outer.setContentsMargins(*((24, 10, 24, 10) if compact else (32, 18, 32, 18)))
+        self.outer.setSpacing(10 if compact else 14)
+        for pg in self.pages:
+            pg.set_compact(compact)
+        for c in list(self.function_cards.values()) + list(self.style_cards.values()):
+            c.set_compact(compact)
         self.stages.layout().setSpacing(6 if compact else 10)
 
     def showEvent(self, e):  # noqa: N802
@@ -739,306 +792,719 @@ class MainWindow(QMainWindow):
             self._probed = True
             self.probe.start()
 
-    def load_photo(self, path: str) -> None:
-        if not Path(path).is_file() or not self.drop.show_photo(path):
-            QMessageBox.warning(self, APP_NAME, "Não foi possível abrir essa imagem.")
-            return
+    def closeEvent(self, e):  # noqa: N802
+        for t in (self.design, self.side):
+            if t.busy():
+                t.cancel()
+        super().closeEvent(e)
+
+    # ------------------------------------------------------------------------------------------ navegação
+    def page(self) -> int:
+        return self.right.currentIndex()
+
+    def go(self, page: int) -> None:
+        """Mostra uma página (e o palco correspondente). Páginas que dependem de algo ainda não feito são barradas."""
+        if type(page) is not int or not 0 <= page < self.right.count():
+            raise ValueError(f"Página inválida: {page!r}")
+        if self.design.busy() and page != self.P_PROGRESS:
+            page = self.P_PROGRESS
+        if page in (self.P_RESULTS, self.P_VIDEO) and self.result is None:
+            page = self.P_STYLE if self.funcao else self.P_FUNC
+        if page == self.P_STYLE and not self.funcao:
+            page = self.P_FUNC
+        if page == self.P_STYLE and self.funcao in NEEDS_PHOTO and not self.photo_path:
+            page = self.P_PHOTO
+        if page == self.P_STYLE and self.funcao == "editar_area":
+            page = self.P_EDIT
+        if page == self.P_EDIT and not self.edit_base:
+            page = self.P_FUNC
+        self.right.setCurrentIndex(page)
+        if page == self.P_PROGRESS:
+            self.left.setCurrentIndex(self.L_PROGRESS)
+        elif page in (self.P_RESULTS, self.P_VIDEO):
+            self.left.setCurrentIndex(self.L_RESULT)
+        elif page == self.P_EDIT:
+            self.left.setCurrentIndex(self.L_MASK)
+        elif self.funcao == "texto" and page == self.P_STYLE or (page == self.P_FUNC and not self.photo_path):
+            self.left.setCurrentIndex(self.L_TEXT if self.funcao == "texto" else self.L_DROP)
+        else:
+            self.left.setCurrentIndex(self.L_DROP)
+        if page == self.P_FUNC:
+            self._update_function_page()
+        elif page == self.P_STYLE:
+            self._update_style_page()
+        elif page == self.P_VIDEO:
+            self._update_video_page()
+        elif page == self.P_RESULTS:
+            self._update_result_actions()
+        self._update_photo_page()
+        self._update_stepper()
+
+    def _update_stepper(self) -> None:
+        page = self.page()
+        cur = {self.P_PHOTO: 0, self.P_FUNC: 1, self.P_STYLE: 2, self.P_EDIT: 2, self.P_PROGRESS: 3,
+               self.P_RESULTS: 4, self.P_VIDEO: 4}[page]
+        reach = {0, 1}
+        if self.funcao and (self.funcao not in NEEDS_PHOTO or self.photo_path):
+            reach.add(2)
+        if self.design.busy():
+            reach = {3}
+        if self.result is not None and not self.design.busy():
+            reach.add(4)
+        done = set()
+        if self.photo_path or self.funcao == "texto":
+            done.add(0)
+        if self.funcao:
+            done.add(1)
+        if self.result is not None:
+            done |= {2, 3}
+        self.stepper.set_state(cur, reach, done)
+
+    def _on_step_clicked(self, index: int) -> None:
+        target = {0: self.P_PHOTO, 1: self.P_FUNC, 2: self.P_STYLE, 4: self.P_RESULTS}.get(int(index))
+        if target is not None:
+            self.go(target)
+
+    # ------------------------------------------------------------------------------------------ passo 1: foto
+    def choose_photo(self) -> None:
+        self.drop.mousePressEvent(None)
+
+    def load_photo(self, path: str) -> bool:
+        if not isinstance(path, str) or not Path(path).is_file() or not self.drop.show_photo(path):
+            self.warn("Não foi possível abrir essa imagem.")
+            return False
         self.photo_path = path
-        size = self.drop.view._pm.size() if self.drop.view._pm is not None else None
-        dims = f"   ·   {size.width()} × {size.height()} px" if size else ""
+        self.result = None
+        self.upscaled.clear()
+        if self.funcao == "texto":
+            self.funcao = None
+            self.function_group.setExclusive(False)
+            for c in self.function_cards.values():
+                c.setChecked(False)
+            self.function_group.setExclusive(True)
+        pm = self.drop.view._pm
+        dims = f"   ·   {pm.width()} × {pm.height()} px" if pm is not None else ""
         fm = QFontMetrics(self.photo_label.font())
-        name = fm.elidedText(Path(path).name, Qt.ElideMiddle, 330 - fm.horizontalAdvance(dims))
-        self.photo_label.setText(name + dims)
+        self.photo_label.setText(fm.elidedText(Path(path).name, Qt.ElideMiddle, 350 - fm.horizontalAdvance(dims)) + dims)
         self.photo_label.setToolTip(path)
         self.btn_import.setText("  Trocar foto…")
-        self.left.setCurrentIndex(0)
-        self._update_ready()
+        self.go(self.P_FUNC if self.page() in (self.P_PHOTO, self.P_RESULTS, self.P_VIDEO) else self.page())
+        return True
+
+    def _update_photo_page(self) -> None:
+        self.step_photo.set_done(bool(self.photo_path))
+        self.btn_photo_next.setEnabled(bool(self.photo_path))
+        self.photo_ready.setText("Tudo certo. Agora escolha o que fazer com a foto." if self.photo_path else
+                                 "Importe uma foto, ou crie um ambiente a partir de um texto.")
+
+    def new_photo(self) -> None:
+        self.photo_path = None
+        self.result = None
+        self.funcao = None
+        self.edit_base = None
+        self.upscaled.clear()
+        self.function_group.setExclusive(False)
+        for c in self.function_cards.values():
+            c.setChecked(False)
+        self.function_group.setExclusive(True)
+        self.photo_label.setText("Nenhuma foto selecionada"); self.photo_label.setToolTip("")
+        self.btn_import.setText("  Importar foto…")
+        self.drop.show_empty()
+        self.taskbox.hide()
+        self.go(self.P_PHOTO)
+
+    # ------------------------------------------------------------------------------------------ passo 2: função
+    def _update_function_page(self) -> None:
+        for key, c in self.function_cards.items():
+            ok = key not in NEEDS_PHOTO or bool(self.photo_path)
+            c.setEnabled(ok)
+            c.setChecked(key == self.funcao)
+        self.func_hint.setText("" if self.photo_path else
+                               "Para as funções sobre a foto, importe a foto primeiro. Sem foto, use "
+                               "“Texto para ambiente”.")
+
+    def choose_function(self, key: str) -> None:
+        if not isinstance(key, str) or key not in CATALOG["funcoes"]:
+            raise ValueError(f"Função inválida: {key!r}")
+        if key in NEEDS_PHOTO and not self.photo_path:
+            self.go(self.P_PHOTO)
+            self.statusBar().showMessage("Importe a foto do ambiente primeiro.", 6000)
+            return
+        self.funcao = key
+        self.function_cards[key].setChecked(True)
+        if key == "fachada":
+            self.ambiente = "fachada"
+        elif self.ambiente == "fachada":
+            self.ambiente = "sala"
+        if key == "editar_area":
+            self.start_edit(self.photo_path, back=self.P_FUNC)
+            return
+        self.go(self.P_STYLE)
+
+    # ------------------------------------------------------------------------------------------ passo 3: ajustes
+    def _update_style_page(self) -> None:
+        f = self.funcao
+        self.func_label.setText(f"Função: {CATALOG['funcoes'].get(f, '')}")
+        self.room_box.setVisible(f != "fachada")
+        self.event_box.setVisible(f == "evento")
+        self.style_box.setVisible(f != "evento")
+        self.aspect_box.setVisible(f == "texto")
+        self.style_header.set_title("AMBIENTE E EVENTO" if f == "evento" else
+                                    "ESTILO DA FACHADA" if f == "fachada" else "AMBIENTE E ESTILO")
+        if f == "texto":
+            self.prompt_title.setText("DESCRIÇÃO DO AMBIENTE")
+            self.prompt.setPlaceholderText("Ex.: quarto de casal amplo, cabeceira de palhinha, luz de fim de tarde, "
+                                           "janela grande com vista para árvores")
+        elif f == "evento":
+            self.prompt_title.setText("DETALHES DA DECORAÇÃO (OPCIONAL)")
+            self.prompt.setPlaceholderText("Ex.: balões dourados e brancos, mesa de doces, painel com flores")
+        else:
+            self.prompt_title.setText("DETALHES (OPCIONAL)")
+            self.prompt.setPlaceholderText("Ex.: sofá verde-musgo, piso de madeira clara, muitas plantas")
+        if self.ambiente in self.room_chips:
+            self.room_chips[self.ambiente].setChecked(True)
+        self.event_chips[self.evento].setChecked(True)
+        self.style_cards[self.estilo].setChecked(True)
+        self.aspect_seg.set_value(self.formato)
+        self.text_summary.setText(self._summary())
+        self._update_style_ready()
+
+    def _summary(self) -> str:
+        parts = [CATALOG["ambientes"].get(self.ambiente, "")]
+        if self.funcao == "evento":
+            parts.append(CATALOG["eventos"][self.evento])
+        else:
+            parts.append(CATALOG["estilos"][self.estilo])
+        if self.funcao == "texto":
+            parts.append(ASPECTS[self.formato])
+        return "  ·  ".join(p for p in parts if p)
+
+    def _update_style_ready(self) -> None:
+        n = self.n_seg.value()
+        self.btn_generate.setText(f"  Gerar {n} {'versão' if n == 1 else 'versões'}")
+        busy = self.design.busy()
+        ok = bool(self.funcao) and (self.funcao not in NEEDS_PHOTO or bool(self.photo_path))
+        if self.funcao == "texto" and not self.prompt.toPlainText().strip():
+            hint = "Dica: descreva o ambiente que você imagina."
+        else:
+            hint = f"{self._summary()}  ·  gerado aqui, na sua GPU"
+        self.style_ready.setText(hint)
+        self.style_name.setText(CATALOG["estilos"].get(self.estilo, ""))
+        self.style_name.setToolTip(STYLE_HINTS.get(self.estilo, ""))
+        self.btn_generate.setEnabled(ok and not busy)
 
     def select_room(self, key: str) -> None:
-        self.room = key
-        self.room_buttons[key].setChecked(True)
-        self._update_ready()
+        if not isinstance(key, str) or key not in CATALOG["ambientes"]:
+            raise ValueError(f"Ambiente inválido: {key!r}")
+        self.ambiente = key
+        if key in self.room_chips:
+            self.room_chips[key].setChecked(True)
+        self.text_summary.setText(self._summary())
+        self._update_style_ready()
 
-    def _update_ready(self) -> None:
-        self.btn_generate.setEnabled(bool(self.photo_path and self.room) and not self.runner.busy())
-        self.step_photo.set_done(bool(self.photo_path))
-        self.step_room.set_done(bool(self.room))
-        self.step_quality.set_done(self.quality.currentIndex() >= 0)   # sempre há um padrão válido
-        if not self.photo_path:
-            hint = "Comece importando a foto do ambiente (vazio ou mobiliado)."
-        elif not self.room:
-            hint = "Agora escolha o tipo de ambiente."
-        else:
-            hint = "Tudo pronto. O vídeo é gerado aqui, na sua GPU."
-        self.ready_hint.setText(hint)
+    def select_style(self, key: str) -> None:
+        if not isinstance(key, str) or key not in CATALOG["estilos"]:
+            raise ValueError(f"Estilo inválido: {key!r}")
+        self.estilo = key
+        self.style_cards[key].setChecked(True)
+        self.text_summary.setText(self._summary())
+        self._update_style_ready()
 
-    def generate(self, mode: str = "auto", accept_weak_plate: bool = False) -> None:
-        """Gera o vídeo. ``mode``/``accept_weak_plate`` só vêm da tela de aviso do portão de qualidade (a tela
-        inicial pede apenas a foto e o tipo de ambiente; o modo é detectado pela foto)."""
-        if not (self.photo_path and self.room):
-            return
+    def select_event(self, key: str) -> None:
+        if not isinstance(key, str) or key not in CATALOG["eventos"]:
+            raise ValueError(f"Evento inválido: {key!r}")
+        self.evento = key
+        self.event_chips[key].setChecked(True)
+        self._update_style_ready()
+
+    def select_aspect(self, key) -> None:
+        if key not in ASPECTS:
+            raise ValueError(f"Formato inválido: {key!r}")
+        self.formato = key
+        self.aspect_seg.set_value(key)
+        self.text_summary.setText(self._summary())
+        self._update_style_ready()
+
+    def set_variations(self, n: int) -> None:
+        if type(n) is not int or not 1 <= n <= 4:
+            raise ValueError(f"Número de versões inválido: {n!r}")
+        self.n_seg.set_value(n)
+        self._update_style_ready()
+
+    # ------------------------------------------------------------------------------------------ passo 4: gerar
+    def _new_out_dir(self, tag: str) -> str:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        work = runtime.runtime_paths().jobs_dir / f"{stamp}_{Path(self.photo_path).stem}"
-        out = work / f"{Path(self.photo_path).stem}_{self.room}.mp4"
-        req = JobRequest(self.photo_path, self.room, str(out), quality=self.quality.currentData(),
-                         work_dir=str(work), mode=mode, accept_weak_plate=accept_weak_plate)
+        base = runtime.runtime_paths().jobs_dir
+        d = base / f"design_{stamp}_{tag}"
+        k = 2
+        while d.exists():
+            d = base / f"design_{stamp}_{tag}_{k}"; k += 1
+        return str(d)
+
+    def build_request(self) -> DesignRequest:
+        f = self.funcao
+        estilo = None if f == "evento" else self.estilo
+        tag = f if f != "evento" else f"evento_{self.evento}"
+        return DesignRequest(funcao=f, estilo=estilo, ambiente="fachada" if f == "fachada" else self.ambiente,
+                             n=int(self.n_seg.value()), out_dir=self._new_out_dir(f"{tag}_{estilo or ''}".rstrip("_")),
+                             photo=self.photo_path if f in NEEDS_PHOTO else None,
+                             prompt=self.prompt.toPlainText(), evento=self.evento if f == "evento" else None,
+                             formato=self.formato, quality="rapido" if self.chk_fast.isChecked() else "final")
+
+    def generate(self) -> None:
+        """Gera as versões com as escolhas da tela (sem parâmetros: nada do sinal do botão entra no pedido)."""
+        if self.design.busy() or not self.funcao or self.funcao == "editar_area":
+            return
+        try:
+            req = self.build_request().validate()
+        except ValueError as e:
+            self.warn(str(e))
+            return
+        self._back_page = self.P_STYLE
+        self.submit(req)
+
+    def generate_again(self) -> None:
+        if self.last_request is None or self.design.busy():
+            return
+        r = self.last_request
+        req = DesignRequest(**{**r.__dict__, "seed": None, "out_dir": self._new_out_dir(Path(r.out_dir).name.split("_", 3)[-1])})
+        if r.funcao == "editar_area":
+            self._back_page = self.P_EDIT
+        self.submit(req)
+
+    def submit(self, req: DesignRequest) -> None:
+        req.validate()
         self.last_request = req
-        self.stages.set_stages([(k, label) for k, label, _ in STAGES])
-        self.stages.reset(); self.bar.setValue(0); self._set_pct(0.0); self.msg.setText("Iniciando o motor…")
+        self.variants.reset(req.n)
+        texto = req.funcao == "texto"
+        self.stages.set_stages(TEXT_STAGES if texto else DESIGN_STAGES)
+        self.stages.reset()
+        self.bar.setValue(0); self._set_pct(0.0); self.msg.setText("Iniciando o motor…")
         self.elapsed.setText("")
-        self.forecast.setText(""); self.forecast.hide()
-        self.live.set_image(self.photo_path)
-        self.last_preview = None
+        n = req.n
+        what = CATALOG["eventos"][req.evento] if req.evento else (CATALOG["estilos"].get(req.estilo or "", "")
+                                                                  if req.funcao != "editar_area" else "Área pintada")
+        self.progress_title.setText("GERANDO A VERSÃO" if n == 1 else f"GERANDO {n} VERSÕES")
+        self.progress_summary.setText(f"{CATALOG['funcoes'][req.funcao]}  ·  {what}  ·  "
+                                      f"{CATALOG['ambientes'][req.ambiente]}")
+        self.grid_caption.setText(f"0 de {n} prontas")
         notice = self.first_run_notice()
         self.notice.setText(notice or ""); self.notice.setVisible(bool(notice))
-        self.left.setCurrentIndex(1); self.right.setCurrentIndex(1)
+        self.btn_cancel.setEnabled(True)
         self.started_at = time.monotonic(); self.timer.start(1000)
-        self.runner.submit(req)
-        self._update_ready()
+        self.design.start("design", req.args())
+        self.go(self.P_PROGRESS)
 
     @staticmethod
     def first_run_notice() -> str | None:
-        """Texto do aviso de primeira execução (None nas execuções seguintes)."""
+        """Primeira geração por IA neste PC: os modelos são carregados do disco pela primeira vez."""
         try:
-            return bootstrap.first_run_notice(bootstrap.load_state(runtime.runtime_paths().state_file))
-        except Exception:  # aviso é cosmético: nunca impede a geração
+            jobs = runtime.runtime_paths().jobs_dir
+            if jobs.is_dir() and any(jobs.glob("design_*/design.json")):
+                return None
+            st = bootstrap.load_state(runtime.runtime_paths().state_file)
+        except Exception:  # noqa: BLE001 — aviso cosmético
             return None
+        if not st.get("done"):
+            return None
+        return ("Primeira geração neste computador: os modelos de IA ainda vão ser carregados pela primeira vez "
+                "e isso pode levar alguns minutos. As próximas são bem mais rápidas.")
 
     def cancel(self) -> None:
-        self.btn_cancel.setEnabled(False)
-        self.msg.setText("Cancelando…")
-        self.runner.cancel()
+        if self.design.busy():
+            self.btn_cancel.setEnabled(False)
+            self.msg.setText("Cancelando…")
+            self.design.cancel()
 
-    def export(self) -> None:
-        if not self.last_output:
-            return
-        dest, _ = QFileDialog.getSaveFileName(self, "Exportar vídeo", Path(self.last_output).name, "Vídeo MP4 (*.mp4)")
-        if dest:
-            shutil.copyfile(self.last_output, dest)
-            self.statusBar().showMessage(f"Vídeo exportado: {dest}", 8000)
-            self.statusBar().setToolTip(dest)
-
-    def open_folder(self) -> None:
-        if self.last_output:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.last_output).parent)))
-
-    def copy_diagnostic(self, include_photo: bool | None = None, job: QueuedJob | None = None) -> Path | None:
-        """Gera o zip de diagnóstico do último trabalho (sem a foto, salvo se marcado) e copia o
-        arquivo para a área de transferência (colar no e-mail/WhatsApp anexa o zip)."""
-        job = job or self.last_job
-        work = job.work_dir if job else None
-        if not work or not Path(work).is_dir():
-            self.statusBar().showMessage("Nenhum trabalho para diagnosticar.", 6000)
-            return None
-        if include_photo is None:
-            include_photo = self.chk_diag_photo.isChecked()
-        dest = runtime.runtime_paths().home / "diagnosticos" / f"diagnostico_{Path(work).name}.zip"
-        try:
-            path = diagnostics.make_diagnostic_zip(work, dest, include_photo=include_photo,
-                                                   app_version=__version__)
-        except OSError as e:
-            self.statusBar().showMessage(f"Não foi possível criar o diagnóstico: {e}", 10000)
-            return None
-        mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(str(path))])
-        mime.setText(str(path))
-        QApplication.clipboard().setMimeData(mime)
-        self.last_diagnostic = path
-        self.statusBar().showMessage(f"Diagnóstico copiado ({'com' if include_photo else 'sem'} a foto): "
-                                     f"{path.name}. Cole no e-mail ou no WhatsApp.", 15000)
-        self.statusBar().setToolTip(str(path))
-        return path
-
-    def new_photo(self) -> None:
-        self.video.stop()
-        self.photo_path = None
-        self.photo_label.setText("Nenhuma foto selecionada")
-        self.photo_label.setToolTip("")
-        self.btn_import.setText("  Importar foto…")
-        self.drop.show_empty()
-        self.left.setCurrentIndex(0); self.right.setCurrentIndex(0)
-        self._update_ready()
-
-    # ------------------------------------------------------------------ eventos do worker
     def _tick(self) -> None:
         s = int(time.monotonic() - self.started_at)
-        self.elapsed.setText(f"Tempo decorrido: {s // 60:d} min {s % 60:02d} s")
+        self.elapsed.setText(f"{s // 60:d} min {s % 60:02d} s")
 
     def _on_progress(self, stage: str, frac: float, message: str) -> None:
         self.bar.setValue(int(frac * 1000)); self._set_pct(frac)
-        self.msg.setText(message); self.stages.set_current(stage)
+        if message:
+            self.msg.setText(message)
+        self.stages.set_current(stage)
 
-    def _on_mode(self, mode: str, stages: list) -> None:
-        if stages:
-            self.stages.set_stages(stages)
-        if mode == "B":
-            self.statusBar().showMessage("Foto mobiliada: o vídeo começa com a sala vazia e os móveis da própria "
-                                         "foto voltam um a um.", 10000)
-
-    def _on_forecast(self, total_s: float, message: str) -> None:
-        self.forecast.setText(message or f"Previsão: ≈ {int(round(total_s))} s no total")
-        self.forecast.show()
-
-    def _on_preview(self, path: str) -> None:
+    def _on_preview(self, path: str, index: int) -> None:
         if path and Path(path).exists():
-            self.live.set_image(path)
-            self.last_preview = path
+            self.variants.set_image(index, path)
+            n = len(self.variants.slots)
+            self.grid_caption.setText(f"{self.variants.filled()} de {n} prontas")
 
-    def _on_finished(self, job: QueuedJob) -> None:
+    def _on_design_finished(self, res: CliResult) -> None:
         self.timer.stop()
         self.btn_cancel.setEnabled(True)
-        self.last_job = job
-        self._update_ready()
-        if job.status == "pronto" and job.output and Path(job.output).exists():
-            self.last_output = job.output
-            size = human_size(Path(job.output).stat().st_size)
-            secs = int(time.monotonic() - self.started_at) if self.started_at else 0
-            took = f"{secs // 60:d} min {secs % 60:02d} s" if secs >= 60 else (f"{secs} s" if secs >= 1 else "")
-            self.result_info.setText(Path(job.output).name)
-            self.result_info.setToolTip(job.output)
-            meta = ["MP4"] + ([size] if size else []) + ([f"gerado em {took}"] if took else [])
-            self.result_meta.setText("  ·  ".join(meta))
-            self.video_name.setText(Path(job.output).name)
-            times = self._times_text(job)
-            self.result_times.setText(self._times_html(times))
-            note = "\n".join(l for l in times.splitlines() if ": " not in l)
-            self.result_times_note.setText(note); self.result_times_note.setVisible(bool(note))
-            # altura mínima da tabela (linhas + folga do "Total"): a narrativa rola, os tempos não são cortados
-            notes = self._designer_notes(job)
-            rep = self._report(job)
-            mode_b = (job.mode or rep.get("modo", {}).get("modo")) == "B"
-            self.seal_text.setText(self.SEAL_B if mode_b else self.SEAL_A)
-            self.notes_title.setText(rep.get("titulo_narrativa") or self.NOTES_A)
-            self.result_warning.setText(job.warning or rep.get("aviso") or "")
-            self.result_warning.setVisible(bool(job.warning or rep.get("aviso")))
-            self.result_notes.setText("\n".join(f"•  {n}" for n in notes))
-            for wdg in (self.notes_title, self._dgap_notes, self.result_notes, self._dgap_times):
-                wdg.setVisible(bool(notes))
-            self.left.setCurrentIndex(2); self.right.setCurrentIndex(2)
-            poster = self.last_preview if self.last_preview and Path(self.last_preview).exists() else self.photo_path
-            self.video.play(job.output, poster)
+        req = self.last_request
+        outs = [o for o in res.outputs if Path(o).is_file()]
+        if res.status == "pronto" and outs and req is not None:
+            before = res.done.get("before")
+            before = before if before and Path(before).is_file() else None
+            if before is None and req.funcao in NEEDS_PHOTO:
+                before = req.photo if req.funcao != "editar_area" else self.edit_base
+            size = res.done.get("size")
+            self.result = DesignOutcome(req, outs, before, res.done.get("report"),
+                                        tuple(size) if isinstance(size, (list, tuple)) and len(size) == 2 else None,
+                                        (res.finished_at or time.time()) - res.started_at)
+            self.upscaled = {}
+            self.taskbox.hide()
+            self._show_result()
             return
-        self.left.setCurrentIndex(0); self.right.setCurrentIndex(0)
-        if job.status == "reprovado":
-            self._on_gate_rejected(job)
-            return
-        if job.status == "cancelado":
+        self.go(self._back_page)
+        if res.status == "cancelado":
             self.statusBar().showMessage("Geração cancelada.", 6000)
             return
-        self.show_error(job.error or "Erro desconhecido.", job.detail)
+        if res.status == "pronto":
+            self.show_error("O motor terminou sem entregar nenhuma imagem.", "\n".join(res.log[-40:]))
+            return
+        self.show_error(res.error or "Erro desconhecido.", res.detail)
 
-    # ------------------------------------------------------------------ portão de qualidade (modo B)
-    GATE_CHOICES = {"forcar": "Gerar mesmo assim", "modo_a": "Usar o modo sala vazia → mobiliada",
-                    "outra": "Escolher outra foto"}
-
-    def _on_gate_rejected(self, job: QueuedJob) -> None:
-        """Sala vazia reprovada: nenhum MP4 foi entregue. Mostra o aviso e as alternativas."""
-        choice = self.ask_gate_choice(job)
-        if choice == "forcar":
-            self.generate(mode="B", accept_weak_plate=True)
-        elif choice == "modo_a":
-            self.generate(mode="A")
-        elif choice == "outra":
-            self.new_photo()
+    # ------------------------------------------------------------------------------------------ passo 5: resultados
+    def _show_result(self) -> None:
+        r = self.result
+        req = r.request
+        if req.funcao == "editar_area":
+            title = "Área editada"
+        elif req.funcao == "evento":
+            title = CATALOG["eventos"][req.evento]
         else:
-            self.statusBar().showMessage("Nenhum vídeo gerado: a sala vazia não passou na verificação.", 10000)
+            title = CATALOG["estilos"].get(req.estilo or "", "")
+        room = CATALOG["ambientes"][req.ambiente]
+        self.result_title.setText(f"{title} · {room}" if req.funcao != "fachada" else f"{title} · Fachada")
+        took = int(round(r.seconds))
+        took_s = f"{took // 60} min {took % 60:02d} s" if took >= 60 else f"{took} s"
+        dims = f"{r.size[0]} × {r.size[1]} px" if r.size else ""
+        k = len(r.outputs)
+        info = [CATALOG["funcoes"][req.funcao], f"{k} {'versão' if k == 1 else 'versões'}"] + ([dims] if dims else [])
+        if took >= 1:
+            info.append(f"em {took_s}")
+        self.result_info.setText("  ·  ".join(info))
+        self.thumbs.set_items(r.outputs)
+        self.compare.after_label = "DEPOIS"
+        self.compare_cap.setText("Arraste sobre a imagem para comparar com a foto original." if r.before else
+                                 "Criado a partir do texto: não há foto “antes” para comparar.")
+        self.select_variant(0)
+        self.compare.set_split(0.5)
+        self.go(self.P_RESULTS)
 
-    def ask_gate_choice(self, job: QueuedJob) -> str | None:
+    def select_variant(self, index: int) -> None:
+        if self.result is None or type(index) is not int or not 0 <= index < len(self.result.outputs):
+            return
+        self.selected = index
+        path = self.result.outputs[index]
+        self.thumbs.select(index)
+        self.compare.set_images(self.result.before, path)
+        k = len(self.result.outputs)
+        self.selected_label.setText(f"VERSÃO {index + 1} DE {k}")
+        self.compare_name.setText(Path(path).name)
+        self._update_result_actions()
+
+    def selected_output(self) -> str | None:
+        if self.result is None:
+            return None
+        return self.result.outputs[self.selected]
+
+    def _update_result_actions(self) -> None:
+        busy = self.side.busy()
+        has = self.result is not None
+        self.btn_upscale.setEnabled(has and not busy)
+        self.btn_video.setEnabled(has and not busy and bool(self.result and self.result.before))
+        self.btn_video.setToolTip("Vídeo curto: a foto original se transforma nas versões escolhidas (MP4)."
+                                  if not has or self.result.before else
+                                  "Sem foto original (criado do texto): não há “antes” para o vídeo.")
+        self.btn_edit.setEnabled(has)
+        self.btn_again.setEnabled(has and not self.design.busy())
+        up = self.upscaled.get(self.selected_output() or "")
+        self.btn_upscale.setText("  4K pronto" if up else "  Ampliar 4K")
+        self.btn_save.setText("  Salvar imagem 4K…" if up else "  Salvar imagem…")
+        if has:
+            for i, o in enumerate(self.result.outputs):
+                self.thumbs.set_badge(i, "4K" if o in self.upscaled else "")
+
+    def ask_save_path(self, suggested: str, filter_: str) -> str:
+        dest, _ = QFileDialog.getSaveFileName(self, "Salvar", suggested, filter_)
+        return dest
+
+    def save_image(self) -> str | None:
+        src = self.selected_output()
+        if not src:
+            return None
+        src = self.upscaled.get(src, src)
+        dest = self.ask_save_path(str(Path.home() / Path(src).name), "Imagem JPEG (*.jpg *.jpeg);;Imagem PNG (*.png)")
+        if not dest:
+            return None
+        try:
+            if Path(dest).suffix.lower() == ".png":
+                from PySide6.QtGui import QImage
+                if not QImage(src).save(dest, "PNG"):
+                    raise OSError("falha ao gravar o PNG")
+            else:
+                shutil.copyfile(src, dest)
+        except OSError as e:
+            self.warn(f"Não foi possível salvar a imagem: {e}")
+            return None
+        self.statusBar().showMessage(f"Imagem salva: {dest}", 8000)
+        return dest
+
+    def open_url(self, path: str) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def open_folder(self) -> None:
+        if self.result is not None:
+            self.open_url(self.result.folder)
+
+    # --- editar área
+    def start_edit_from_result(self) -> None:
+        src = self.selected_output()
+        if src:
+            self.start_edit(src, back=self.P_RESULTS)
+
+    def start_edit(self, base: str | None, back: int | None = None) -> None:
+        if not base or not Path(base).is_file() or not self.mask.set_image(base):
+            self.warn("Não foi possível abrir a imagem para editar.")
+            return
+        self.edit_base = base
+        self._edit_back = back if back is not None else self.P_FUNC
+        self.mask_name.setText(Path(base).name)
+        self.tool_seg.set_value("pincel"); self.set_tool("pincel")
+        self.edit_prompt.setPlainText("")
+        self.go(self.P_EDIT)
+        self._update_edit_ready()
+
+    def leave_edit(self) -> None:
+        back = getattr(self, "_edit_back", self.P_FUNC)
+        if back == self.P_FUNC and self.funcao == "editar_area":
+            self.funcao = None
+        self.edit_base = None
+        self.go(back)
+
+    def set_tool(self, tool) -> None:
+        if tool not in ("pincel", "borracha"):
+            raise ValueError(f"Ferramenta inválida: {tool!r}")
+        self.mask.set_erasing(tool == "borracha")
+        self.mask.update()
+
+    def set_brush_size(self, px: int) -> None:
+        self.mask.set_brush(int(px))
+        self.brush_value.setText(f"{int(px)} px")
+
+    def _update_edit_ready(self) -> None:
+        has = self.mask.has_mask()
+        self.btn_edit_generate.setEnabled(has and not self.design.busy())
+        self.btn_undo.setEnabled(self.mask.can_undo())
+        self.btn_clear.setEnabled(has)
+        self.edit_ready.setText("Pronto: a área pintada será refeita." if has else
+                                "Pinte a área que quer trocar na imagem ao lado.")
+
+    def generate_edit(self) -> None:
+        if self.design.busy() or not self.edit_base or not self.mask.has_mask():
+            return
+        out_dir = self._new_out_dir("editar_area")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        mask_path = str(Path(out_dir) / "mascara.png")
+        if not self.mask.save_mask(mask_path):
+            self.warn("Não foi possível gravar a máscara.")
+            return
+        req = DesignRequest(funcao="editar_area", estilo=self.edit_style.currentData(), ambiente=self.ambiente
+                            if self.ambiente in CATALOG["ambientes"] else "sala",
+                            n=int(self.edit_n.value()), out_dir=out_dir, photo=self.edit_base,
+                            prompt=self.edit_prompt.toPlainText(), mask=mask_path,
+                            quality="rapido" if self.chk_fast.isChecked() else "final")
+        try:
+            req.validate()
+        except ValueError as e:
+            self.warn(str(e))
+            return
+        self._back_page = self.P_EDIT
+        self.submit(req)
+
+    # --- ampliar 4K / vídeo (trabalhos de ação)
+    def upscale_selected(self) -> None:
+        src = self.selected_output()
+        if not src or self.side.busy():
+            return
+        if src in self.upscaled and Path(self.upscaled[src]).is_file():
+            self._show_task_done("Imagem 4K pronta", self.upscaled[src], "Já ampliada: use “Salvar imagem 4K…”.")
+            return
+        out = str(Path(src).with_name(Path(src).stem + "_4k.jpg"))
+        self._start_side("upscale", upscale_args(src, out), "Ampliando para 4K", tag=src)
+
+    def _update_video_page(self) -> None:
+        for c in self.video_checks:
+            c.setParent(None); c.deleteLater()
+        self.video_checks = []
+        if self.result is None:
+            return
+        for i, o in enumerate(self.result.outputs):
+            c = QCheckBox(f"Versão {i + 1}  ·  {Path(o).name}")
+            c.setChecked(True)
+            c.setIcon(theme_icon_from(o)); c.setIconSize(QSize(54, 36))
+            c.toggled.connect(lambda *_a: self._update_video_ready())
+            self.video_checks.append(c); self.video_list_lay.addWidget(c)
+        self.format_chips[self.video_format].setChecked(True)
+        self._update_video_ready()
+
+    def select_video_format(self, key: str) -> None:
+        if key not in VIDEO_FORMATS:
+            raise ValueError(f"Formato de vídeo inválido: {key!r}")
+        self.video_format = key
+        self.format_chips[key].setChecked(True)
+        self.format_desc.setText("Ideal para " + VIDEO_FORMATS[key][1].split(" · ", 1)[1] + ".")
+
+    def video_selection(self) -> list[str]:
+        if self.result is None:
+            return []
+        return [o for o, c in zip(self.result.outputs, self.video_checks) if c.isChecked()]
+
+    def _update_video_ready(self) -> None:
+        sel = self.video_selection()
+        ok = bool(sel) and self.result is not None and bool(self.result.before) and not self.side.busy()
+        self.btn_video_generate.setEnabled(ok)
+        k = len(sel)
+        secs = min(20, max(10, 4 + 3 * k))
+        self.video_ready.setText(f"{k} {'versão' if k == 1 else 'versões'}  ·  cerca de {secs} s de vídeo" if k else
+                                 "Escolha ao menos uma versão.")
+
+    def generate_video(self) -> None:
+        if self.result is None or self.side.busy() or not self.result.before:
+            return
+        sel = self.video_selection()
+        if not sel:
+            return
+        out = str(Path(self.result.folder) / f"antes_depois_{self.video_format}.mp4")
+        try:
+            args = showcase_args(self.result.before, sel, out, self.video_format)
+        except ValueError as e:
+            self.warn(str(e))
+            return
+        self._start_side("showcase", args, "Gerando o vídeo antes e depois")
+        self.go(self.P_RESULTS)
+
+    def _start_side(self, kind: str, args: list[str], title: str, tag: object = None) -> None:
+        self.side.start(kind, args, tag=tag)
+        self.task_title.setText(title); self.task_pct.setText("0%"); self.task_bar.setValue(0); self.task_bar.show()
+        self.task_msg.setText("Iniciando o motor…")
+        self.btn_task_open.hide(); self.btn_task_export.hide(); self.btn_task_cancel.show(); self.btn_task_cancel.setEnabled(True)
+        self.taskbox.show()
+        self._update_result_actions()
+
+    def cancel_side(self) -> None:
+        if self.side.busy():
+            self.btn_task_cancel.setEnabled(False)
+            self.task_msg.setText("Cancelando…")
+            self.side.cancel()
+
+    def _on_side_progress(self, stage: str, frac: float, message: str) -> None:
+        self.task_bar.setValue(int(frac * 1000)); self.task_pct.setText(f"{frac * 100:.0f}%")
+        if message:
+            self.task_msg.setText(message)
+
+    def _show_task_done(self, title: str, path: str, msg: str) -> None:
+        self.task_title.setText(title); self.task_pct.setText("")
+        self.task_bar.hide(); self.task_msg.setText(msg)
+        self.btn_task_cancel.hide()
+        self.btn_task_open.show(); self.btn_task_export.show()
+        self._task_output = path
+        self.taskbox.show()
+
+    def _on_side_finished(self, res: CliResult) -> None:
+        self.last_task = res
+        out = res.output
+        if res.status == "pronto" and out and Path(out).is_file():
+            if res.kind == "upscale":
+                if isinstance(res.tag, str):
+                    self.upscaled[res.tag] = out
+                size = res.done.get("size")
+                dims = f"{size[0]} × {size[1]} px" if isinstance(size, (list, tuple)) and len(size) == 2 else ""
+                self._show_task_done("Imagem 4K pronta", out, "  ·  ".join(x for x in (Path(out).name, dims) if x))
+                self.btn_task_open.setText("  Abrir imagem")
+            else:
+                self.videos.append(out)
+                sz = human_size(Path(out).stat().st_size)
+                dur = res.done.get("duration_s")
+                dur = f"{float(dur):.0f} s" if isinstance(dur, (int, float)) and dur > 0 else ""
+                self._show_task_done("Vídeo pronto", out, "  ·  ".join(x for x in (Path(out).name, dur, sz) if x))
+                self.btn_task_open.setText("  Assistir")
+            self.statusBar().showMessage(f"Pronto: {Path(out).name}", 10000)
+            self.statusBar().setToolTip(out)
+        else:
+            self.taskbox.hide()
+            if res.status == "cancelado":
+                self.statusBar().showMessage("Cancelado.", 6000)
+            else:
+                what = "ampliar a imagem" if res.kind == "upscale" else "gerar o vídeo"
+                self.show_error(res.error or "O motor terminou sem entregar o arquivo.", res.detail,
+                                title=f"Não foi possível {what}.")
+        self._update_result_actions()
+        if self.page() == self.P_VIDEO:
+            self._update_video_ready()
+
+    def open_task_output(self) -> None:
+        p = getattr(self, "_task_output", None)
+        if p:
+            self.open_url(p)
+
+    def export_task_output(self) -> str | None:
+        p = getattr(self, "_task_output", None)
+        if not p:
+            return None
+        flt = "Vídeo MP4 (*.mp4)" if p.lower().endswith(".mp4") else "Imagem JPEG (*.jpg *.jpeg)"
+        dest = self.ask_save_path(str(Path.home() / Path(p).name), flt)
+        if not dest:
+            return None
+        try:
+            shutil.copyfile(p, dest)
+        except OSError as e:
+            self.warn(f"Não foi possível exportar: {e}")
+            return None
+        self.statusBar().showMessage(f"Exportado: {dest}", 8000)
+        return dest
+
+    # ------------------------------------------------------------------------------------------ legado
+    def open_legacy(self) -> None:
+        """Abre o vídeo de montagem antigo (modos A/B) numa janela própria, com a foto atual já carregada."""
+        from .legacy import LegacyWindow
+
+        if self.legacy_window is None:
+            self.legacy_window = LegacyWindow()
+        w = self.legacy_window
+        if self.photo_path and w.photo_path != self.photo_path:
+            w.load_photo(self.photo_path)
+        w.show(); w.raise_(); w.activateWindow()
+        return w
+
+    # ------------------------------------------------------------------------------------------ avisos
+    def warn(self, message: str) -> None:
+        QMessageBox.warning(self, APP_NAME, message)
+
+    def show_error(self, message: str, detail: str = "", title: str = "Não foi possível gerar as versões.") -> None:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle(APP_NAME)
-        box.setText("A sala vazia não ficou boa o suficiente.")
-        box.setInformativeText(job.warning or "A verificação automática reprovou a sala vazia do início do vídeo.")
-        buttons = {box.addButton(label, QMessageBox.ActionRole): key for key, label in self.GATE_CHOICES.items()}
-        box.addButton("Fechar", QMessageBox.RejectRole)
-        box.exec()
-        return buttons.get(box.clickedButton())
-
-    @staticmethod
-    def _report(job: QueuedJob) -> dict:
-        try:
-            return json.loads(Path(job.report).read_text(encoding="utf-8")) if job.report else {}
-        except (OSError, ValueError):
-            return {}
-
-    @staticmethod
-    def _times_text(job: QueuedJob) -> str:
-        if not job.report:
-            return ""
-        try:
-            rep = json.loads(Path(job.report).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return ""
-        return diagnostics.summary_text(rep)
-
-    @staticmethod
-    def _designer_notes(job: QueuedJob) -> list[str]:
-        """Narrativa de designer do trabalho: report.json (``narrativa``) ou, sem ela, layout.json."""
-        srcs = []
-        if job.report:
-            srcs.append((Path(job.report), lambda d: d.get("narrativa") or (d.get("layout") or {}).get("notes")))
-        if job.work_dir:
-            srcs.append((Path(job.work_dir) / "layout.json", lambda d: d.get("notes")))
-        for path, pick in srcs:
-            try:
-                notes = pick(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, ValueError, AttributeError):
-                continue
-            if notes:
-                return [str(n) for n in notes]
-        return []
-
-    @staticmethod
-    def _times_html(text: str) -> str:
-        """Tabela "etapa ....... tempo" a partir de ``diagnostics.summary_text``."""
-        if not text:
-            return ""
-        rows = []
-        for line in text.splitlines():
-            label, sep, value = line.rpartition(": ")
-            if not sep:
-                continue
-            total = label == "Total"
-            color = theme.TEXT if total else theme.MUTED
-            vcolor = theme.TEXT if total else theme.TEXT_2
-            weight = "600" if total else "400"
-            pad = "10px 0 0 0" if total else "3px 0"
-            rows.append(f'<tr><td style="color:{color}; font-weight:{weight}; padding:{pad};">{html.escape(label)}</td>'
-                        f'<td align="right" style="color:{vcolor}; font-weight:{weight}; padding:{pad};">'
-                        f'{html.escape(value)}</td></tr>')
-        out = f'<table width="100%" cellspacing="0" cellpadding="0">{"".join(rows)}</table>'
-        return out   # as linhas sem "etapa: tempo" vão para ``result_times_note``
-
-    def show_error(self, message: str, detail: str = "") -> None:
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle(APP_NAME)
-        box.setText("Não foi possível gerar o vídeo.")
+        box.setText(title)
         box.setInformativeText(message)
         if detail:
             box.setDetailedText(detail)
-        diag = None
-        if self.last_job is not None and self.last_job.work_dir and Path(self.last_job.work_dir).is_dir():
-            diag = box.addButton("Copiar diagnóstico", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Ok)
         box.exec()
-        if diag is not None and box.clickedButton() is diag:
-            self.copy_diagnostic()
 
     def _on_hardware(self, info) -> None:
         if not info:
             self.sb.set_dot(theme.DANGER)
             self.statusBar().showMessage("GPU: não detectada (o motor ainda não está instalado ou não respondeu).")
             return
-        prof = info.get("profile", {})
         gpus = info.get("gpus") or []
         gpu = max(gpus, key=lambda g: g.get("vram_total_mb", 0)) if gpus else None
-        g = f"{gpu['name']} · {gpu['vram_total_mb'] / 1024:.0f} GB" if gpu else "sem GPU NVIDIA (modo CPU)"
-        self.statusBar().showMessage(f"GPU: {g}     ·     Perfil: {prof.get('name', '?')} — "
-                                     f"{prof.get('description', '')}")
+        g = f"{gpu['name']} · {gpu['vram_total_mb'] / 1024:.0f} GB" if gpu else "sem GPU NVIDIA (modo CPU, bem mais lento)"
+        self.statusBar().showMessage(f"GPU: {g}")
         self.sb.set_dot(theme.OK if gpu else theme.ACCENT)
         if gpu is None:
-            self.quality.setCurrentIndex(1)
+            self.chk_fast.setChecked(True)
+
+
+def theme_icon_from(path: str):
+    from PySide6.QtGui import QIcon, QPixmap
+    return QIcon(cover_pixmap(QPixmap(path), 54, 36, 5, 2.0))
 
 
 def main(argv: list[str] | None = None) -> int:

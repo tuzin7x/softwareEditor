@@ -133,6 +133,34 @@ QToolButton#room {{ background: {TILE}; border: 1px solid {HAIRLINE}; border-rad
 QToolButton#room:hover {{ background: #202025; border-color: {HAIRLINE_STRONG}; color: {TEXT}; }}
 QToolButton#room:checked {{ background: {SELECTED_BG}; border: 1px solid {ACCENT}; color: {TEXT}; font-weight: 600; }}
 
+/* redesenho: chips (ambiente, evento, formato) e seletor segmentado (versões) */
+QToolButton#chip {{ background: {TILE}; border: 1px solid {HAIRLINE}; border-radius: 10px; padding: 6px 4px;
+                    color: {TEXT_2}; font-size: 12px; }}
+QToolButton#chip:hover {{ background: #202025; border-color: {HAIRLINE_STRONG}; color: {TEXT}; }}
+QToolButton#chip:checked {{ background: {SELECTED_BG}; border: 1px solid {ACCENT}; color: {TEXT}; font-weight: 600; }}
+QToolButton#chip:disabled {{ color: {DISABLED}; border-color: {HAIRLINE}; background: {SURFACE}; }}
+QToolButton#seg {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE_STRONG}; padding: 0; min-height: 34px;
+                   color: {TEXT_2}; font-weight: 500; border-radius: 0; }}
+QToolButton#seg[pos="first"] {{ border-top-left-radius: 10px; border-bottom-left-radius: 10px; }}
+QToolButton#seg[pos="last"] {{ border-top-right-radius: 10px; border-bottom-right-radius: 10px; }}
+QToolButton#seg:hover {{ background: {SURFACE_3}; color: {TEXT}; }}
+QToolButton#seg:checked {{ background: {SELECTED_BG}; border-color: {ACCENT}; color: {ACCENT_HI}; font-weight: 600; }}
+QPushButton#link {{ background: transparent; border: none; color: {ACCENT_HI}; padding: 0; min-height: 22px;
+                    text-align: left; font-weight: 500; }}
+QPushButton#link:hover {{ color: {TEXT}; text-decoration: underline; }}
+QLineEdit, QPlainTextEdit {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE_STRONG}; border-radius: 10px;
+                             padding: 8px 10px; color: {TEXT}; selection-background-color: {ACCENT};
+                             selection-color: {ON_ACCENT}; }}
+QLineEdit {{ min-height: 22px; }}
+QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
+QSlider::groove:horizontal {{ height: 4px; background: {TRACK}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {ACCENT_HI}; border: 2px solid {SURFACE}; width: 14px; height: 14px;
+                              margin: -7px 0; border-radius: 9px; }}
+QFrame#taskbox {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE}; border-radius: 12px; }}
+QFrame#stepper {{ background: transparent; }}
+QLabel#stepdot {{ color: {MUTED}; font-size: 12px; }}
+
 /* qualidade */
 QComboBox {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE_STRONG}; border-radius: 10px;
              padding: 0 12px; min-height: 38px; }}
@@ -290,6 +318,19 @@ def _draw_room(p: QPainter, kind: str, color: str) -> None:
         rect(14, 12, 16, 10, 1); line(22, 22, 22, 27)
         line(35, 27, 35, 18); line(35, 18, 39, 14)
         path = QPainterPath(QPointF(37, 12)); path.lineTo(42, 17); p.drawPath(path)
+    elif kind == "varanda":       # guarda-corpo, espreguiçadeira e vaso com folhas
+        line(4, 20, 44, 20)
+        for x in (8, 14, 20, 26, 32, 38):
+            line(x, 20, x, 38)
+        rect(9, 28, 18, 5, 1.5); line(9, 28, 6, 22); line(11, 33, 11, 38); line(25, 33, 25, 38)
+        rect(33, 31, 7, 7, 1)
+        p.drawArc(QRectF(30, 22, 8, 10), 0, 180 * 16); p.drawArc(QRectF(35, 20, 8, 12), 0, 180 * 16)
+    elif kind == "fachada":       # casa: telhado, porta e janela
+        path = QPainterPath(QPointF(5, 22)); path.lineTo(24, 7); path.lineTo(43, 22); p.drawPath(path)
+        line(9, 19, 9, 38); line(39, 19, 39, 38)
+        rect(14, 26, 7, 12, 0.8)
+        rect(26, 25, 9, 7, 0.8); line(30.5, 25, 30.5, 32)
+        line(33, 10, 33, 15); line(33, 10, 37, 10); line(37, 10, 37, 18)
     else:                         # sala de jantar: mesa, cadeiras e pendente
         line(13, 25, 35, 25)
         line(16, 25, 16, 38); line(32, 25, 32, 38)
@@ -309,6 +350,87 @@ def room_pixmap(kind: str, size: int = 40, color: str = TEXT_2, dpr: float = 2.0
     _draw_room(p, kind, color)
     p.end()
     return pm
+
+
+def _draw_function(p: QPainter, kind: str, color: str) -> None:
+    """Ícones das funções do redesenho (grade de 48), no traço dos ícones de ambiente."""
+    p.setPen(_pen(color, 1.7, Qt.RoundCap))
+    p.setBrush(Qt.NoBrush)
+    line = lambda x1, y1, x2, y2: p.drawLine(QPointF(x1, y1), QPointF(x2, y2))  # noqa: E731
+    rect = lambda x, y, w, h, r=0: p.drawRoundedRect(QRectF(x, y, w, h), r, r)  # noqa: E731
+    soft = QColor(color); soft.setAlphaF(0.55)
+    if kind == "mudar_estilo":        # paleta de pintor + pincel
+        path = QPainterPath(QPointF(24, 8))
+        path.cubicTo(36, 8, 43, 16, 42, 24); path.cubicTo(41, 30, 34, 29, 32, 32); path.cubicTo(30, 35, 33, 40, 26, 40)
+        path.cubicTo(14, 40, 6, 33, 6, 24); path.cubicTo(6, 15, 13, 8, 24, 8)
+        p.drawPath(path)
+        for x, y in ((15, 19), (23, 15), (31, 18), (14, 28)):
+            p.drawEllipse(QPointF(x, y), 2.4, 2.4)
+    elif kind == "reforma":           # sofá novo + setas de renovação
+        rect(12, 24, 24, 8, 2); rect(8, 28, 5, 9, 1.5); rect(35, 28, 5, 9, 1.5); line(13, 34, 35, 34)
+        p.drawArc(QRectF(15, 5, 18, 14), 20 * 16, 140 * 16); p.drawArc(QRectF(15, 5, 18, 14), 200 * 16, 140 * 16)
+        line(31, 7, 32, 10.5); line(32, 10.5, 28.5, 11)
+        line(17, 17, 16, 13.5); line(16, 13.5, 19.5, 13)
+    elif kind == "redesign_simples":  # varinha com brilhos
+        line(9, 39, 30, 18)
+        p.setPen(_pen(color, 1.5, Qt.RoundCap))
+        for cx, cy, r in ((35, 13, 5.5), (17, 12, 3.2), (38, 30, 3.2)):
+            line(cx, cy - r, cx, cy + r); line(cx - r, cy, cx + r, cy)
+    elif kind == "mobiliar":          # cômodo vazio em perspectiva recebendo um sofá
+        p.setPen(_pen(soft, 1.2))
+        line(4, 6, 14, 14); line(44, 6, 34, 14); line(4, 42, 14, 32); line(44, 42, 34, 32)
+        p.setPen(_pen(color, 1.5, Qt.RoundCap))
+        rect(14, 14, 20, 18)
+        rect(17, 24, 14, 5, 1.2); line(17, 29, 17, 31); line(31, 29, 31, 31)
+        line(38, 3, 38, 9); line(35, 6, 41, 6)
+    elif kind == "editar_area":       # seleção tracejada + pincel
+        pen = _pen(soft, 1.4); pen.setDashPattern([2.5, 2.5]); p.setPen(pen)
+        rect(5, 10, 26, 22, 3)
+        p.setPen(_pen(color, 1.7, Qt.RoundCap))
+        line(42, 8, 28, 26)
+        path = QPainterPath(QPointF(28, 26)); path.cubicTo(24, 25, 21, 29, 21, 33); path.lineTo(19, 36)
+        path.cubicTo(25, 36, 30, 32, 28, 26); p.drawPath(path)
+    elif kind == "fachada":
+        _draw_room(p, "fachada", color)
+        return
+    elif kind == "evento":            # balões e bandeirolas
+        p.drawEllipse(QRectF(9, 9, 12, 15)); p.drawEllipse(QRectF(22, 6, 12, 15))
+        path = QPainterPath(QPointF(15, 24)); path.cubicTo(13, 30, 18, 33, 16, 40); p.drawPath(path)
+        path = QPainterPath(QPointF(28, 21)); path.cubicTo(26, 28, 31, 32, 28, 40); p.drawPath(path)
+        p.setPen(_pen(soft, 1.3))
+        path = QPainterPath(QPointF(30, 30)); path.quadTo(37, 33, 45, 30); p.drawPath(path)
+        for x in (34, 40):
+            tri = QPainterPath(QPointF(x - 2.5, 31.5)); tri.lineTo(x, 37); tri.lineTo(x + 2.5, 31.5); p.drawPath(tri)
+    elif kind == "texto":             # descrição vira imagem
+        rect(6, 8, 36, 30, 4)
+        line(12, 15, 22, 15); line(17, 15, 17, 26)
+        p.setPen(_pen(soft, 1.4, Qt.RoundCap))
+        line(26, 17, 36, 17); line(26, 22, 36, 22); line(12, 31, 36, 31)
+        return
+    else:
+        _draw_room(p, "sala", color)
+        return
+    c = QColor(color); c.setAlphaF(0.55)
+    if kind in ("reforma", "redesign_simples"):
+        p.setPen(_pen(c, 1.2)); line(3, 42.5, 45, 42.5)
+
+
+def function_pixmap(kind: str, size: int = 40, color: str = TEXT_2, dpr: float = 2.0) -> QPixmap:
+    pm, p = _canvas(size, dpr)
+    p.scale(size / 48.0, size / 48.0)
+    _draw_function(p, kind, color)
+    p.end()
+    return pm
+
+
+def function_icon(kind: str, size: int = 40, color: str = TEXT_2, on_color: str = ACCENT_HI) -> QIcon:
+    icon = QIcon()
+    off = function_pixmap(kind, size, color)
+    on = function_pixmap(kind, size, on_color)
+    for mode in (QIcon.Normal, QIcon.Active, QIcon.Selected):
+        icon.addPixmap(off, mode, QIcon.Off)
+        icon.addPixmap(on, mode, QIcon.On)
+    return icon
 
 
 def room_icon(kind: str, size: int = 40, color: str = TEXT_2, on_color: str = ACCENT_HI) -> QIcon:
@@ -372,6 +494,47 @@ def line_icon(name: str, size: int = 16, color: str = TEXT) -> QIcon:
         path = QPainterPath(QPointF(2.5, 11.5)); path.lineTo(6, 8); path.lineTo(8.5, 10.5); path.lineTo(10.5, 8.5)
         path.lineTo(13.5, 11.5); p.drawPath(path)
         p.drawEllipse(QPointF(10.5, 6), 1.1, 1.1)
+    elif name == "brush":         # pincel (editar área)
+        line(13.5, 2.5, 7.5, 8.5)
+        path = QPainterPath(QPointF(7.5, 8.5)); path.cubicTo(5, 8, 3.5, 10, 3.5, 12.5); path.lineTo(2.5, 13.5)
+        path.cubicTo(5.5, 13.5, 8, 12, 7.5, 8.5); p.drawPath(path)
+    elif name == "eraser":
+        path = QPainterPath(QPointF(6, 13.5)); path.lineTo(2.5, 10); path.lineTo(9.5, 3); path.lineTo(13.5, 7)
+        path.lineTo(7, 13.5); path.closeSubpath(); p.drawPath(path)
+        line(5, 7.5, 9, 11.5); line(6, 13.5, 13.5, 13.5)
+    elif name == "undo":
+        line(3, 6, 6, 3); line(3, 6, 6, 9)
+        path = QPainterPath(QPointF(3, 6)); path.lineTo(9.5, 6); path.cubicTo(12, 6, 13.5, 7.8, 13.5, 9.8)
+        path.cubicTo(13.5, 11.8, 12, 13.5, 9.5, 13.5); path.lineTo(6, 13.5); p.drawPath(path)
+    elif name == "trash":
+        line(2.5, 4.5, 13.5, 4.5); line(6, 4.5, 6.5, 2.5); line(6.5, 2.5, 9.5, 2.5); line(9.5, 2.5, 10, 4.5)
+        path = QPainterPath(QPointF(4, 4.5)); path.lineTo(4.8, 13.5); path.lineTo(11.2, 13.5); path.lineTo(12, 4.5)
+        p.drawPath(path)
+    elif name == "video":
+        p.drawRoundedRect(QRectF(2, 4, 9, 8), 1.5, 1.5)
+        path = QPainterPath(QPointF(11, 7)); path.lineTo(14, 5); path.lineTo(14, 11); path.lineTo(11, 9)
+        p.drawPath(path)
+    elif name == "expand":        # ampliar 4K
+        line(2.5, 2.5, 6.5, 2.5); line(2.5, 2.5, 2.5, 6.5); line(13.5, 13.5, 9.5, 13.5); line(13.5, 13.5, 13.5, 9.5)
+        line(2.5, 2.5, 6.5, 6.5); line(13.5, 13.5, 9.5, 9.5)
+        line(13.5, 2.5, 9.5, 2.5); line(13.5, 2.5, 13.5, 6.5); line(2.5, 13.5, 6.5, 13.5); line(2.5, 13.5, 2.5, 9.5)
+    elif name == "save":
+        path = QPainterPath(QPointF(2.5, 2.5)); path.lineTo(11, 2.5); path.lineTo(13.5, 5); path.lineTo(13.5, 13.5)
+        path.lineTo(2.5, 13.5); path.closeSubpath(); p.drawPath(path)
+        p.drawRect(QRectF(5, 2.5, 5, 3.5)); p.drawRect(QRectF(5, 9, 6, 4.5))
+    elif name == "sparkle":       # gerar com IA
+        path = QPainterPath(QPointF(7, 2)); path.quadTo(7.6, 6.4, 12, 7); path.quadTo(7.6, 7.6, 7, 12)
+        path.quadTo(6.4, 7.6, 2, 7); path.quadTo(6.4, 6.4, 7, 2); p.drawPath(path)
+        line(12.5, 10.5, 12.5, 14); line(10.75, 12.25, 14.25, 12.25)
+    elif name == "back":
+        line(13, 8, 3, 8); line(7, 4, 3, 8); line(3, 8, 7, 12)
+    elif name == "settings":      # avançado
+        p.drawEllipse(QPointF(8, 8), 2.2, 2.2)
+        for a in range(0, 360, 45):
+            from math import cos, radians, sin
+            c, s = cos(radians(a)), sin(radians(a))
+            line(8 + 4.2 * c, 8 + 4.2 * s, 8 + 6 * c, 8 + 6 * s)
+        p.drawEllipse(QPointF(8, 8), 4.2, 4.2)
     p.end()
     icon = QIcon(pm)
     return icon

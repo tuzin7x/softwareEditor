@@ -201,3 +201,166 @@ class HardwareProbe(QObject):
             self.done.emit(json.loads(line) if line else None)
         except Exception:
             self.done.emit(None)
+
+
+# ============================================================================ redesenho por IA (fluxo principal)
+@dataclass
+class CliResult:
+    """Resultado de um subcomando do motor (``design``, ``upscale``, ``showcase``)."""
+    kind: str                         # design | upscale | showcase
+    args: list[str]
+    status: str = "executando"        # executando | pronto | erro | cancelado
+    done: dict = field(default_factory=dict)   # evento "done" do motor
+    error: str | None = None
+    detail: str = ""
+    log: list[str] = field(default_factory=list)
+    tag: object = None                # dado livre de quem pediu (ex.: a versão ampliada)
+    started_at: float = field(default_factory=time.time)
+    finished_at: float | None = None
+
+    @property
+    def output(self) -> str | None:
+        return self.done.get("output")
+
+    @property
+    def outputs(self) -> list[str]:
+        outs = self.done.get("outputs")
+        if outs:
+            return [str(o) for o in outs]
+        return [self.output] if self.output else []
+
+
+class CliTask(QObject):
+    """Executa UM subcomando do motor em processo separado (``mobilia.cli <kind> ... --json``).
+
+    A interface nunca espera o motor: o processo roda numa thread e os eventos JSON viram sinais Qt (entregues na
+    thread da interface). ``cancel()`` encerra a árvore de processos. Um ``CliTask`` por tipo de trabalho: o
+    redesenho e as ações da tela de resultados (ampliar, vídeo) não disputam o mesmo objeto."""
+
+    progress = Signal(str, float, str)       # etapa, fração 0..1, mensagem
+    preview = Signal(str, int)               # caminho da versão pronta, índice
+    log = Signal(str)
+    finished = Signal(object)                # CliResult
+    _ended = Signal(object)                  # interno: fim do processo (da thread do worker para a da interface)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current: CliResult | None = None
+        self._proc: subprocess.Popen | None = None
+        self._cancel = threading.Event()
+        # ``current`` só é limpo na thread da interface, logo antes de ``finished``: quem vê ``busy() == False``
+        # já recebeu o resultado (sem janela em que a tela acha que acabou e ainda não sabe como)
+        self._ended.connect(self._on_ended)
+
+    def _on_ended(self, res: "CliResult") -> None:
+        if self.current is res:
+            self.current = None
+        self.finished.emit(res)
+
+    def busy(self) -> bool:
+        return self.current is not None
+
+    def start(self, kind: str, args: list[str], tag: object = None) -> CliResult:
+        """Inicia ``mobilia.cli <kind> <args> --json``. Levanta ``RuntimeError`` se já houver um em andamento."""
+        if self.current is not None:
+            raise RuntimeError("Já existe um trabalho em andamento.")
+        args = [str(a) for a in args]
+        if "--json" not in args:
+            args.append("--json")
+        res = CliResult(kind=str(kind), args=[str(kind)] + args, tag=tag)
+        self.current = res
+        self._cancel.clear()
+        threading.Thread(target=self._run, args=(res,), daemon=True).start()
+        return res
+
+    def cancel(self) -> None:
+        self._cancel.set()
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            runtime.kill_process_tree(proc.pid)
+
+    def command(self, res: CliResult) -> list[str]:
+        return runtime.worker_command(res.args)
+
+    def _run(self, res: CliResult) -> None:
+        try:
+            self._proc = subprocess.Popen(
+                self.command(res), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=runtime.worker_environment(),
+                cwd=str(runtime.worker_cwd()), text=True, encoding="utf-8", errors="replace",
+                **runtime.background_popen_kwargs())
+        except OSError as e:
+            res.status, res.error = "erro", f"Não foi possível iniciar o motor: {e}"
+            self._finish(res)
+            return
+        if self._cancel.is_set():          # cancelado antes do processo existir
+            runtime.kill_process_tree(self._proc.pid)
+        for raw in self._proc.stdout:
+            line = raw.strip()
+            if not line.startswith("{"):
+                if line:
+                    res.log.append(line)
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                res.log.append(line)
+                continue
+            self._handle(res, ev)
+        rc = self._proc.wait()
+        if self._cancel.is_set():
+            res.status, res.error = "cancelado", "Cancelado pelo usuário."
+        elif res.status == "executando":
+            res.status = "erro"
+            res.error = res.error or f"O motor terminou sem concluir (código {rc})."
+            res.detail = res.detail or "\n".join(res.log[-60:])
+        self._finish(res)
+
+    def _handle(self, res: CliResult, ev: dict) -> None:
+        kind = ev.get("event")
+        if kind == "progress":
+            try:
+                frac = float(ev.get("fraction") or 0.0)
+            except (TypeError, ValueError):
+                frac = 0.0
+            self.progress.emit(str(ev.get("stage") or ""), max(0.0, min(1.0, frac)), str(ev.get("message") or ""))
+        elif kind == "preview":
+            try:
+                idx = int(ev.get("index") or 0)
+            except (TypeError, ValueError):
+                idx = 0
+            self.preview.emit(str(ev.get("path") or ""), idx)
+        elif kind == "log":
+            msg = str(ev.get("message") or "")
+            res.log.append(msg)
+            self.log.emit(msg)
+        elif kind == "done":
+            res.done = dict(ev)
+            res.status = "pronto"
+        elif kind == "error":
+            res.status, res.error, res.detail = "erro", str(ev.get("message") or "Erro"), str(ev.get("detail") or "")
+
+    def _finish(self, res: CliResult) -> None:
+        res.finished_at = time.time()
+        self._save_log(res)
+        self._proc = None
+        self._ended.emit(res)
+
+    @staticmethod
+    def _save_log(res: CliResult) -> None:
+        """Grava a saída do motor ao lado do resultado (pasta de saída do pedido), para diagnóstico."""
+        out = None
+        a = res.args
+        for flag in ("--out-dir", "--out"):
+            if flag in a and a.index(flag) + 1 < len(a):
+                out = Path(a[a.index(flag) + 1])
+                out = out if flag == "--out-dir" else out.parent
+                break
+        if out is None:
+            return
+        lines = [f"comando: {' '.join(a)}", f"status: {res.status}"] + ([f"erro: {res.error}"] if res.error else [])
+        lines += res.log + (["", "detalhe:", res.detail] if res.detail else [])
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"interface_{res.kind}.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
