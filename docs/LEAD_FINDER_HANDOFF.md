@@ -11,7 +11,7 @@ na integração e do que ainda não foi verificado. Descrição completa do mód
 | Commit de base | `54a55abda37b62f7a0c93b06f7b08c8749048a89` (o guia ainda cita `435a87b`; a base pedida foi `54a55ab`) |
 | Branch | `feature/lead-finder` |
 | Destino do PR | `claude/sweet-bohr-4uzml2` (sem merge automático) |
-| Merge da base | não foi necessário: a branch de integração não avançou depois de `54a55ab` durante o trabalho |
+| Merge da base | `origin/claude/sweet-bohr-4uzml2` (`eaee226`, checkpoint do redesenho) mesclada por merge, sem conflitos; testes rodados depois do merge |
 
 ## 2. Arquivos tocados
 
@@ -67,6 +67,17 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and no
 python -m pytest --collect-only -q
 python -m mobilia.modules.lead_finder         # janela isolada do módulo
 ```
+
+Resultado nesta branch, depois do merge com `eaee226` (Linux, Python 3.13, instalação completa do `tests.yml`):
+
+- `tests/lead_finder`: **96 passaram**;
+- `tests/test_modules.py` + `tests/test_ui.py`: **todos passaram** (com o Lead Finder registrado na janela);
+- suíte rápida inteira: **802 passaram, 258 pulados, 4 falharam**. As 4 falhas
+  (`test_design_weights_in_prefetch`, `test_vram_swap_moves_models_out_during_generate_and_back`,
+  `test_ensure_local_separates_network_time`, `test_prefetch_includes_v3_weights`) são `ModuleNotFoundError` de
+  `torch`/`huggingface_hub` e **falham igualmente em `claude/sweet-bohr-4uzml2` sem o Lead Finder** (conferido num
+  worktree separado). Não têm relação com o módulo;
+- `--collect-only`: coleta completa sem erros.
 
 Teste manual sugerido no Windows:
 
