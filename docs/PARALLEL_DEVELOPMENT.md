@@ -34,7 +34,7 @@ Leia nesta ordem: este arquivo, depois o [`README.md`](../README.md), o [`RESUME
 | Item | Valor |
 |---|---|
 | Branch de integração (desenvolvimento) | `claude/sweet-bohr-4uzml2` |
-| Commit de base para o Lead Finder | tag anotada **`lead-finder-base`** (o hash completo é informado pela sessão principal na entrega e aparece em `git rev-parse lead-finder-base^{commit}`) |
+| Commit de base para o Lead Finder | **`435a87bdfb0c2a75a3d334db24f889027049deb8`** (curto: `435a87b`) |
 | Branch do novo módulo | `feature/lead-finder` (criada a partir do commit de base) |
 | `main` | **não usar**: está desatualizada de propósito (ver seção 13) |
 
@@ -43,8 +43,8 @@ Para criar a branch:
 ```bash
 git clone https://github.com/tuzin7x/softwareEditor.git
 cd softwareEditor
-git fetch origin --tags
-git switch -c feature/lead-finder lead-finder-base
+git fetch origin claude/sweet-bohr-4uzml2
+git switch -c feature/lead-finder 435a87bdfb0c2a75a3d334db24f889027049deb8
 git push -u origin feature/lead-finder
 ```
 
@@ -52,8 +52,7 @@ Se a sessão recusar o push de `feature/lead-finder` (algumas sessões só podem
 `claude/lead-finder` no lugar; o Pull Request e as regras são os mesmos. Observação: push em `claude/**` também
 dispara o `build-windows.yml`, que gera o `.exe` mas não publica nada sem `[release]`.
 
-Confira se a base está certa: `git log -1 --oneline` deve mostrar o commit da tag `lead-finder-base` (o mesmo hash
-informado na entrega), e `mobilia/ui/modules.py` e
+Confira se a base está certa: `git log -1 --oneline` deve mostrar `435a87b`, e `mobilia/ui/modules.py` e
 `tests/test_modules.py` devem existir.
 
 ## 3. Arquitetura da interface (PySide6), em resumo

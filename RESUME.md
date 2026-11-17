@@ -11,7 +11,7 @@
   `docs/PARALLEL_DEVELOPMENT.md`, seção 13.
 - **`ui-7xai`:** branch local antiga, já contida na branch de integração (worktree local da sessão principal). Não
   mexer.
-- **`feature/lead-finder`** (planejada): será feita por outra conta, a partir da tag `lead-finder-base` indicada em
+- **`feature/lead-finder`** (planejada): será feita por outra conta, a partir do commit `435a87b` indicado em
   `docs/PARALLEL_DEVELOPMENT.md`, e volta por Pull Request para `claude/sweet-bohr-4uzml2`.
 
 ### Últimos commits relevantes
