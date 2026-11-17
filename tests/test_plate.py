@@ -354,3 +354,80 @@ def test_gate_rejects_fill_whose_mean_color_is_off():
     s = q.per_plane["piso"]
     assert s["costura_de"] < rp.LIMITS["costura_de_max"], s
     assert not q.ok and any("destoa" in t for t in q.reasons), (q.reasons, s)
+
+
+def test_gate_alternatives_record_attempts_and_skip_when_only_area(monkeypatch):
+    """PT-V3-8: reprovada por costura -> tenta LaMa na imagem e máscara larga (registradas em ``tentativas``);
+    reprovada só pela área grande -> as alternativas não ajudam e não rodam."""
+    room = _room()
+    img, groups, _ = _render(room)
+    m = np.zeros(groups.shape, bool)
+    m[250:320, 60:140] = True
+    insts = [_piece(m, "solto", "sofa")]
+    inst_set = SimpleNamespace(instances=insts, removal=lambda keep=False: insts)
+    orig = rp.assess
+    reason = ["costura visível no(a) piso (ΔE 9.0)"]
+
+    def bad(*a, **k):
+        q = orig(*a, **k)
+        q.ok, q.reasons, q.score = False, list(reason), 40.0
+        return q
+
+    monkeypatch.setattr(rp, "assess", bad)
+    seen = []
+    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                             on_attempt=lambda name, res: seen.append((name, res.info["estrategia"])))
+    assert seen == [("crua_por_plano", "planos"), ("lama_imagem", "imagem"), ("mascara_ampla", "planos")]
+    t = r.report()["placa"]["tentativas"]
+    assert [x["estrategia"] for x in t] == [s for s, _ in seen] and t[2]["dilatacao_nucleo"] > t[0]["dilatacao_nucleo"]
+    assert np.array_equal(r.plate[~r.mask], img[~r.mask])            # toda tentativa respeita a regra absoluta
+    assert any("modo A" in w for w in r.warnings)
+    reason[:] = ["área reconstruída muito grande (80% da foto)"]
+    seen.clear()
+    rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                         on_attempt=lambda name, res: seen.append(name))
+    assert seen == ["crua_por_plano"]
+
+
+def test_image_strategy_keeps_photo_outside_mask():
+    room = _room()
+    img, groups, _ = _render(room)
+    m = np.zeros(groups.shape, bool)
+    m[250:320, 60:140] = True
+    r = rp.build_plate(img, [_piece(m)], SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                       strategy="imagem")
+    assert r.info["estrategia"] == "imagem" and np.array_equal(r.plate[~r.mask], img[~r.mask])
+    assert r.quality is not None
+    with pytest.raises(ValueError):
+        rp.build_plate(img, [_piece(m)], SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                       strategy="xyz")
+
+
+def test_gate_never_prefers_wide_mask_that_breaks_area_limit(monkeypatch):
+    """A máscara larga que só reprova pela área (passou do limite) não vence uma placa dentro do limite com o
+    mesmo número de motivos (caso real da sala de sofás brancos a 960 px)."""
+    room = _room()
+    img, groups, _ = _render(room)
+    m = np.zeros(groups.shape, bool)
+    m[250:320, 60:140] = True
+    insts = [_piece(m, "solto", "sofa")]
+    inst_set = SimpleNamespace(instances=insts, removal=lambda keep=False: insts)
+    orig = rp.assess
+    base = []
+
+    def fake(photo, plate, mask, *a, **k):
+        q = orig(photo, plate, mask, *a, **k)
+        base.append(base[0] if base else int(mask.sum()))
+        wide = mask.sum() > base[0] * 1.05            # só a máscara larga cresce (a 2ª tentativa usa a mesma)
+        q.ok, q.score = False, 59.0
+        q.raw_score = 90.0 if wide else 50.0
+        q.area_generated = 0.72 if wide else 0.30
+        q.reasons = ["área reconstruída muito grande (72% da foto)"] if wide else ["cor do preenchimento destoa no(a) piso (ΔE 11.6)"]
+        return q
+
+    monkeypatch.setattr(rp, "assess", fake)
+    areas = {}
+    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                             on_attempt=lambda name, res: areas.update({name: res.quality.area_generated}))
+    assert areas["mascara_ampla"] == 0.72 and areas["crua_por_plano"] == 0.30     # a máscara larga "melhorou" a nota
+    assert r.info["estrategia_portao"] != "mascara_ampla" and r.quality.area_generated == 0.30

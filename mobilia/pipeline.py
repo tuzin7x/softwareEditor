@@ -74,10 +74,12 @@ def _resize(rgb8: np.ndarray, long_edge: int) -> np.ndarray:
 
 
 def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | None = None, emitter=None,
-                  prof=None, sw: Stopwatch | None = None):
+                  prof=None, sw: Stopwatch | None = None, panoptic: dict | None = None):
     """Etapa de análise isolada (também usada pela CLI de depuração).
 
     ``sw`` (opcional) recebe os tempos das subetapas em ``analise.*`` (ver ``telemetry.ETAPAS_ANALISE``).
+    ``panoptic`` (dict, opcional): roda o OneFormer nas tarefas semântica **e** panóptica numa carga só (detecção
+    do modo e peças do modo B) e guarda o ``PanopticResult`` em ``panoptic["pan"]``.
     """
     from .analysis.debug_viz import geometry_overlay
     from .analysis.geometry import estimate_geometry
@@ -105,12 +107,17 @@ def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | Non
         geo.save(out / "geometry.npz")
     em.stage("analise", 0.55, "Identificando piso, paredes, janelas e portas (OneFormer)")
     t, ts = time.perf_counter(), {}
-    seg = segment(rgb, device=dev, use_fp16=prof.use_fp16, timings=ts)
+    if panoptic is None:
+        seg = segment(rgb, device=dev, use_fp16=prof.use_fp16, timings=ts)
+    else:
+        seg, panoptic["pan"] = _segment_panoptic(rgb, dev, prof.use_fp16, ts)
     total = _minus_download(sw, time.perf_counter() - t, ts)
     sw.add("analise.segmentacao_carga", min(total, ts.get("carga", 0.0)))
     sw.add("analise.segmentacao_inferencia", total - min(total, ts.get("carga", 0.0)))
     with sw.measure("analise.gravacao"):
         seg.save(out / "segmentation.npz")
+        if panoptic is not None:
+            panoptic["pan"].save(out / "panoptic.npz")
     em.stage("analise", 0.9, "Reconstruindo a sala em 3D")
     with sw.measure("analise.sala"):
         room, dbg = build_room_model(geo, seg, rgb)
@@ -121,6 +128,23 @@ def analyze_photo(photo_path: str | Path, out_dir: str | Path, device: str | Non
         ov = geometry_overlay(rgb, room, seg)
         Image.fromarray(ov).save(out / "analise_overlay.jpg", quality=88)
     return rgb, geo, seg, room, dbg["grid"]
+
+
+def _segment_panoptic(rgb: np.ndarray, device: str, use_fp16: bool, timings: dict):
+    """OneFormer semântico + panóptico (``removal.instances.run_oneformer``) com os mesmos campos de tempo do
+    ``segment`` (``download`` e ``carga``)."""
+    from .analysis.geometry import _ensure_weights
+    from .analysis.weights import ensure_local
+    from .removal import instances as ri
+
+    t0 = time.perf_counter()
+    dl = _ensure_weights(ensure_local, ri.SEG_MODEL)
+    pre = time.perf_counter() - t0 - dl              # conferência do cache (sem a rede)
+    tt: dict = {}
+    seg, pan = ri.run_oneformer(rgb, device=device, use_fp16=use_fp16, timings=tt)
+    timings["download"] = dl
+    timings["carga"] = max(0.0, pre) + tt.get("oneformer_carga", 0.0)
+    return seg, pan
 
 
 def _minus_download(sw: Stopwatch, total: float, timings: dict) -> float:
@@ -200,11 +224,29 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         with sw.measure("analise.geometria_carga"):   # na GPU cria o contexto CUDA (seria na carga)
             torch_reset_peak(prof.torch_device)
         with vram.track("analise"):
+            pan_box: dict = {}
             rgb, geo, seg, room, grid = analyze_photo(req.photo_path, an_dir, device=prof.torch_device,
-                                                      emitter=em_an, prof=prof, sw=sw)
+                                                      emitter=em_an, prof=prof, sw=sw, panoptic=pan_box)
             vram_torch = torch_peak_mb(prof.torch_device)
             with sw.measure("analise.gravacao"):
                 em.preview(an_dir / "analise_overlay.jpg")
+            # ------------------------------------------------------------ modo (PLANO_V3 §3): vazia -> A, mobiliada -> B
+            with sw.measure("analise.modo"):
+                from .removal import instances as ri
+
+                decision = ri.detect_mode(seg, pan_box["pan"], None if req.mode == "auto" else req.mode)
+            em.mode(decision.mode, decision.reason)
+            em.log(f"Modo {decision.mode}: {decision.reason}"
+                   + (" (perto do limite)" if decision.uncertain and not decision.forced else ""))
+        if decision.mode == "B":
+            from .pipeline_b import ModeBContext, run_mode_b
+
+            return run_mode_b(ModeBContext(
+                req=req, em=em, sw=sw, vram=vram, hw=hw, prof=prof, q=q, work=work, stamp=stamp,
+                original=original, photo=plate, rgb=rgb, geo=geo, seg=seg, pan=pan_box["pan"], room=room,
+                decision=decision, vram_torch=vram_torch, first=first, state_path=state_path,
+                warm_state=warm_state, t_ref=t_ref, t_click=t_click))
+        with vram.track("analise"):
             q_room = room.quality
             from .analysis.depth_mesh import occluder_mesh
             from .analysis.sunlight import detect_sun
@@ -314,6 +356,8 @@ def run_job(req: JobRequest, em: ProgressEmitter, t_ref: float | None = None) ->
         tempos["total_percebido"] = round(now - t_click, 2)
         tempos["soma_etapas"] = round(stages_sum(tempos), 2)
         report["tempos_s"] = tempos
+        report["modo"] = {"modo": "A", "motivo": decision.reason, "incerto": decision.uncertain,
+                          "forcado": decision.forced, "medidas": decision.features}
         orc = report["render"].get("orcamento") or {}
         if orc.get("ativo"):
             orc["real_total_s"] = tempos["total_percebido"]

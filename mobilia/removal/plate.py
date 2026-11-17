@@ -75,6 +75,11 @@ MIN_CONTEXT_PX = 1500        # material visível mínimo do plano na vista retif
 MIN_CONTEXT_FRAC = 0.01      # ... e em fração do buraco
 
 # --- limites da nota (portão) ----------------------------------------------------------------------------------
+# estratégias do portão (:func:`build_plate_gated`): "planos" = LaMa por plano retificado (padrão);
+# "imagem" = LaMa direto no espaço da imagem (melhor quando o modelo da sala erra: linhas tortas por plano errado)
+STRATEGIES = ("planos", "imagem")
+GATE_WIDE_DILATE = 2.5       # máscara ampla do portão: núcleo dilatado 2,5× (sobra de borda/sombra do móvel)
+
 LIMITS = {
     "costura_de_max": 6.0,           # ΔE76 entre faixa interna e anel, por plano (aceite PT-V3-3: <= 3)
     "grao_log2_max": 1.0,            # |log2(grão dentro / grão no anel)|
@@ -504,12 +509,12 @@ def _finish_surface(orig: np.ndarray, filled: np.ndarray, known: np.ndarray, hol
 # ============================================================================================================
 # Máscara de efeitos
 # ============================================================================================================
-def core_mask(pieces: Sequence, shape: tuple[int, int]) -> np.ndarray:
+def core_mask(pieces: Sequence, shape: tuple[int, int], dilate: float = CORE_DILATE) -> np.ndarray:
     H, W = shape
     m = np.zeros(shape, bool)
     for p in pieces:
         m |= p.mask | (p.alpha > 0.02)
-    return _dil(m, max(3, int(CORE_DILATE * np.hypot(H, W))))
+    return _dil(m, max(3, int(dilate * np.hypot(H, W))))
 
 
 def effect_candidates(pieces: Sequence, groups: np.ndarray, core: np.ndarray) -> np.ndarray:
@@ -723,6 +728,8 @@ class PlateResult:
                           "planejados_mantidos": self.kept_builtins, "planos": self.info.get("planos", {}),
                           "tempos_s": {k: round(v, 2) for k, v in self.info.get("tempos", {}).items()},
                           "qualidade": None if self.quality is None else self.quality.to_dict(),
+                          "estrategia": self.info.get("estrategia_portao", self.info.get("estrategia", "planos")),
+                          "tentativas": list(self.info.get("tentativas", [])),
                           "avisos": list(self.warnings)}}
 
 
@@ -1157,11 +1164,16 @@ def _fill_rect(inpaint, cur, photo, hole_img, same_img, Hm, size, rng, ctx_restr
 # ============================================================================================================
 def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.ndarray | None = None,
                 inpaint: InpaintFn | None = None, redetect: Callable | None = None, seed: int = 0,
-                max_side: int = MAX_SIDE, assess_quality: bool = True) -> PlateResult:
+                max_side: int = MAX_SIDE, assess_quality: bool = True, strategy: str = "planos",
+                core_dilate: float = CORE_DILATE) -> PlateResult:
     """Sala vazia a partir das peças a remover (``FurnitureInstance`` ou qualquer objeto com ``mask``, ``alpha``
     e ``kind``). ``seg``: segmentação semântica da foto. ``room``: ``RoomModel`` (sem ele, só espaço da
     imagem). ``depth``: profundidade do MoGe (detecta o que é visto por portas). ``redetect(placa) ->
-    (seg, pan)``: OneFormer para a nota. Garante ``placa[~mask] == foto[~mask]`` byte a byte."""
+    (seg, pan)``: OneFormer para a nota. ``strategy``: "planos" (LaMa por plano) ou "imagem" (LaMa no espaço da
+    imagem; a nota usa os mesmos planos da caixa, para medir as duas do mesmo jeito). ``core_dilate``: dilatação
+    do núcleo (fração da diagonal). Garante ``placa[~mask] == foto[~mask]`` byte a byte."""
+    if strategy not in STRATEGIES:
+        raise ValueError(f"estratégia de placa desconhecida: {strategy}")
     if inpaint is None:
         inpaint = load_lama()
     t: dict = {}
@@ -1182,7 +1194,7 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
             warnings.append(f"modelo da sala inválido ({e}); sala vazia só no espaço da imagem")
     else:
         warnings.append("sem modelo da sala: sala vazia só no espaço da imagem (linhas podem entortar)")
-    core = core_mask(pieces, (H, W))
+    core = core_mask(pieces, (H, W), core_dilate)
     cand = effect_candidates(pieces, groups, core)
     t["mascaras"] = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -1192,7 +1204,13 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
     del plate1
     mask = core | _dil(effect, 3)
     t0 = time.perf_counter()
-    plate, labels, pinfo = fill_planes(inpaint, photo, mask, groups, box, depth, rng, max_side)
+    if strategy == "imagem":
+        plate = np.array(inpaint(photo, mask), np.uint8, copy=True)
+        plate[~mask] = photo[~mask]
+        labels = box.label.copy() if box is not None else np.full((H, W), OTHER, np.int32)
+        pinfo = {"imagem": {"metodo": "lama-imagem", "area_px": int(mask.sum())}}
+    else:
+        plate, labels, pinfo = fill_planes(inpaint, photo, mask, groups, box, depth, rng, max_side)
     t["passada2_planos"] = time.perf_counter() - t0
     if not np.array_equal(plate[~mask], photo[~mask]):     # regra absoluta: nunca deveria acontecer
         raise AssertionError("placa difere da foto fora da máscara")
@@ -1201,30 +1219,77 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
         t0 = time.perf_counter()
         q = assess(photo, plate, mask, labels, groups, box, redetect, pinfo)
         t["nota"] = time.perf_counter() - t0
-    return PlateResult(plate, mask, core, effect, shadow, light, labels, q, {"planos": pinfo, "tempos": t},
+    return PlateResult(plate, mask, core, effect, shadow, light, labels, q,
+                       {"planos": pinfo, "tempos": t, "estrategia": strategy, "dilatacao_nucleo": core_dilate},
                        warnings)
 
 
 def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, inpaint: InpaintFn | None = None,
-                      redetect: Callable | None = None, seed: int = 0, max_side: int = MAX_SIDE) -> PlateResult:
-    """Portão de qualidade (§3.6): placa crua (soltos + planejados); se reprovada e havia planejados, refaz
-    mantendo os planejados. Se ainda reprovada, devolve a melhor com aviso (a interface oferece o modo A ou
-    outra foto)."""
+                      redetect: Callable | None = None, seed: int = 0, max_side: int = MAX_SIDE,
+                      alternatives: bool = True, on_attempt: Callable | None = None) -> PlateResult:
+    """Portão de qualidade (§3.6 e PT-V3-8). Tentativas, parando na primeira aprovada:
+
+    1. ``crua_por_plano``: soltos + planejados, LaMa por plano;
+    2. ``planejados_mantidos`` (só se há planejados): só os soltos saem;
+    3. ``lama_imagem`` (``alternatives``): LaMa direto na imagem, com o conjunto da melhor tentativa até aqui;
+    4. ``mascara_ampla`` (``alternatives``): por plano com o núcleo dilatado :data:`GATE_WIDE_DILATE` vezes.
+
+    Fica a melhor (aprovada > menos motivos > nota sem teto). Se nenhuma passa, devolve a melhor com aviso (a
+    interface oferece gerar mesmo assim, o modo A ou outra foto); nunca entrega uma placa ruim em silêncio.
+    ``info["tentativas"]`` registra cada tentativa (estratégia, nota, motivos, tempo). ``on_attempt(nome, placa)``
+    é chamado depois de cada tentativa (progresso na interface)."""
     if inpaint is None:
         inpaint = load_lama()
-    res = build_plate(photo, inst_set.removal(False), seg, room, depth, inpaint, redetect, seed, max_side)
-    if res.quality is None or res.quality.ok:
-        return res
-    first_reasons = list(res.quality.reasons)
-    if any(i.kind == "planejado" for i in inst_set.instances):
-        res2 = build_plate(photo, inst_set.removal(True), seg, room, depth, inpaint, redetect, seed, max_side)
-        res2.kept_builtins = True
-        res2.warnings.append("sala crua reprovada (" + "; ".join(first_reasons) + "): planejados mantidos na foto")
-        # as duas reprovadas têm a nota limitada a 59: compara pela nota sem teto e pelo nº de motivos
-        rank = lambda q: (q.ok, -len(q.reasons), q.raw_score if q.raw_score is not None else q.score)
-        if rank(res2.quality) >= rank(res.quality):
-            res = res2
-    if not res.quality.ok:
-        res.warnings.append("a sala vazia ficou abaixo da qualidade mínima (" + "; ".join(res.quality.reasons)
-                            + "): use o modo A ou envie outra foto")
-    return res
+    attempts: list[dict] = []
+
+    def run(name: str, keep: bool, strategy: str, dil: float) -> PlateResult:
+        t0 = time.perf_counter()
+        r = build_plate(photo, inst_set.removal(keep), seg, room, depth, inpaint, redetect, seed, max_side,
+                        strategy=strategy, core_dilate=dil)
+        r.kept_builtins = keep
+        r.info["estrategia_portao"] = name
+        q = r.quality
+        attempts.append({"estrategia": name, "planejados_mantidos": keep, "metodo": strategy,
+                         "dilatacao_nucleo": round(dil, 4),
+                         "nota": None if q is None else round(q.score, 1),
+                         "nota_sem_teto": None if q is None or q.raw_score is None else round(q.raw_score, 1),
+                         "aprovada": None if q is None else q.ok, "motivos": [] if q is None else list(q.reasons),
+                         "area_gerada_pct": round(100 * float(r.mask.mean()), 2),
+                         "tempo_s": round(time.perf_counter() - t0, 2)})
+        if on_attempt is not None:
+            on_attempt(name, r)
+        return r
+
+    # as reprovadas têm a nota limitada a 59: compara pela aprovação, pela área gerada dentro do limite (a máscara
+    # larga não pode "ganhar" trocando uma costura por uma sala quase toda inventada), nº de motivos e nota sem teto
+    rank = lambda r: (r.quality.ok, r.quality.area_generated <= LIMITS["area_gerada_max"],  # noqa: E731
+                      -len(r.quality.reasons),
+                      r.quality.raw_score if r.quality.raw_score is not None else r.quality.score)
+    best = run("crua_por_plano", False, "planos", CORE_DILATE)
+    if best.quality is not None and not best.quality.ok:
+        first_reasons = list(best.quality.reasons)
+        if any(i.kind == "planejado" for i in inst_set.instances):
+            r2 = run("planejados_mantidos", True, "planos", CORE_DILATE)
+            r2.warnings.append("sala crua reprovada (" + "; ".join(first_reasons) + "): planejados mantidos na foto")
+            if rank(r2) >= rank(best):
+                best = r2
+        # só a área grande reprovou: LaMa na imagem não muda a área e a máscara larga só a aumenta
+        area_only = all(r.startswith("área reconstruída") for r in best.quality.reasons)
+        if alternatives and not best.quality.ok and not area_only:
+            keep = best.kept_builtins
+            for name, strategy, dil in (("lama_imagem", "imagem", CORE_DILATE),
+                                        ("mascara_ampla", "planos", CORE_DILATE * GATE_WIDE_DILATE)):
+                r = run(name, keep, strategy, dil)
+                if rank(r) > rank(best):
+                    r.warnings.extend(w for w in best.warnings if w not in r.warnings and "planejados" in w)
+                    best = r
+                if best.quality.ok:
+                    break
+        if best.quality.ok and best.info["estrategia_portao"] != "crua_por_plano":
+            best.warnings.append(f"sala vazia aprovada na tentativa \"{best.info['estrategia_portao']}\" "
+                                 f"(a primeira reprovou: {'; '.join(first_reasons)})")
+    best.info["tentativas"] = attempts
+    if best.quality is not None and not best.quality.ok:
+        best.warnings.append("a sala vazia ficou abaixo da qualidade mínima (" + "; ".join(best.quality.reasons)
+                             + "): use o modo A ou envie outra foto")
+    return best

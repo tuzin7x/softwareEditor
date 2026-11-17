@@ -78,6 +78,17 @@ def _fake_analysis(monkeypatch, tmp_path):
 
     monkeypatch.setattr(geometry, "estimate_geometry", fake_geometry)
     monkeypatch.setattr(segmentation, "segment", fake_segment)
+
+    def fake_segment_panoptic(rgb8, device, use_fp16, timings):    # OneFormer semântico + panóptico (PT-V3-8)
+        from mobilia import pipeline
+        from mobilia.removal.instances import PanopticResult
+
+        seg = fake_segment(rgb8, timings=timings)
+        h, w = rgb8.shape[:2]
+        return seg, PanopticResult(np.zeros((h, w), np.uint8), np.zeros((0, 4)))
+
+    from mobilia import pipeline as _pl
+    monkeypatch.setattr(_pl, "_segment_panoptic", fake_segment_panoptic)
     monkeypatch.setattr(room_mod, "build_room_model", lambda geo, seg, rgb: (room, {"grid": grid}))
     def fake_ensure_texture(tex_id, cache_dir, res="1k", retries=4):     # textura CC0 do tapete: sem rede no teste
         base = tmp_path / "assets" / "textures" / tex_id
@@ -106,6 +117,9 @@ def test_fast_pipeline_telemetry(tmp_path, monkeypatch):
     rep = json.loads(Path(res.report_path).read_text(encoding="utf-8"))
     # narrativa de designer (PT12): no relatório (para a interface) e no registro do motor
     assert rep["narrativa"] and rep["narrativa"] == rep["layout"]["notes"]
+    # PT-V3-8: foto vazia vai sozinha para o modo A (motor v2), anunciado à interface
+    assert rep["modo"]["modo"] == "A" and not rep["modo"]["forcado"]
+    assert [e["mode"] for e in events if e.get("event") == "mode"] == ["A"]
     assert "pé-direito" in rep["narrativa"][0]
     assert any(e.get("event") == "log" and str(e.get("message", "")).startswith("Designer: ") for e in events)
     t = rep["tempos_s"]

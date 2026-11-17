@@ -25,6 +25,7 @@ QUEUE_FRAMES = 4          # quadros em trânsito entre a composição e os FFmpe
 # piso de PSNR do 1º/último quadro do MP4 decodificado contra placa/foto. x264/NVENC normais dão 45–50 dB; abaixo
 # disto o codificador estragou o vídeo (matriz de cor errada, quadro verde/preto, deslocamento) e o MP4 não sai.
 MIN_PSNR_MP4 = 30.0
+PROGRESS_EVERY = 12
 
 
 class _Sink(threading.Thread):
@@ -61,12 +62,13 @@ class _Sink(threading.Thread):
 def render_mode_b(stack, ch, photo: np.ndarray, removal_mask: np.ndarray, out_mp4: str | Path | None,
                   audit_mkv: str | Path | None = None, backend: str | None = None, gpu: bool | None = None,
                   settings: E.EncodeSettings | None = None, choreo_stats: dict | None = None,
-                  check_mp4: bool = True, log_dir: str | Path | None = None) -> dict:
+                  check_mp4: bool = True, log_dir: str | Path | None = None, progress=None) -> dict:
     """Compõe, verifica e codifica o vídeo do modo B. Devolve o relatório (tempos, codificador, verificação).
 
     ``out_mp4`` None = só compõe e verifica (medição). ``gpu`` None = usa NVENC se o compositor está em CUDA.
     ``choreo_stats`` (de ``choreo.verify``) entra como regra 5. Levanta :class:`ModeBVerificationError` ou
-    ``RuntimeError`` sem deixar MP4/MKV no disco."""
+    ``RuntimeError`` sem deixar MP4/MKV no disco. ``progress(feitos, total)`` (opcional) é chamado a cada
+    :data:`PROGRESS_EVERY` quadros (barra da interface)."""
     H, W = stack.photo_shape
     if (out_mp4 is not None or audit_mkv is not None) and (H % 2 or W % 2):
         raise ValueError(f"o vídeo precisa de largura e altura pares (camadas em {W}×{H}); "
@@ -109,6 +111,8 @@ def render_mode_b(stack, ch, photo: np.ndarray, removal_mask: np.ndarray, out_mp
             if sink:
                 sink.put(fr)
             n += 1
+            if progress is not None and n % PROGRESS_EVERY == 0:
+                progress(n, ch.n_frames)
         rep = ver.finish(choreo_stats)
         if sink:
             sink.q.put(None)

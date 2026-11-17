@@ -9,7 +9,11 @@ Eventos (um objeto JSON por linha, campo "event"):
   {"event": "progress", "stage": "analise", "fraction": 0.12, "message": "..."}
   {"event": "preview", "path": "C:/.../preview.jpg"}           # imagem para mostrar na UI
   {"event": "log", "level": "info", "message": "..."}
-  {"event": "done", "output": "C:/.../video.mp4", "report": "C:/.../report.json"}
+  {"event": "mode", "mode": "B", "reason": "...", "stages": [["preparo", "Preparando a foto"], ...]}
+  {"event": "done", "output": "C:/.../video.mp4", "report": "C:/.../report.json", "mode": "B",
+   "warning": "..." | null, "gate": {...} | null}
+  # modo B com a sala vazia reprovada pelo portão de qualidade (sem ``aceitar_placa_fraca``): "output" vem null,
+  # "warning" explica o motivo e a interface oferece gerar mesmo assim, usar o modo A ou trocar de foto.
   {"event": "error", "message": "...", "detail": "traceback"}
 """
 from __future__ import annotations
@@ -41,6 +45,18 @@ STAGES: list[tuple[str, str, float]] = [
     ("video", "Gerando o MP4", 0.04),
 ]
 
+# Etapas do modo B (foto mobiliada, PLANO_V3 §3): sem layout/3D; o motor troca a lista com o evento "mode"
+STAGES_B: list[tuple[str, str, float]] = [
+    ("preparo", "Preparando a foto", 0.02),
+    ("analise", "Analisando profundidade, paredes e piso", 0.20),
+    ("pecas", "Separando os móveis da foto, peça por peça", 0.10),
+    ("sala_vazia", "Montando a sala vazia (por trás, não aparece no vídeo)", 0.40),
+    ("camadas", "Recortando os móveis reais e planejando a entrada", 0.08),
+    ("video", "Compondo, verificando e gerando o MP4", 0.20),
+]
+
+MODES = ("auto", "A", "B")
+
 
 @dataclass
 class JobRequest:
@@ -50,10 +66,17 @@ class JobRequest:
     quality: str = "auto"          # auto | previa | final
     work_dir: str | None = None    # pasta do trabalho (intermediários); padrão: DATA_DIR/jobs/<id>
     seed: int = 7
+    # "auto" = detectado pela foto (vazia -> A, mobiliada -> B); "A"/"B" = escolha manual (só a tela de aviso
+    # do portão de qualidade oferece; a tela inicial pede apenas o tipo de ambiente)
+    mode: str = "auto"
+    # modo B: gera o vídeo mesmo com a sala vazia reprovada pelo portão (o usuário pediu, com aviso no relatório)
+    accept_weak_plate: bool = False
 
     def validate(self) -> None:
         if self.room_type not in ROOM_TYPES:
             raise ValueError(f"Tipo de ambiente inválido: {self.room_type}")
+        if self.mode not in MODES:
+            raise ValueError(f"Modo inválido: {self.mode} (use auto, A ou B)")
         if not Path(self.photo_path).is_file():
             raise FileNotFoundError(f"Foto não encontrada: {self.photo_path}")
 
@@ -64,6 +87,9 @@ class JobResult:
     report_path: str
     work_dir: str
     timings: dict = field(default_factory=dict)
+    mode: str = "A"
+    warning: str | None = None       # aviso em português para a tela de resultado (portão de qualidade)
+    gate: dict | None = None         # resumo do portão do modo B (aprovada, nota, estratégia)
 
 
 class ProgressEmitter:
@@ -76,9 +102,19 @@ class ProgressEmitter:
         self.stream = stream
         self.callback = callback
         self._lock = threading.RLock()       # o callback pode emitir de novo
-        self._weights = {k: w for k, _, w in STAGES}
-        self._order = [k for k, _, _ in STAGES]
-        self._labels = {k: label for k, label, _ in STAGES}
+        self._set_stages(STAGES)
+
+    def _set_stages(self, stages) -> None:
+        self._weights = {k: w for k, _, w in stages}
+        self._order = [k for k, _, _ in stages]
+        self._labels = {k: label for k, label, _ in stages}
+
+    def mode(self, mode: str, reason: str = "") -> None:
+        """Anuncia o modo escolhido (A ou B) e troca a lista de etapas do progresso."""
+        stages = STAGES_B if mode == "B" else STAGES
+        self._set_stages(stages)
+        self._emit({"event": "mode", "mode": mode, "reason": reason,
+                    "stages": [[k, label] for k, label, _ in stages]})
 
     def _emit(self, ev: dict) -> None:
         with self._lock:
@@ -110,8 +146,9 @@ class ProgressEmitter:
         self._emit({"event": "log", "level": level, "message": message})
 
     def done(self, result: JobResult) -> None:
-        self._emit({"event": "done", "output": result.output_path, "report": result.report_path,
-                    "work_dir": result.work_dir})
+        self._emit({"event": "done", "output": result.output_path or None, "report": result.report_path,
+                    "work_dir": result.work_dir, "mode": result.mode, "warning": result.warning,
+                    "gate": result.gate})
 
     def error(self, message: str, detail: str = "") -> None:
         self._emit({"event": "error", "message": message, "detail": detail})

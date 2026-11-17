@@ -296,17 +296,35 @@ class StageList(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
         self._pix = {s: theme.status_pixmap(s) for s in ("pending", "current", "done")}
+        self._lay = lay
         self.rows = {}
         self.marks = {}
-        for key, label, _ in STAGES:
+        self.order: list[str] = []
+        self.set_stages([(k, label) for k, label, _ in STAGES])
+
+    def set_stages(self, stages) -> None:
+        """Troca a lista de etapas (o motor anuncia o modo B, que tem etapas próprias)."""
+        stages = [(str(k), str(label)) for k, label in stages]
+        if [k for k, _ in stages] == self.order and all(self.rows[k][1] == lb for k, lb in stages):
+            return
+        while self._lay.count():
+            it = self._lay.takeAt(0)
+            sub = it.layout()
+            if sub is not None:
+                while sub.count():
+                    w = sub.takeAt(0).widget()
+                    if w is not None:
+                        w.deleteLater()
+        self.rows, self.marks = {}, {}
+        for key, label in stages:
             row = QHBoxLayout(); row.setSpacing(12)
             mark = QLabel(); mark.setFixedSize(18, 18); mark.setPixmap(self._pix["pending"])
             lb = QLabel(label); lb.setObjectName("muted")
             row.addWidget(mark); row.addWidget(lb, 1)
-            lay.addLayout(row)
+            self._lay.addLayout(row)
             self.rows[key] = (lb, label)
             self.marks[key] = mark
-        self.order = [k for k, _, _ in STAGES]
+        self.order = [k for k, _ in stages]
         self._idx = -1
         self.reset()
 
@@ -426,6 +444,8 @@ class MainWindow(QMainWindow):
         self.runner.forecast.connect(self._on_forecast)
         self.runner.preview.connect(self._on_preview)
         self.runner.finished.connect(self._on_finished)
+        self.runner.mode.connect(self._on_mode)
+        self.last_request: JobRequest | None = None
         self.started_at = 0.0
         self.last_output: str | None = None
         self.last_job: QueuedJob | None = None
@@ -527,7 +547,9 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(0)
         self.step_photo = StepHeader("01", "FOTO DO AMBIENTE")
         self.btn_import = QPushButton("  Importar foto…")
-        self.btn_import.setToolTip("Escolher a foto do ambiente vazio (JPG, PNG, WEBP, TIFF ou HEIC)")
+        self.btn_import.setToolTip("Escolher a foto do ambiente, vazio ou mobiliado (JPG, PNG, WEBP, TIFF ou HEIC). "
+                                   "O 7xAi detecta sozinho: vazio recebe móveis; mobiliado começa vazio e os "
+                                   "próprios móveis da foto voltam um a um")
         self.btn_import.setIcon(theme.line_icon("photo", 16, theme.TEXT_2)); self.btn_import.setIconSize(QSize(16, 16))
         self.btn_import.clicked.connect(lambda: self.drop.mousePressEvent(None))
         self.photo_label = QLabel("Nenhuma foto selecionada"); self.photo_label.setObjectName("hint")
@@ -613,9 +635,12 @@ class MainWindow(QMainWindow):
         sl = QHBoxLayout(seal); sl.setContentsMargins(12, 11, 12, 11); sl.setSpacing(10)
         sico = QLabel(); sico.setPixmap(theme.line_icon("check", 16, theme.ACCENT_HI).pixmap(16, 16))
         sico.setAlignment(Qt.AlignTop); sico.setFixedWidth(16)
-        stext = QLabel("Fora dos móveis e das sombras, a sua foto foi preservada pixel a pixel "
-                       "(verificado em cada quadro).")
+        stext = QLabel(self.SEAL_A)
         stext.setObjectName("seal"); stext.setWordWrap(True)
+        self.seal_text = stext
+        # aviso do portão de qualidade do modo B (vídeo gerado a pedido com a sala vazia reprovada)
+        self.result_warning = QLabel(""); self.result_warning.setObjectName("notice")
+        self.result_warning.setWordWrap(True); self.result_warning.hide()
         sl.addWidget(sico); sl.addWidget(stext, 1)
         # narrativa de designer (PT12): por que cada peça foi escolhida e onde ficou
         self.notes_title = _tracked("ESCOLHAS DO DESIGNER")
@@ -648,7 +673,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(head); g(12)
         lay.addWidget(self.result_title); g(8)
         lay.addWidget(self.result_info); lay.addSpacing(4); lay.addWidget(self.result_meta)
-        g(16); lay.addWidget(seal)
+        g(16); lay.addWidget(self.result_warning); lay.addWidget(seal)
         # escolhas do designer + tempos numa única área rolável: nada é cortado nem sobreposto
         details = QWidget(); details.setObjectName("details")
         dl = QVBoxLayout(details); dl.setContentsMargins(0, 0, 6, 0); dl.setSpacing(0)
@@ -670,6 +695,12 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.btn_new)
         self._cards.append(lay)
         return w
+
+    SEAL_A = ("Fora dos móveis e das sombras, a sua foto foi preservada pixel a pixel "
+              "(verificado em cada quadro).")
+    SEAL_B = ("O vídeo termina idêntico à sua foto, na resolução do vídeo (verificado byte a byte). A sala vazia "
+              "do início foi reconstruída pelo 7xAi só onde havia móveis: é imagem ilustrativa.")
+    NOTES_A = "ESCOLHAS DO DESIGNER"
 
     def _set_pct(self, frac: float) -> None:
         self.pct.setText(f'<span style="font-size:60px; font-weight:300;">{frac * 100:.0f}</span>'
@@ -733,21 +764,25 @@ class MainWindow(QMainWindow):
         self.step_room.set_done(bool(self.room))
         self.step_quality.set_done(self.quality.currentIndex() >= 0)   # sempre há um padrão válido
         if not self.photo_path:
-            hint = "Comece importando a foto do ambiente vazio."
+            hint = "Comece importando a foto do ambiente (vazio ou mobiliado)."
         elif not self.room:
             hint = "Agora escolha o tipo de ambiente."
         else:
             hint = "Tudo pronto. O vídeo é gerado aqui, na sua GPU."
         self.ready_hint.setText(hint)
 
-    def generate(self) -> None:
+    def generate(self, mode: str = "auto", accept_weak_plate: bool = False) -> None:
+        """Gera o vídeo. ``mode``/``accept_weak_plate`` só vêm da tela de aviso do portão de qualidade (a tela
+        inicial pede apenas a foto e o tipo de ambiente; o modo é detectado pela foto)."""
         if not (self.photo_path and self.room):
             return
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         work = runtime.runtime_paths().jobs_dir / f"{stamp}_{Path(self.photo_path).stem}"
         out = work / f"{Path(self.photo_path).stem}_{self.room}.mp4"
         req = JobRequest(self.photo_path, self.room, str(out), quality=self.quality.currentData(),
-                         work_dir=str(work))
+                         work_dir=str(work), mode=mode, accept_weak_plate=accept_weak_plate)
+        self.last_request = req
+        self.stages.set_stages([(k, label) for k, label, _ in STAGES])
         self.stages.reset(); self.bar.setValue(0); self._set_pct(0.0); self.msg.setText("Iniciando o motor…")
         self.elapsed.setText("")
         self.forecast.setText(""); self.forecast.hide()
@@ -832,6 +867,13 @@ class MainWindow(QMainWindow):
         self.bar.setValue(int(frac * 1000)); self._set_pct(frac)
         self.msg.setText(message); self.stages.set_current(stage)
 
+    def _on_mode(self, mode: str, stages: list) -> None:
+        if stages:
+            self.stages.set_stages(stages)
+        if mode == "B":
+            self.statusBar().showMessage("Foto mobiliada: o vídeo começa com a sala vazia e os móveis da própria "
+                                         "foto voltam um a um.", 10000)
+
     def _on_forecast(self, total_s: float, message: str) -> None:
         self.forecast.setText(message or f"Previsão: ≈ {int(round(total_s))} s no total")
         self.forecast.show()
@@ -862,6 +904,12 @@ class MainWindow(QMainWindow):
             self.result_times_note.setText(note); self.result_times_note.setVisible(bool(note))
             # altura mínima da tabela (linhas + folga do "Total"): a narrativa rola, os tempos não são cortados
             notes = self._designer_notes(job)
+            rep = self._report(job)
+            mode_b = (job.mode or rep.get("modo", {}).get("modo")) == "B"
+            self.seal_text.setText(self.SEAL_B if mode_b else self.SEAL_A)
+            self.notes_title.setText(rep.get("titulo_narrativa") or self.NOTES_A)
+            self.result_warning.setText(job.warning or rep.get("aviso") or "")
+            self.result_warning.setVisible(bool(job.warning or rep.get("aviso")))
             self.result_notes.setText("\n".join(f"•  {n}" for n in notes))
             for wdg in (self.notes_title, self._dgap_notes, self.result_notes, self._dgap_times):
                 wdg.setVisible(bool(notes))
@@ -870,10 +918,47 @@ class MainWindow(QMainWindow):
             self.video.play(job.output, poster)
             return
         self.left.setCurrentIndex(0); self.right.setCurrentIndex(0)
+        if job.status == "reprovado":
+            self._on_gate_rejected(job)
+            return
         if job.status == "cancelado":
             self.statusBar().showMessage("Geração cancelada.", 6000)
             return
         self.show_error(job.error or "Erro desconhecido.", job.detail)
+
+    # ------------------------------------------------------------------ portão de qualidade (modo B)
+    GATE_CHOICES = {"forcar": "Gerar mesmo assim", "modo_a": "Usar o modo sala vazia → mobiliada",
+                    "outra": "Escolher outra foto"}
+
+    def _on_gate_rejected(self, job: QueuedJob) -> None:
+        """Sala vazia reprovada: nenhum MP4 foi entregue. Mostra o aviso e as alternativas."""
+        choice = self.ask_gate_choice(job)
+        if choice == "forcar":
+            self.generate(mode="B", accept_weak_plate=True)
+        elif choice == "modo_a":
+            self.generate(mode="A")
+        elif choice == "outra":
+            self.new_photo()
+        else:
+            self.statusBar().showMessage("Nenhum vídeo gerado: a sala vazia não passou na verificação.", 10000)
+
+    def ask_gate_choice(self, job: QueuedJob) -> str | None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(APP_NAME)
+        box.setText("A sala vazia não ficou boa o suficiente.")
+        box.setInformativeText(job.warning or "A verificação automática reprovou a sala vazia do início do vídeo.")
+        buttons = {box.addButton(label, QMessageBox.ActionRole): key for key, label in self.GATE_CHOICES.items()}
+        box.addButton("Fechar", QMessageBox.RejectRole)
+        box.exec()
+        return buttons.get(box.clickedButton())
+
+    @staticmethod
+    def _report(job: QueuedJob) -> dict:
+        try:
+            return json.loads(Path(job.report).read_text(encoding="utf-8")) if job.report else {}
+        except (OSError, ValueError):
+            return {}
 
     @staticmethod
     def _times_text(job: QueuedJob) -> str:

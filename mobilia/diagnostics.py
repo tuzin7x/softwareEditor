@@ -104,6 +104,11 @@ SUMMARY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Preparação do 3D", ("blender_inicio", "blender_kernels", "cena_montagem", "calibracao")),
     ("Render dos quadros", ("render_final", "render_marcos", "render_dinamico", "blender_fim")),
     ("Composição e MP4", ("composicao", "codificacao", "verificacao", "relatorio")),
+    # modo B (foto mobiliada)
+    ("Peças da foto", ("pecas",)),
+    ("Sala vazia (portão de qualidade)", ("sala_vazia",)),
+    ("Camadas e coreografia", ("camadas",)),
+    ("Vídeo: composição, verificação e MP4", ("video",)),
 )
 
 

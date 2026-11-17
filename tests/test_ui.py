@@ -190,3 +190,60 @@ def test_layout_1280x720_compact_fits(app, win):
     assert win.btn_generate.isVisible() and bottom < win.statusBar().y()
     win.resize(1360, 820); app.processEvents()
     assert not win._compact
+
+
+def _furnished_copy(tmp_path, name):
+    import shutil
+    p = tmp_path / name
+    shutil.copyfile(FX, p)
+    return str(p)
+
+
+def test_mode_b_flow_shows_mode_b_stages_and_seal(app, win, tmp_path):
+    """PT-V3-8: o motor anuncia o modo B (etapas próprias) e a tela final troca o selo e o título da narrativa;
+    a tela inicial continua pedindo só a foto e o ambiente."""
+    win.load_photo(_furnished_copy(tmp_path, "sala_mobiliada.jpg")); win.select_room("sala"); app.processEvents()
+    win.generate()
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+    assert "sala_vazia" in win.stages.order and "render" not in win.stages.order
+    assert win.last_job.mode == "B" and win.last_request.mode == "auto"
+    assert "idêntico à sua foto" in win.seal_text.text() and "ilustrativa" in win.seal_text.text()
+    assert win.notes_title.text() == "O QUE O 7xAi FEZ"
+    assert not win.result_warning.isVisible()
+    # um novo trabalho volta à lista de etapas do modo A até o motor anunciar o modo
+    win.new_photo(); win.load_photo(str(FX)); win.generate()
+    assert "render" in win.stages.order
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+    assert win.seal_text.text() == win.SEAL_A
+
+
+def test_mode_b_gate_rejected_offers_choices(app, win, tmp_path, monkeypatch):
+    """Sala vazia reprovada: sem MP4; o aviso oferece gerar mesmo assim (com aviso na tela final), o modo A ou
+    outra foto."""
+    asked = []
+
+    def choose(self, job):
+        asked.append(job)
+        return "forcar" if len(asked) == 1 else None
+
+    monkeypatch.setattr("mobilia.ui.app.MainWindow.ask_gate_choice", choose)
+    win.load_photo(_furnished_copy(tmp_path, "sala_mobiliada_reprovada.jpg")); win.select_room("sala")
+    win.generate()
+    assert _wait(app, lambda: len(asked) == 1)
+    assert asked[0].status == "reprovado" and asked[0].output is None and "qualidade" in asked[0].warning
+    # "Gerar mesmo assim" refaz no modo B com o aceite explícito
+    assert win.last_request.mode == "B" and win.last_request.accept_weak_plate
+    assert "--aceitar-placa-fraca" in win.runner.command_for(win.last_request)
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+    assert win.result_warning.isVisible() and "a seu pedido" in win.result_warning.text()
+    _shot(win, "5_modo_b_com_aviso")
+
+
+def test_gate_choice_mode_a(app, win, tmp_path, monkeypatch):
+    monkeypatch.setattr("mobilia.ui.app.MainWindow.ask_gate_choice", lambda self, job: "modo_a")
+    win.load_photo(_furnished_copy(tmp_path, "sala_mobiliada_reprovada.jpg")); win.select_room("sala")
+    win.generate()
+    assert _wait(app, lambda: win.last_request is not None and win.last_request.mode == "A")
+    assert "--mode" in win.runner.command_for(win.last_request)
+    assert _wait(app, lambda: win.right.currentIndex() == 2)
+    assert win.last_job.mode == "A"

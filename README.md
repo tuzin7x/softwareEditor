@@ -1,8 +1,14 @@
 # 7xAi
 
-**7xAi** é um software Windows (`.exe`) que transforma **uma foto de um imóvel vazio** em um **vídeo cinematográfico
-de decoração virtual**: os móveis surgem e se montam progressivamente **dentro da foto original**, com
-a câmera travada. Tudo roda **localmente na sua GPU NVIDIA**, sem APIs pagas.
+**7xAi** é um software Windows (`.exe`) que transforma **uma foto de um imóvel** em um **vídeo cinematográfico
+de decoração**, com a câmera travada. Tudo roda **localmente na sua GPU NVIDIA**, sem APIs pagas. A interface
+pede só a foto e o tipo de ambiente; o modo é **detectado pela foto**:
+
+- **foto vazia (modo A):** móveis 3D surgem e se montam progressivamente **dentro da foto original**;
+- **foto mobiliada (modo B):** o vídeo começa com a **sala vazia** (montada por trás, não aparece a remoção) e os
+  **mesmos móveis da foto**, recortados dos pixels reais, entram um a um com animação até o vídeo terminar
+  **idêntico à foto**. Um **portão de qualidade** dá nota à sala vazia; se ela reprovar em todas as tentativas,
+  nenhum MP4 é entregue e a tela mostra o motivo, com as opções *gerar mesmo assim*, *modo A* ou *outra foto*.
 
 > **Regra absoluta:** fora da máscara de remoção ou de inserção, todo quadro mestre é byte a byte a foto.
 > **Modo A (foto vazia):** o vídeo começa na foto exata; só os móveis/decoração (e as sombras de contato
@@ -62,6 +68,9 @@ python -m mobilia.cli run --photo minha_sala.jpg --room sala --out sala_decorada
 
 Tipos de ambiente: `sala`, `quarto`, `cozinha`, `banheiro`, `escritorio`, `sala_jantar`.
 Qualidade: `--quality previa|final|auto` (auto = final na GPU, prévia na CPU).
+Modo: `--mode auto|A|B` (padrão `auto`: foto vazia → A, mobiliada → B). No modo B, `--aceitar-placa-fraca`
+gera o vídeo mesmo com a sala vazia reprovada pelo portão (o aviso fica no `report.json`). Com
+`MOBILIA_MODO_B_MKV=1` o modo B grava também `auditoria.mkv` (sem perdas) e confere cada quadro byte a byte.
 
 Para conferir o hardware no Windows sem instalar nada, use `scripts/diagnostico_hardware.ps1`.
 

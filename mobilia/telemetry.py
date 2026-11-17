@@ -37,9 +37,18 @@ ETAPAS: tuple[str, ...] = (
     "verificacao",       # 3 quadros do MP4 decodificados por seek + PSNR
     "relatorio",
 )
+# modo B (foto mobiliada, PLANO_V3 §3): sem layout/Blender; as etapas também particionam o total
+ETAPAS_B: tuple[str, ...] = (
+    "inicio_motor", "carga_foto", "analise", "download",
+    "pecas",             # instâncias de móveis (OneFormer panóptico já feito na análise + SAM 2.1)
+    "sala_vazia",        # placa vazia + portão de qualidade (todas as tentativas, com a nota)
+    "camadas",           # camadas RGBA da foto + coreografia + verificação de partes ocultas
+    "video",             # composição + verificação §3.5 em 100% dos quadros + MP4 (+ MKV de auditoria)
+    "relatorio",
+)
 ETAPAS_ANALISE: tuple[str, ...] = (
     "redimensionar", "geometria_carga", "geometria_inferencia", "segmentacao_carga",
-    "segmentacao_inferencia", "sala", "gravacao", "sol", "oclusores",
+    "segmentacao_inferencia", "sala", "gravacao", "modo", "sol", "oclusores",
 )
 # Variáveis de ambiente com o instante (time.time()) em que a interface pediu o trabalho e em
 # que lançou o processo do motor; sem elas o relógio começa na importação da CLI.
@@ -107,8 +116,8 @@ def value_total(v) -> float:
     return float(v or 0.0)
 
 
-def stages_sum(tempos: dict) -> float:
-    return float(sum(value_total(tempos.get(k, 0.0)) for k in ETAPAS))
+def stages_sum(tempos: dict, etapas: tuple[str, ...] = ETAPAS) -> float:
+    return float(sum(value_total(tempos.get(k, 0.0)) for k in etapas))
 
 
 # ============================================================================ VRAM (NVML)

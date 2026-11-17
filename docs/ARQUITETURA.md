@@ -31,7 +31,8 @@ foto decorada fora das máscaras e **não** move a câmera.
   vídeo); se não for, o trabalho aborta sem MP4. Fora da máscara de remoção, a placa vazia também é
   cópia byte a byte da foto. Se a verificação automática de qualidade reprovar a placa vazia (por
   exemplo, sobra de móvel, borrão grande ou linha parede/piso quebrada), o trabalho não entrega um
-  vídeo ruim: avisa o usuário e oferece o modo A ou uma nova foto.
+  vídeo ruim: avisa o usuário e oferece o modo A ou uma nova foto (ou, por escolha explícita dele,
+  gerar mesmo assim, com o aviso registrado no `report.json`).
 
 A "exatidão" vale nos quadros mestres e na resolução do vídeo: `load_photo` reduz uma única vez as
 fotos acima do limite do perfil (reamostragem, registrada no relatório), e o MP4 tem perda (abaixo).
@@ -330,6 +331,34 @@ após o movimento eles têm de cair fora do quadro ou sob outra peça presente).
 - **Tempo** (`scripts/medir_composicao_modo_b.py`, sala sintética de 6 peças, 1920×1440, CPU de 4 núcleos do
   ambiente de desenvolvimento, normalizado para 240 quadros): composição ≈ 3 s, verificação ≈ 2 s, total com
   x264 em paralelo ≈ 7,5 s (169 quadros reais, escala linear; 0,7 s fixo de preparo). Na RTX 5070 Laptop é **estimativa, não medido**: ver o relatório do PT-V3-7 no histórico.
+
+### 4.5 Integração do modo B (`pipeline.py`, `pipeline_b.py`, `jobs.py`, UI, PT-V3-8)
+
+- **Detecção do modo:** a análise roda o OneFormer nas tarefas semântica **e** panóptica numa carga só
+  (`analise.modo` no relatório); `removal.instances.detect_mode` decide A (vazia) ou B (mobiliada). O pedido
+  pode forçar (`JobRequest.mode`, `--mode`), mas a tela inicial só pede a foto e o ambiente: a escolha manual
+  só aparece na tela de aviso do portão. O motor anuncia o modo com o evento `mode` (etapas próprias do modo B
+  em `jobs.STAGES_B`; a interface troca a lista).
+- **Modo B** (`pipeline_b.run_mode_b`), tudo na resolução do vídeo (foto com lados pares, a mesma do último
+  quadro): segmentação/panóptico/geometria da análise reamostrados (vizinho mais próximo) → instâncias (+ SAM
+  2.1 se os pesos estão no disco) → **portão** → camadas → coreografia → `render_mode_b` (verificação §3.5 em
+  100% dos quadros) → MP4. Nada de layout nem Blender.
+- **Portão de qualidade** (`plate.build_plate_gated`), parando na 1ª aprovada: sala crua por plano → mantendo
+  os planejados (se há) → LaMa direto na imagem → máscara 2,5× mais larga. Fica a melhor (aprovada > menos
+  motivos > nota sem teto). Se só a área grande reprovou, as alternativas não rodam (não diminuem a área). A
+  nota usa o OneFormer de novo na placa (móvel que "voltou"); `MOBILIA_MODO_B_REDETECTAR=0` desliga (só
+  depuração). Ainda reprovada: **sem MP4**, evento `done` com `output: null` e `warning` em português; a
+  interface oferece *gerar mesmo assim* (`accept_weak_plate`, o vídeo sai com o aviso na tela final e no
+  relatório), *modo A* ou *outra foto*.
+- **`report.json` do modo B:** `modo` (motivo, medidas, forçado), `pixels_gerados.area_pct`, `pecas` (todas, com
+  solto/planejado), `pecas_no_video`, `pecas_no_fundo`, `semente`, `placa` (nota, por plano, linha parede/piso,
+  `tentativas`), `portao_qualidade`, `camadas`, `coreografia`, `verificacao_modo_b`, `video_modo_b`, `aviso`,
+  `video_entregue`, `narrativa` (tela final, em português) e `tempos_s` (`telemetry.ETAPAS_B`: `pecas`,
+  `sala_vazia`, `camadas`, `video`).
+- **Testes:** `tests/test_pipeline_mode_b.py` roda `run_job` ponta a ponta na CPU com as análises gravadas das
+  fixtures (Telea no lugar do LaMa nos rápidos; big-lama real no lento) e confere o MP4, o MKV de auditoria
+  (último quadro = foto byte a byte), o relatório, o portão (reprova sem MP4; aceite gera com aviso) e o
+  roteamento de foto vazia para o modo A.
 
 ## 5. Render 3D sobre a foto (validado com testes reais no Blender 5.3)
 

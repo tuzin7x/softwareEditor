@@ -365,6 +365,11 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
   - a UI só pede o tipo de ambiente;
   - **[GPU] total ≤ 120 s quente nas 2 fotos, medido na RTX 5070 Laptop do usuário**;
   - avaliação visual: a sala vazia sem invenções e a nota do crítico ≥ 7 na foto típica.
+- **Estado (PT-V3-8):** integrado (`pipeline_b.py`, ARQUITETURA §4.5). Validado na CPU: e2e rápido e com big-lama
+  real nas 2 fixtures (MP4 + MKV de auditoria, §3.5 em 100% dos quadros) e uma execução completa com todos os
+  modelos reais (MoGe-2, OneFormer, SAM 2.1, big-lama, OneFormer da nota). **O portão reprova as placas das 2
+  fixtures** (cor/costura de parede, móvel reencontrado, área > 70% na sala de sofás): sem MP4 por padrão, com
+  aviso. Não medidos: o tempo na RTX 5070 e a avaliação visual do crítico.
 
 ### PT-V3-9: Modo A com o motor novo
 - Passe Z do layout (Blender só Z), `gen/sdxl.py` em modo inserção (máscara = pegadas + sombras), 3 sementes + nota, hires pass nos móveis, recolocação por máscara, camadas com a foto vazia como placa, completamento SDXL da parte oculta só para peças que caem e fallback v2.

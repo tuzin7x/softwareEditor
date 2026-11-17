@@ -353,7 +353,28 @@ def main(argv):
     if "--fail" in argv or a.get("--room") == "banheiro":   # falha antes de criar a pasta do trabalho
         print(json.dumps({"event": "error", "message": "Falha simulada de teste", "detail": "Traceback..."}), flush=True)
         return 1
-    for stage, f in (("preparo", 0.02), ("analise", 0.2), ("layout", 0.25), ("render", 0.6), ("video", 1.0)):
+    # modo B simulado (PT-V3-8): pela foto "mobiliada" no nome ou pelo --mode B; "reprovada" no nome = portão reprova
+    photo_name = Path(a.get("--photo", "")).name
+    mode_b = a.get("--mode") == "B" or ("mobiliada" in photo_name and a.get("--mode") != "A")
+    if mode_b:
+        stages_b = [["preparo", "Preparando a foto"], ["analise", "Analisando"], ["pecas", "Separando os móveis"],
+                    ["sala_vazia", "Montando a sala vazia"], ["camadas", "Recortando"], ["video", "Gerando o MP4"]]
+        print(json.dumps({"event": "mode", "mode": "B", "reason": "foto mobiliada: teste", "stages": stages_b},
+                         ensure_ascii=False), flush=True)
+        if "reprovada" in photo_name and "--aceitar-placa-fraca" not in a:
+            work = Path(a["--work-dir"])
+            work.mkdir(parents=True, exist_ok=True)
+            rp = work / "report.json"
+            aviso = "A sala vazia do início do vídeo não passou na verificação automática de qualidade (teste)."
+            rp.write_text(json.dumps({"modo": {"modo": "B"}, "aviso": aviso, "video_entregue": False},
+                                     ensure_ascii=False), encoding="utf-8")
+            print(json.dumps({"event": "done", "output": None, "report": str(rp), "work_dir": str(work),
+                              "mode": "B", "warning": aviso, "gate": {"aprovada": False}}, ensure_ascii=False),
+                  flush=True)
+            return 0
+    stages = (("preparo", 0.02), ("analise", 0.2), ("sala_vazia", 0.5), ("video", 1.0)) if mode_b else \
+        (("preparo", 0.02), ("analise", 0.2), ("layout", 0.25), ("render", 0.6), ("video", 1.0))
+    for stage, f in stages:
         print(json.dumps({"event": "progress", "stage": stage, "fraction": f, "message": f"etapa {stage}"}), flush=True)
         if stage == "render":         # previsão do controle de orçamento (PT7), depois do quadro final
             print(json.dumps({"event": "forecast", "total_s": 100.0, "cabe": True,
@@ -369,8 +390,18 @@ def main(argv):
         work = Path(a["--work-dir"])
         report = str(_write_job_files(work, a["--photo"]))
     print(json.dumps({"event": "log", "level": "info", "message": "registro de teste"}), flush=True)
-    print(json.dumps({"event": "done", "output": out, "report": report,
-                      **({"work_dir": str(work)} if work else {})}), flush=True)
+    warning = None
+    if mode_b and work:
+        rep = json.loads(Path(report).read_text(encoding="utf-8"))
+        rep["modo"] = {"modo": "B"}
+        rep["titulo_narrativa"] = "O QUE O 7xAi FEZ"
+        rep["narrativa"] = ["3 peças da própria foto retiradas por trás e devolvidas uma a uma: sofa, rug, table."]
+        if "--aceitar-placa-fraca" in a:
+            warning = rep["aviso"] = "Vídeo gerado a seu pedido com a sala vazia abaixo da qualidade mínima (teste)."
+        Path(report).write_text(json.dumps(rep, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps({"event": "done", "output": out, "report": report, "mode": "B" if mode_b else "A",
+                      "warning": warning, **({"work_dir": str(work)} if work else {})}, ensure_ascii=False),
+          flush=True)
     return 0
 
 

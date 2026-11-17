@@ -47,12 +47,17 @@ def _cmd_run(a) -> int:
             print(f"[{ev['fraction'] * 100:5.1f}%] {ev['message']}", flush=True)
         elif ev["event"] in ("log", "error"):
             print(f"{ev['event'].upper()}: {ev['message']}", flush=True)
+        elif ev["event"] == "mode":
+            print(f"Modo {ev['mode']}: {ev.get('reason', '')}", flush=True)
         elif ev["event"] == "done":
-            print(f"Pronto: {ev['output']}", flush=True)
+            if ev.get("warning"):
+                print(f"AVISO: {ev['warning']}", flush=True)
+            print(f"Pronto: {ev['output']}" if ev.get("output") else "Nenhum vídeo entregue (veja o aviso).",
+                  flush=True)
 
     em = ProgressEmitter(stream=sys.stdout) if a.json else ProgressEmitter(callback=human)
     req = JobRequest(photo_path=a.photo, room_type=a.room, output_path=a.out, quality=a.quality,
-                     work_dir=a.work_dir, seed=a.seed)
+                     work_dir=a.work_dir, seed=a.seed, mode=a.mode, accept_weak_plate=a.aceitar_placa_fraca)
     try:
         req.validate()
         res = run_job(req, em, t_ref=env_time(ENV_T_INICIO) or T_IMPORT)
@@ -92,7 +97,8 @@ def _cmd_batch(a) -> int:
         em = ProgressEmitter(callback=lambda ev: ev["event"] == "error" and print("  ERRO:", ev["message"], flush=True))
         try:
             res = run_job(JobRequest(str(p), room, str(out), quality=a.quality, seed=a.seed), em)
-            results.append({"foto": p.name, "ambiente": room, "video": res.output_path, "ok": True})
+            results.append({"foto": p.name, "ambiente": room, "video": res.output_path or None, "modo": res.mode,
+                            "aviso": res.warning, "ok": bool(res.output_path)})
         except Exception as e:
             results.append({"foto": p.name, "ambiente": room, "erro": str(e), "ok": False})
     (dst / "lote.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -195,6 +201,10 @@ def main(argv=None) -> int:
     r.add_argument("--work-dir", default=None)
     r.add_argument("--seed", type=int, default=7)
     r.add_argument("--json", action="store_true", help="eventos de progresso em JSON (uso pela UI)")
+    r.add_argument("--mode", default="auto", choices=["auto", "A", "B"],
+                   help="auto (padrão): foto vazia -> A, foto mobiliada -> B; A/B força o modo")
+    r.add_argument("--aceitar-placa-fraca", action="store_true",
+                   help="modo B: gera o vídeo mesmo com a sala vazia reprovada pelo portão de qualidade")
     h = sub.add_parser("hardware", help="mostra GPU/VRAM detectadas e o perfil escolhido")
     h.add_argument("--json", action="store_true")
     an = sub.add_parser("analyze", help="só a análise da foto (debug)")

@@ -24,7 +24,7 @@ from ..telemetry import ENV_T_CLIQUE, ENV_T_INICIO
 @dataclass
 class QueuedJob:
     request: JobRequest
-    status: str = "na fila"          # na fila | executando | pronto | erro | cancelado
+    status: str = "na fila"          # na fila | executando | pronto | reprovado | erro | cancelado
     output: str | None = None
     error: str | None = None
     detail: str = ""
@@ -33,6 +33,8 @@ class QueuedJob:
     work_dir: str | None = None
     submitted_at: float = field(default_factory=time.time)   # clique em "Gerar" (tempo percebido)
     forecast_s: float | None = None  # previsão do tempo total (PT7), quando o render a calcula
+    mode: str | None = None          # "A" (sala vazia) | "B" (foto mobiliada), anunciado pelo motor
+    warning: str | None = None       # aviso do portão de qualidade do modo B (tela de resultado)
 
 
 class JobRunner(QObject):
@@ -42,6 +44,7 @@ class JobRunner(QObject):
     preview = Signal(str)                    # caminho de imagem
     log = Signal(str)
     forecast = Signal(float, str)            # previsão do tempo total (s, desde o clique), texto
+    mode = Signal(str, list)                 # modo escolhido pelo motor e a lista de etapas [(chave, rótulo)]
     finished = Signal(object)                # QueuedJob
     queue_changed = Signal()
 
@@ -86,6 +89,10 @@ class JobRunner(QObject):
                 "--quality", req.quality, "--seed", str(req.seed), "--json"]
         if req.work_dir:
             args += ["--work-dir", req.work_dir]
+        if req.mode != "auto":
+            args += ["--mode", req.mode]
+        if req.accept_weak_plate:
+            args.append("--aceitar-placa-fraca")
         return runtime.worker_command(args)
 
     def _run(self, job: QueuedJob) -> None:
@@ -136,8 +143,15 @@ class JobRunner(QObject):
         elif kind == "log":
             job.log.append(ev.get("message", ""))
             self.log.emit(ev.get("message", ""))
+        elif kind == "mode":
+            job.mode = ev.get("mode")
+            self.mode.emit(ev.get("mode", ""), [tuple(x) for x in ev.get("stages") or []])
         elif kind == "done":
-            job.status, job.output = "pronto", ev.get("output")
+            # modo B com a sala vazia reprovada: sem MP4, com aviso (a tela oferece as alternativas)
+            job.status = "pronto" if ev.get("output") else "reprovado"
+            job.output = ev.get("output")
+            job.warning = ev.get("warning")
+            job.mode = ev.get("mode") or job.mode
             job.report = ev.get("report") or job.report
             job.work_dir = ev.get("work_dir") or job.work_dir
         elif kind == "error":
