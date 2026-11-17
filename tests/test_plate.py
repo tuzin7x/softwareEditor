@@ -461,3 +461,43 @@ def test_gate_rejects_large_fill_without_measured_plane():
     s[150:210, 150:320] = True
     q3 = rp.assess(img, plate, s, np.where(s, rp.OTHER, box.label), groups, box)
     assert not any("geometria da sala" in t for t in q3.reasons), q3.reasons
+
+
+def test_fill_color_follows_light_gradient_not_whole_ring_mean():
+    """Robustez r1 (falsas recusas): a luz do piso cai para o fundo da sala e o buraco encosta na parede, então o
+    anel do piso fica quase todo do lado claro (frente). O preenchimento que segue a luz do lugar não destoa, embora a
+    média do anel inteiro puxe para o claro; uma cor errada por igual no mesmo buraco continua reprovando."""
+    room = _room()
+    img, groups, box = _render(room)
+    H, W = groups.shape
+    fl = box.label == rp.FLOOR
+    y0 = _wall_floor_row(box, W // 2)
+    ys = np.arange(H)[:, None].repeat(W, 1)
+    light = (np.clip((ys - y0) / (H - y0), 0, 1) * 90.0 - 45.0)[..., None]   # fundo escuro, frente clara
+    img = img.astype(np.float32)
+    img[fl] = (img + light)[fl]
+    img = np.clip(img, 0, 255).round().astype(np.uint8)
+    m = np.zeros((H, W), bool)
+    m[y0 - 40:y0 + 36, 200:300] = True                               # móvel encostado na parede de fundo
+    lab = box.label
+    plate = img.copy()                                               # preenchimento = a própria luz do lugar
+    q = rp.assess(img, plate, m, lab, groups, box)
+    s = q.per_plane["piso"]
+    assert s["preenchimento_global_de"] > rp.LIMITS["preenchimento_de_max"], s   # a média do anel engana
+    assert s["preenchimento_de"] < s["preenchimento_global_de"], s              # referência local
+    assert s["preenchimento_de"] <= rp.fill_de_limit(s["costura_de"], s["grao_log2"]), s   # costura boa relaxa
+    assert not any("destoa" in t for t in q.reasons), q.reasons
+    bad = img.copy()
+    sel = m & fl
+    bad[sel] = np.clip(bad[sel].astype(np.float32) + np.array([30.0, 0.0, -25.0]), 0, 255).astype(np.uint8)
+    qb = rp.assess(img, bad, m, lab, groups, box)
+    assert any("destoa no(a) piso" in t for t in qb.reasons), (qb.reasons, qb.per_plane)
+
+
+def test_fill_limit_relaxes_only_with_good_seam_and_grain():
+    lo, hi = rp.LIMITS["preenchimento_de_max"], rp.LIMITS["preenchimento_de_max_relaxado"]
+    assert rp.fill_de_limit(1.5, 0.1) == hi
+    assert rp.fill_de_limit(rp.LIMITS["costura_relaxa_de"], 0.1) == lo
+    assert lo < rp.fill_de_limit(3.5, 0.1) < hi
+    assert rp.fill_de_limit(1.5, 0.9) == lo                         # grão ruim não relaxa
+    assert rp.fill_de_limit(1.5, 0.1, relax=False) == lo           # mancha forte no resto da placa

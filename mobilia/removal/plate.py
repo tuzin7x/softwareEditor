@@ -85,7 +85,10 @@ LIMITS = {
     "grao_log2_max": 1.0,            # |log2(grão dentro / grão no anel)|
     "linha_px_max": 4.0,             # distância mediana da borda à linha parede/piso projetada (aceite: <= 3)
     "linha_continuidade_min": 0.5,   # fração dos pontos da linha (dentro da máscara) com borda achada
-    "preenchimento_de_max": 6.0,     # ΔE76 média do preenchimento x média do anel, por plano (aceite: <= 3)
+    "preenchimento_de_max": 6.0,     # ΔE76 preenchimento x anel (média global ou referência local), por plano
+    "preenchimento_de_max_relaxado": 9.0,   # ... quando a costura é ótima (<= 2) e o grão bom: gradiente de luz
+    "costura_relaxa_de": 4.5,        # costura a partir da qual o limite do preenchimento começa a subir
+    "grao_relaxa_log2": 0.6,         # |log2 grão| acima disto o limite do preenchimento não sobe
     "costura_sem_plano_max": 16.0,   # ΔE76 da costura do que não tem plano (vãos, protegidos, sobre bancadas)
     "area_gerada_max": 0.70,         # fração da foto reconstruída
     # geometria da sala não achada (HDR, retrato, piso todo coberto): quase todo o preenchimento fica "sem plano",
@@ -746,6 +749,29 @@ def _bands(mask: np.ndarray, width: int):
     return mask & (dist_in <= width), ~mask & (dist_out <= width)
 
 
+def _fill_local_de(lab: np.ndarray, sel: np.ndarray, ring: np.ndarray, diag: float) -> float:
+    """ΔE do preenchimento contra a cor **esperada no lugar**: o passa-baixa do anel do mesmo material estendido
+    para dentro do buraco (push-pull), e não a média do anel inteiro. Uma faixa de sol, a queda de luz para o fundo
+    ou um material escuro vizinho em um lado do anel puxam a média global, mas não a referência local de cada pixel.
+    Média de ‖passa-baixa(preenchimento) − referência‖ sobre o preenchimento: uma mancha no meio continua contando."""
+    s = max(4.0, 0.02 * diag)
+    ref = push_pull(_nblur(lab, ring, s), ring.astype(np.float32))
+    fl = _nblur(lab, sel, s)
+    return float(np.linalg.norm((fl - ref)[sel], axis=1).mean())
+
+
+def fill_de_limit(seam: float, grain_log2: float, relax: bool = True) -> float:
+    """Limite do ΔE do preenchimento conforme a costura: com a costura e o grão bons, a cor já casa com o anel na
+    borda e a diferença no meio é quase sempre gradiente de luz (sol, fundo da sala, sombra sob a bancada), então o
+    limite sobe de ``preenchimento_de_max`` (costura >= ``costura_relaxa_de``) até ``preenchimento_de_max_relaxado``
+    (costura <= 2). Grão ruim, ou ``relax=False`` (a placa tem mancha forte em outro lugar), não relaxa nada."""
+    lo, hi = LIMITS["preenchimento_de_max"], LIMITS["preenchimento_de_max_relaxado"]
+    if not relax or abs(grain_log2) > LIMITS["grao_relaxa_log2"]:
+        return lo
+    t = float(np.clip((LIMITS["costura_relaxa_de"] - seam) / (LIMITS["costura_relaxa_de"] - 2.0), 0.0, 1.0))
+    return lo + t * (hi - lo)
+
+
 def plane_stats(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.ndarray, groups: np.ndarray,
                 min_area: float = 0.002) -> dict:
     """ΔE de costura e do preenchimento e razão de grão por plano (piso, teto, cada parede)."""
@@ -780,11 +806,14 @@ def plane_stats(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: 
             continue
         seam = float(np.linalg.norm((lk - lf)[valid], axis=1).mean())
         rw = ring_w & same
-        fill = float(np.linalg.norm(lab_p[sel].mean(0) - lab_p[rw].mean(0))) if rw.sum() >= 30 else seam
+        fill_g = fill = float(np.linalg.norm(lab_p[sel].mean(0) - lab_p[rw].mean(0))) if rw.sum() >= 30 else seam
+        if rw.sum() >= 30:      # média global ou referência local, a menor (anel poluído só de um lado)
+            fill = min(fill_g, _fill_local_de(lab_p, sel, rw, diag))
         g_in = float(np.median(hp[sel])) + 0.3
         g_out = float(np.median(hp[rw if rw.sum() >= 30 else rout])) + 0.3
         name = LABEL_NAMES.get(int(L), f"parede{int(L)}")
         out[name] = {"area_px": int(sel.sum()), "costura_de": round(seam, 2), "preenchimento_de": round(fill, 2),
+                     "preenchimento_global_de": round(fill_g, 2),
                      "grao_log2": round(float(np.log2(g_in / g_out)), 2)}
     # o que não tem plano (vãos, protegidos, peças apoiadas em algo que fica): costura local contra o anel inteiro
     # (qualquer material), para que uma mancha ali também conte na nota
@@ -900,13 +929,16 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
             continue
         reasons.append(f"{name} preenchido sem referência visível do material ({100 * n / (H * W):.1f}% da foto)")
         terms.append(0.0)
+    # o limite da cor do preenchimento só relaxa se o que não tem plano não tem mancha forte (resto de móvel que a
+    # reconferência não pegou): senão uma tentativa com fantasma passaria antes da tentativa limpa
+    relax_fill = per.get("sem_plano", {}).get("costura_p90_de", 0.0) <= LIMITS["costura_sem_plano_max"]
     for name, s in per.items():
         if name == "sem_plano":
             if s["costura_de"] > LIMITS["costura_sem_plano_max"]:
                 reasons.append(f"mancha no preenchimento sem plano (ΔE {s['costura_de']:.1f})")
             terms.append(np.clip(1 - (s["costura_de"] - 4.0) / 12.0, 0, 1))
             continue
-        if s["preenchimento_de"] > LIMITS["preenchimento_de_max"]:
+        if s["preenchimento_de"] > fill_de_limit(s["costura_de"], s["grao_log2"], relax_fill):
             reasons.append(f"cor do preenchimento destoa no(a) {name} (ΔE {s['preenchimento_de']:.1f})")
         if s["costura_de"] > LIMITS["costura_de_max"]:
             reasons.append(f"costura visível no(a) {name} (ΔE {s['costura_de']:.1f})")
