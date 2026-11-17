@@ -253,27 +253,48 @@ class SearchView(QWidget):
 
     # ------------------------------------------------------------------------------------- fontes
     def refresh_sources(self) -> None:
-        prev = {k: c.isChecked() for k, (c, _) in self.source_rows.items()}
+        """Monta a lista de fontes; a disponibilidade (chave, índice local de CNPJ) é verificada numa tarefa em
+        segundo plano, porque envolve ler arquivos e o índice SQLite."""
+        prev = {k: c.isChecked() for k, (c, _) in self.source_rows.items() if c.isEnabled()}
+        known = dict(getattr(self, "_avail", {}))
         while self.sources_box.count():
             it = self.sources_box.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
         self.source_rows = {}
-        for sid, src in self.ctx.sources().items():
-            if sid == "brasilapi":
-                continue
-            ok, why = src.availability()
+        self._source_info: dict[str, QWidget] = {}
+        srcs = {sid: src for sid, src in self.ctx.sources().items() if sid != "brasilapi"}
+        for sid, src in srcs.items():
             box = QCheckBox(src.title)
-            box.setChecked(prev.get(sid, ok) and ok)
-            box.setEnabled(ok)
+            was_ok = known.get(sid, (False, ""))[0]
+            box.setEnabled(was_ok)
+            box.setChecked(was_ok and prev.get(sid, True))
             box.toggled.connect(lambda *_: self.update_estimate())
             w = QWidget(); wl = QVBoxLayout(w); wl.setContentsMargins(0, 0, 0, 0); wl.setSpacing(1)
             wl.addWidget(box)
-            info = style.label(f"{src.description}  ·  {why}", "caption", wrap=True)
+            info = style.label(f"{src.description}  ·  verificando…", "caption", wrap=True)
             info.setContentsMargins(26, 0, 0, 0)
             wl.addWidget(info)
             self.sources_box.addWidget(w)
             self.source_rows[sid] = (box, src)
+            self._source_info[sid] = info
+        self._avail_gen = getattr(self, "_avail_gen", 0) + 1
+        gen = self._avail_gen
+
+        def done(avail: dict) -> None:
+            if gen != self._avail_gen:
+                return
+            self._avail = avail
+            for sid, (ok, why) in avail.items():
+                box, src = self.source_rows[sid]
+                box.blockSignals(True)
+                box.setEnabled(ok)
+                box.setChecked(ok and prev.get(sid, True))   # fonte paga ainda pede confirmação ao pesquisar
+                box.blockSignals(False)
+                self._source_info[sid].setText(f"{src.description}  ·  {why}")
+            self.update_estimate()
+        self.ctx.run(lambda t: {sid: src.availability() for sid, src in srcs.items()}, name="lead-finder-sources",
+                     on_done=done)
         self.update_estimate()
 
     def build_query(self) -> SearchQuery:
@@ -426,7 +447,6 @@ class SearchView(QWidget):
                                                                     for k, v in summary.items()}}))
         self.ctx.status(f"Lead Finder: pesquisa concluída — {self.counts['novos']} nova(s) empresa(s).")
         self.ctx.leads_changed.emit()
-        self.refresh_sources()
 
     def _error(self, e) -> None:
         self.step.setText(friendly_error(e))

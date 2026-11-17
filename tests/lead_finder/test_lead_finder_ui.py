@@ -207,7 +207,8 @@ def test_search_runs_in_background_and_consolidates(page, qapp, transport):
     transport.add("POST", r"overpass-api\.de/api/interpreter", reply)
     view = page.views["search"]
     assert view.uf_buttons["SP"].isChecked() and view.kw_buttons["Imobiliária"].isChecked()
-    assert view.source_rows["osm"][0].isChecked() and not view.source_rows["google_places"][0].isEnabled()
+    assert wait_until(qapp, lambda: view.source_rows["osm"][0].isChecked())       # disponibilidade em 2º plano
+    assert not view.source_rows["google_places"][0].isEnabled()
     view.btn_search.click()
     assert wait_until(qapp, lambda: view.btn_search.isEnabled() and "Concluído" in view.step.text(), 15)
     assert threads and "MainThread" not in threads
@@ -224,6 +225,7 @@ def test_search_cancel(page, qapp, transport):
     gate = threading.Event()
     transport.add("POST", r"overpass-api\.de", lambda req: (gate.wait(10), (200, {"elements": []}))[1])
     view = page.views["search"]
+    assert wait_until(qapp, lambda: view.source_rows["osm"][0].isChecked())
     view.btn_search.click()
     assert wait_until(qapp, lambda: view.btn_cancel.isEnabled())
     view.btn_cancel.click()
@@ -292,7 +294,7 @@ def test_settings_keep_keys_out_of_settings_file(page, qapp):
     assert "AIzaFAKE" not in (base / "settings.json").read_text(encoding="utf-8")
     assert "AIzaFAKE" in (base / "secrets.json").read_text(encoding="utf-8")
     assert "AIza…000" in view.g_key_info.text() and view.g_key.text() == ""
-    assert page.views["search"].source_rows["google_places"][0].isEnabled()   # fonte liberada após salvar
+    assert wait_until(qapp, lambda: page.views["search"].source_rows["google_places"][0].isEnabled())
 
 
 def test_export_from_ui(page, qapp, tmp_path):
