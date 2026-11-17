@@ -370,6 +370,11 @@ Cada pacote tem testes de aceite. Os que precisam de GPU estão marcados **[GPU]
   modelos reais (MoGe-2, OneFormer, SAM 2.1, big-lama, OneFormer da nota). **O portão reprova as placas das 2
   fixtures** (cor/costura de parede, móvel reencontrado, área > 70% na sala de sofás): sem MP4 por padrão, com
   aviso. Não medidos: o tempo na RTX 5070 e a avaliação visual do crítico.
+  Revisão: em mais 6 fotos variadas do conjunto de teste (retrato, banheiro só com fixos, panorâmica, cama
+  lotada, loft com mesa na borda, cozinha quase vazia) o portão também reprovou todas (0/6), com defeitos reais
+  vistos a olho (fantasma da cama, mancha escura no piso, quadro inventado); fotos vazias foram para o modo A.
+  O big-lama dá o mesmo resultado na GPU, então **o modo B hoje quase nunca entrega por padrão**: a qualidade da
+  placa (PT-V3-4, SDXL) é o próximo gargalo, não o portão.
 
 ### PT-V3-9: Modo A com o motor novo
 - Passe Z do layout (Blender só Z), `gen/sdxl.py` em modo inserção (máscara = pegadas + sombras), 3 sementes + nota, hires pass nos móveis, recolocação por máscara, camadas com a foto vazia como placa, completamento SDXL da parte oculta só para peças que caem e fallback v2.
