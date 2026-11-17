@@ -4,10 +4,12 @@
 de decoração virtual**: os móveis surgem e se montam progressivamente **dentro da foto original**, com
 a câmera travada. Tudo roda **localmente na sua GPU NVIDIA**, sem APIs pagas.
 
-> **Regra absoluta:** a foto é uma placa de fundo imutável. Só os móveis/decoração (e as sombras de
-> contato que eles projetam) são adicionados, em camadas 3D independentes. Paredes, piso, janelas,
-> iluminação, cores, perspectiva e enquadramento não mudam. Isso é **verificado quadro a quadro**: fora
-> dos móveis e das sombras, os pixels saem idênticos aos da foto.
+> **Regra absoluta:** fora da máscara de remoção ou de inserção, todo quadro mestre é byte a byte a foto.
+> **Modo A (foto vazia):** o vídeo começa na foto exata; só os móveis/decoração (e as sombras de contato
+> que eles projetam) são adicionados, em camadas 3D independentes. **Modo B (foto mobiliada, V3):** o
+> software esvazia a sala por trás (a sala vazia contém pixels gerados por inpainting), os móveis reais
+> da própria foto voltam um a um, e o **último quadro é idêntico à foto**. Isso é **verificado quadro a
+> quadro**, e o relatório informa a área gerada. Detalhes em `docs/ARQUITETURA.md` §1.
 
 ## Como funciona (resumo)
 

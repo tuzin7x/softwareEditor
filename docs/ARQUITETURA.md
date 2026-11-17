@@ -5,15 +5,39 @@
 
 ## 1. Objetivo e regra absoluta
 
-Entrada: **uma foto** de um ambiente vazio + **tipo de ambiente** (sala, quarto, cozinha, banheiro,
-escritório, sala de jantar). Saída: **MP4** em que os móveis surgem e se montam progressivamente
-**dentro da foto original**, com câmera travada.
+O 7xAi tem dois modos, escolhidos **automaticamente** pela análise da foto (uma foto vazia vai
+sempre para o modo A):
 
-**Regra absoluta:** a foto é uma placa de fundo imutável. Nenhum pixel fora das regiões cobertas
-por móveis (e pelas sombras de contato que eles projetam) pode mudar. O software **não** gera uma
-nova foto decorada, **não** usa difusão/inpainting sobre a foto e **não** move a câmera.
+- **Modo A, "sala vazia → mobiliada"** (motor v2 atual): entrada é **uma foto** de um ambiente
+  vazio + **tipo de ambiente** (sala, quarto, cozinha, banheiro, escritório, sala de jantar). Saída:
+  **MP4** em que os móveis surgem e se montam progressivamente **dentro da foto original**, com
+  câmera travada.
+- **Modo B, "foto mobiliada"** (V3, ver [`PLANO_V3.md`](PLANO_V3.md) §3): entrada é uma foto de
+  um ambiente **mobiliado**. O software tira os móveis por trás (isso não aparece no vídeo). O vídeo
+  **começa na sala vazia** (uma placa gerada por inpainting), os **mesmos móveis reais da foto**
+  (camadas 2D recortadas dos pixels da própria foto; nunca 3D, nunca PNG de catálogo) entram um a um
+  com animação, e o vídeo **termina exatamente na foto original**. A câmera não se move.
 
-Como garantimos isso (e verificamos em todo quadro):
+**Regra absoluta (vale para os dois modos):** fora da máscara de remoção (modo B) ou de inserção
+(modo A), todo quadro mestre é **byte a byte** a foto. Pixels gerados só existem **dentro** dessas
+máscaras, e o `report.json` informa a área e a porcentagem deles. O software **não** gera uma nova
+foto decorada fora das máscaras e **não** move a câmera.
+
+- **Modo A (inalterado):** o quadro inicial é a foto exata. Não há difusão nem inpainting sobre a
+  foto: os pixels novos vêm só dos móveis 3D renderizados e das sombras de contato deles.
+- **Modo B:** os quadros com a sala vazia ou parcialmente vazia **contêm pixels gerados** (a placa
+  vazia, dentro da máscara de remoção ampliada para sombras e reflexos). Os móveis que entram são
+  pixels da própria foto, não gerados. O **quadro final é `np.array_equal` à foto** (na resolução do
+  vídeo); se não for, o trabalho aborta sem MP4. Fora da máscara de remoção, a placa vazia também é
+  cópia byte a byte da foto. Se a verificação automática de qualidade reprovar a placa vazia (por
+  exemplo, sobra de móvel, borrão grande ou linha parede/piso quebrada), o trabalho não entrega um
+  vídeo ruim: avisa o usuário e oferece o modo A ou uma nova foto.
+
+A "exatidão" vale nos quadros mestres e na resolução do vídeo: `load_photo` reduz uma única vez as
+fotos acima do limite do perfil (reamostragem, registrada no relatório), e o MP4 tem perda (abaixo).
+A interface e o material de venda devem dizer exatamente isso.
+
+Como garantimos isso no **modo A** (e verificamos em todo quadro):
 
 1. Os móveis são **objetos 3D reais** renderizados em camadas independentes (RGBA pré-multiplicado).
 2. As sombras vêm do passe **Shadow Catcher** do Cycles: um fator multiplicativo `S` aplicado
@@ -25,6 +49,11 @@ Como garantimos isso (e verificamos em todo quadro):
    ser `np.array_equal` à foto. Se algum byte divergir, o trabalho aborta naquele quadro, sem MP4.
    O relatório final (`report.json`) registra quantos pixels mudaram por quadro.
 4. Quadros sem móveis visíveis (o início do vídeo) são cópias exatas da foto.
+
+No **modo B**, a mesma verificação independente confere: (a) fora da máscara de remoção, todo
+quadro é igual à foto; (b) o último quadro é igual à foto inteira; (c) cada camada de móvel só
+contém pixels da foto dentro da sua máscara; e o `report.json` registra a área gerada (pixels e %)
+da placa vazia e o resultado do controle de qualidade dela.
 
 > O MP4 (H.264/yuv420p) é um formato com perda. A garantia bit a bit vale para os **quadros mestres**
 > (compostos antes do encode). O encode usa CRF 14 com conversão RGB→YUV **BT.709 explícita**, e o

@@ -1,0 +1,12 @@
+{
+ "largura": 960,
+ "altura": 640,
+ "modelo_geometria": "Ruicheng/moge-2-vitl-normal",
+ "modelo_segmentacao": "shi-labs/oneformer_ade20k_swin_large",
+ "passo_geometria": 4,
+ "tempos_cpu_medidos": {
+  "geometria_cpu_s": 91.8,
+  "segmentacao_cpu_s": 76.7,
+  "panoptico_cpu_s": 6.1
+ }
+}
