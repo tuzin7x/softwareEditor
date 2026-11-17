@@ -420,7 +420,8 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
             "aceita_pelo_usuario": accepted, "aviso": warning}
     for w in res.warnings:
         em.log(w, "warning")
-    pieces = inst.removal(res.kept_builtins)
+    beyond = set(res.info.get("pecas_alem_da_abertura") or [])
+    pieces = [p for p in inst.removal(res.kept_builtins) if p.id not in beyond]   # ficam na foto, não entram
     ri_ = res.info.get("refino_sdxl") or {}
     sdxl_rep.update(usado=bool(ri_.get("usado")), semente=ri_.get("semente"),
                     resultado=ri_.get("motivo"), sementes=ri_.get("sementes"),

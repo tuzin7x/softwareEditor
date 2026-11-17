@@ -49,7 +49,12 @@ def test_window_behind_furniture_is_protected_in_every_strategy(strategy):
                          strategy="planos", assess_quality=False)
     prot = res.mask & (res.labels == rp.PROTECTED)
     assert prot.sum() > 500
-    assert np.array_equal(prot, res.mask & (ref.labels == rp.PROTECTED))
+    if strategy == "geometria":
+        # a geometria ainda estende a abertura pela parede logo abaixo dela (até o peitoril/chão, ver
+        # ``geofill.continue_openings``): contém os protegidos das outras, sempre perto da janela
+        assert not (res.mask & ref.mask & (ref.labels == rp.PROTECTED) & ~prot).any()
+    else:
+        assert np.array_equal(prot, res.mask & (ref.labels == rp.PROTECTED))
     assert (prot & ~rp._dil(win, 10)).sum() == 0          # só perto da janela
 
 

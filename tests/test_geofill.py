@@ -218,7 +218,7 @@ def test_protected_window_untouched_and_hidden_part_continues_glass_only_briefly
     prot = r.mask & (r.labels == rp.PROTECTED)
     assert prot.sum() > 300
     # o vidro escondido não desce pela parede inteira: depois de alguns pixels é parede
-    below = r.mask & (np.arange(H)[:, None] > 190 + int(gf.SHORT_OPENING * H) + 8) & (r.labels >= 0)
+    below = r.mask & (np.arange(H)[:, None] > 190 + int(0.03 * H) + 8) & (r.labels >= 0)
     if below.any():
         glass = np.abs(r.plate[below].astype(float) - (185, 215, 240)).max(1) < 20
         assert glass.mean() < 0.05
@@ -301,3 +301,161 @@ def test_fill_is_fast():
     t0 = time.perf_counter()
     _fill(photo, groups, room, [_piece(m, "solto", "sofa")])
     assert time.perf_counter() - t0 < 20.0
+
+
+# ------------------------------------------------------------------------------------------------ revisão r1
+G_CURT = GROUP_IDS["window_covering"]
+
+
+def _q(raw, ok=False, hard=0.0, n_reasons=1, area=0.4):
+    return SimpleNamespace(ok=ok, area_generated=area, raw_score=raw, score=0.6 * raw, hard=hard,
+                           reasons=["x"] * n_reasons)
+
+
+def test_rank_prefers_raw_score_over_rounded_hard_failure():
+    """A tentativa de nota 17,6 com uma falha dura forte ganha da de nota 0,5 com falha dura menor."""
+    a = _q(17.6, hard=0.9, n_reasons=3)
+    b = _q(0.5, hard=0.4, n_reasons=2)
+    assert rp.attempt_rank(a) > rp.attempt_rank(b)
+    # aprovada sempre ganha; e área fora do limite perde
+    assert rp.attempt_rank(_q(61, ok=True, n_reasons=0)) > rp.attempt_rank(_q(95, hard=0.0, n_reasons=1))
+    assert rp.attempt_rank(_q(30, area=0.5)) > rp.attempt_rank(_q(80, area=0.9))
+
+
+def test_piece_seen_through_doorway_stays_in_photo():
+    """Peça mais longe que a parede da caixa (cama do quarto ao lado, vista pela porta) fica na foto: sem plano
+    desta sala atrás dela, não há o que copiar. A peça encostada na parede (mesma profundidade) sai."""
+    room, box, truth, groups = _scene(_tiles(), _plain_wall())
+    depth = box.t.astype(np.float32).copy()
+    y_line = int(np.nonzero(box.label[:, 100] == rp.FLOOR)[0].min())
+    far = np.zeros((H, W), bool)
+    far[y_line - 80:y_line - 20, 60:140] = True          # na parede, mas 1,5× mais longe
+    depth[far] *= 1.5
+    near = np.zeros((H, W), bool)
+    near[y_line - 80:y_line - 20, 300:380] = True         # quadro/estante na parede
+    depth[near] *= 0.97
+    pf = SimpleNamespace(id=1, mask=far, alpha=far.astype(np.float32), kind="solto", label="bed")
+    pn = SimpleNamespace(id=2, mask=near, alpha=near.astype(np.float32), kind="solto", label="shelf")
+    assert rp.pieces_beyond_openings([pf, pn], box, depth, groups) == [1]
+    photo = truth.copy()
+    photo[far] = (140, 40, 60)
+    photo[near] = (70, 75, 95)
+    r = _fill(photo, groups, room, [pf, pn], depth=depth)
+    assert r.info["pecas_alem_da_abertura"] == [1]
+    assert not r.mask[far].any() and np.array_equal(r.plate[far], photo[far])
+    assert r.mask[near].all()
+
+
+def test_curtain_runs_straight_to_floor_line_and_table_in_front_of_it_goes():
+    """Cortina escondida por móvel: todas as colunas descem até a linha do piso (barra de baixo reta, sem
+    "estalactites"); o "outro" debaixo da cortina (piso da caixa além do visível) vira continuação da cortina."""
+    room, box, truth, groups = _scene(_tiles(), _plain_wall())
+    groups = groups.copy()
+    truth = truth.copy()
+    y_line = {x: int(np.nonzero(box.label[:, x] == rp.FLOOR)[0].min()) for x in range(W)}
+    cur = np.zeros((H, W), bool)
+    for x in range(160, 320):
+        cur[40:y_line[x], x] = True
+    groups[cur] = G_CURT
+    xs = np.arange(W)[None]
+    truth[cur] = np.stack([235 - 12 * (np.sin(xs / 6.0) > 0)] * 3, -1).repeat(H, 0)[cur]   # dobras verticais
+    m = np.zeros((H, W), bool)
+    m[150:y_line[240] + 40, 180:300] = True
+    photo = _paint_sofa(truth, m)
+    r = _fill(photo, groups, room, [_piece(m, "solto", "table")])
+    assert np.array_equal(r.plate[~r.mask], photo[~r.mask])
+    hid = r.mask & cur
+    # a cortina refeita tem as dobras da cortina (claras), em toda a altura até a linha do piso
+    for x in range(190, 290, 7):
+        col = r.plate[150:y_line[x] - 2, x].astype(float).mean(1)
+        assert col.min() > 200, (x, col.min())
+    assert (np.abs(r.plate[hid].astype(int) - (70, 75, 95)).max(1) < 30).mean() < 0.01
+
+
+def test_glass_seen_low_runs_to_floor_but_high_window_stops():
+    """Vidro visto até perto do chão (porta de correr/janela de piso a teto) continua até a linha do piso; janela
+    cuja parte de baixo vista fica bem acima de 0,85 m para na altura típica de peitoril (o resto é parede)."""
+    room, box, truth, groups = _scene(_tiles(), _plain_wall())
+    Z = box.Z
+    for z_bottom, to_floor in ((0.55, True), (1.35, False)):
+        g = groups.copy()
+        t = truth.copy()
+        win = np.zeros((H, W), bool)
+        win[:, 170:310] = (box.label[:, 170:310] == 0) & (Z[:, 170:310] > 0.0) & (Z[:, 170:310] < 2.2)
+        g[win] = G_WIN
+        t[win] = (185, 215, 240)
+        m = np.zeros((H, W), bool)
+        m[:, 140:340] = (box.label[:, 140:340] == 0) & (Z[:, 140:340] < z_bottom) | (box.label[:, 140:340] == rp.FLOOR)
+        m &= np.arange(H)[:, None] < int(0.95 * H)
+        photo = _paint_sofa(t, m)
+        r = _fill(photo, g, room, [_piece(m, "solto", "sofa")])
+        low = r.mask & win & (Z < 0.3)
+        glass = np.abs(r.plate[low].astype(float) - (185, 215, 240)).max(1) < 25
+        if to_floor:
+            assert glass.mean() > 0.9, glass.mean()
+        else:
+            assert glass.mean() < 0.05, glass.mean()
+
+
+def test_mask_hygiene_holes_and_resting_objects():
+    core = np.zeros((100, 100), bool)
+    core[20:80, 20:80] = True
+    core[45:50, 45:50] = False                             # etiqueta/vão no meio da peça
+    out = rp.fill_mask_holes(core, 100)
+    assert out[45:50, 45:50].all()
+    groups = np.full((100, 100), G_WALL, np.uint8)
+    groups[12:20, 40:48] = GROUP_IDS["furniture"]          # enfeite em cima da peça
+    groups[40:50, 5:15] = GROUP_IDS["furniture"]           # objeto ao lado (não apoiado): fica
+    rest = rp.resting_on_removed(out, groups, 500)
+    assert rest[12:20, 40:48].all() and not rest[40:50, 5:15].any()
+
+
+def test_wall_halo_grows_over_dark_frame_edge_only():
+    """Borda escura/sombra de quadro logo fora da máscara entra; a parede lisa em volta não."""
+    rng = np.random.default_rng(0)
+    h, w = 200, 300
+    photo = np.full((h, w, 3), 200, np.uint8)
+    photo = np.clip(photo + rng.normal(0, 1.0, photo.shape), 0, 255).astype(np.uint8)
+    m = np.zeros((h, w), bool)
+    m[60:120, 100:200] = True
+    halo = rp._dil(m, 4) & ~m
+    photo[halo] = 150
+    photo[m] = 40
+    groups = np.full((h, w), G_WALL, np.uint8)
+    label = np.zeros((h, w), np.int32)
+    p = SimpleNamespace(mask=m, alpha=m.astype(np.float32))
+    g = rp.wall_halo(photo, [p], groups, label, m)
+    assert g[halo].mean() > 0.95
+    assert not (g & ~rp._dil(m, 6)).any()
+
+
+def test_wall_fill_has_no_step_at_false_box_split():
+    """Uma parede real lisa com a caixa partida em duas: o campo de luz das paredes passa suave pela divisa falsa."""
+    _room_m, box, truth, groups = _scene(_tiles(), _plain_wall(0.0))
+    m = _sofa(box)
+    photo = _paint_sofa(truth, m)
+    lab = box.label.copy()
+    ctx = gf._Ctx(photo, m, groups, box, lab, np.random.default_rng(0), rp.MAX_SIDE, None)
+    split = lab == 0
+    lab[split & (np.arange(W)[None] >= W // 2)] = 1             # parede "1" falsa na metade direita
+    box.room.walls.append(SimpleNamespace(id=1))
+    try:
+        low = gf.wall_light_field(ctx)
+    finally:
+        box.room.walls.pop()
+    y = int(np.nonzero(m[:, W // 2])[0].mean())
+    row = low[y, W // 2 - 10:W // 2 + 10].mean(1)
+    assert np.abs(np.diff(row)).max() < 2.0, row
+
+
+def test_blind_wall_is_a_hard_veto():
+    """Parede escondida sem nada à vista (atrás de planejados de ponta a ponta): reprova como falha dura."""
+    room, box, truth, groups = _scene(_tiles(), _plain_wall())
+    m = _sofa(box)
+    photo = _paint_sofa(truth, m)
+    r = _fill(photo, groups, room, [_piece(m, "solto", "sofa")])
+    info = dict(r.info["planos"])
+    info["parede7"] = {"metodo": "sem_contexto", "visivel_px": 0, "area_px": 0, "buraco_px": int(0.05 * H * W)}
+    q = rp.assess(photo, r.plate, r.mask, r.labels, groups, box, None, info, core=r.core)
+    assert not q.ok and any("sem nenhuma referência" in x for x in q.reasons)
+    assert q.hard_detail.get("sem_referencia") == 1.0 and q.hard == 1.0

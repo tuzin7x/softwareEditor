@@ -125,7 +125,7 @@ e os móveis surgem e se montam progressivamente.
 >    (painel, friso): listras continuadas / retalhos presos à mesma altura. **Rodapé** medido por altura acima da
 >    linha corrigida e redesenhado reto (parede sem rodapé à vista usa o das outras).
 > 4. **Aberturas:** a janela/porta/cortina visível nunca muda; o pedaço escondido continua coluna a coluna os pixels
->    reais (cortina até o chão; vidro só alguns pixels, o resto é parede). **"Outro"** (vista por porta, sem plano):
+>    reais (cortina até o chão; vidro: ver a rodada 1 abaixo). **"Outro"** (vista por porta, sem plano):
 >    cor neutra do entorno, lisa. Sobras sem vista: continuação dos vizinhos já refeitos.
 > 5. **Acabamento:** membrana de tom na borda na escala da textura e grão casado com a foto, por plano.
 > 6. A passada 1 da máscara de efeitos também usa a geometria (o LaMa reproduzia o reflexo escuro do móvel no piso
@@ -136,6 +136,33 @@ e os móveis surgem e se montam progressivamente.
 > verticais nas divisas falsas; piso de porcelanato liso cuja grade não aparece o bastante sai liso, sem rejunte (o
 > portão acusa "material"); textura de parede com período curto sai mais suave que a real; os limites do portão
 > foram calibrados para o LaMa e reprovam várias placas da geometria que estão visualmente melhores.
+>
+> **Rodada 1 de correções (crítica de direção de arte, 17/11/2026):** regras gerais, sem ajuste por foto.
+>
+> - **Manter em vez de inventar:** peça vista por uma porta/abertura (profundidade do MoGe ≥ 1,07× a da parede da
+>   caixa em ≥ 60% da peça, ou sobre o "piso" da caixa além de todo piso visível desta sala) fica na foto e não entra
+>   no vídeo (`info["pecas_alem_da_abertura"]`): antes a cama do quarto ao lado virava uma silhueta lisa. Parede
+>   escondida sem nada dela à vista acima de 2% da foto é **veto** (falha dura `sem_referencia`), não penalidade.
+> - **Ordem das tentativas** (`attempt_rank`): aprovada > área no limite > nota sem teto, com falha dura e nº de
+>   motivos só como desempate de poucos pontos (uma tentativa de nota 0,5 ganhava de outra de 17,6).
+> - **Máscara:** buracos fechados até 0,5% da foto entram; objeto pequeno não detectado apoiado na peça que sai sai
+>   junto; sombra/oclusão/borda escura na parede logo fora da peça (acima da faixa do rodapé) cresce a máscara até
+>   1,5% da diagonal. Tudo volta no vídeo com a peça (região de efeito).
+> - **Aberturas por componente:** cortina desce até a linha do piso (barra reta); vidro desce até o piso se as
+>   colunas vizinhas mostram que ele vai até o chão, ou se o vidro visto já desce abaixo de 0,85 m (porta de
+>   correr/janela de piso a teto: o guarda-corpo continua refletindo a última faixa vista); senão para no peitoril
+>   medido ou na altura típica (0,9 m). "Outro"/parede com abertura visível logo acima são candidatos à abertura
+>   (mesinha na frente da cortina sai inteira).
+> - **Luz:** correção de borda do piso só escurece até 3% (reflexo/sombra do móvel não entra); na parede, oclusão
+>   acima do móvel não desce pelas colunas, o resíduo de borda se apaga em ~6% da diagonal para uma membrana com
+>   toda a borda, e o gradiente por parede passa suave pelas divisas falsas da caixa.
+> - **Textura de parede:** período horizontal só com ≥ 3 repetições visíveis (senão é quina); textura de escala
+>   média que corre na vertical (veio de madeira, ripas) vira "listras" mesmo sem período.
+>
+> Ainda falta: fatia da caixa com a linha do piso errada e nada visível para corrigi-la (degrau/placa abaixo da
+> linha); piso polido com reflexos (albedo × reflexo) e piso de porcelanato perto da câmera; reflexo de móvel no
+> piso polido fora da máscara; tapete completado por espelhamento no vídeo (caleidoscópio); restos de pés de
+> cadeira que a máscara perde.
 
 Ordem que o protótipo validou: C > B > A > D (`p_removal/out/cmp_all.jpg`).
 

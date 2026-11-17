@@ -100,6 +100,16 @@ KEEP_BUILTINS_FIRST = False
 # não tem modelo (sem planos não há o que copiar) ou com ``GATE_LAMA_ALTERNATIVES`` ligado.
 GEOMETRY_FIRST = True
 GATE_LAMA_ALTERNATIVES = False
+# peça vista por uma abertura: profundidade > BEYOND_RATIO × a da parede da caixa em >= BEYOND_FRAC da peça (a peça
+# encostada na parede fica em ~0,9-1,0; o ruído do MoGe é de poucos %)
+BEYOND_RATIO = 1.07
+BEYOND_FRAC = 0.6
+RANK_HARD_PTS = 3.0           # desempate do portão: falha dura (0..1) e cada motivo valem poucos pontos de nota
+RANK_REASON_PTS = 1.0
+RESTING_MAX = 0.002           # objeto não detectado apoiado na peça que sai: até 0,2% da foto sai junto
+HALO_MIN_Z = 0.30             # ... só acima da faixa do rodapé (m sobre o piso)
+HALO_CAP = 0.015              # sombra/borda escura de peça na parede: a máscara cresce até 1,5% da diagonal
+MASK_HOLE_MAX = 0.005          # buraco fechado da máscara até 0,5% da foto entra na máscara (estratégia geometria)
 
 LIMITS = {
     "costura_de_max": 6.0,           # ΔE76 entre faixa interna e anel, por plano (aceite PT-V3-3: <= 3)
@@ -114,6 +124,7 @@ LIMITS = {
                                      # (tapete grande removido: o piso de baixo é inventado, não iluminado)
     "costura_sem_plano_max": 16.0,   # ΔE76 da costura do que não tem plano (vãos, protegidos, sobre bancadas)
     "area_gerada_max": 0.70,         # fração da foto reconstruída
+    "sem_referencia_max": 0.02,      # parede sem nada à vista (geometria) acima disto da foto: veto
     # geometria da sala não achada (HDR, retrato, piso todo coberto): quase todo o preenchimento fica "sem plano",
     # que só tem o limite frouxo de costura. Área grande e maioria sem plano = não medido -> reprova
     "sem_plano_area_min": 0.30,      # área gerada (fração da foto) a partir da qual a regra vale
@@ -1057,6 +1068,18 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
             continue
         reasons.append(f"{name} preenchido sem referência visível do material ({100 * n / (H * W):.1f}% da foto)")
         lose("plano_sem_referencia", 1.0)
+    # sala pela geometria: parede escondida sem NADA dela à vista (atrás de planejados de ponta a ponta) não tem o que
+    # copiar; o que sobra ali é membrana + grão (superfície cinza sem estrutura). Veto: reprova como falha dura, e o
+    # portão prefere a tentativa que mantém os planejados (nada inventado)
+    blind = 0
+    for name, fi in (fill_info or {}).items():
+        if isinstance(fi, dict) and fi.get("metodo") in ("sem_contexto", "sem_vista"):
+            blind += int(fi.get("buraco_px", 0))
+    sem_ref = blind / float(H * W)
+    if sem_ref >= LIMITS["sem_referencia_max"]:
+        reasons.append(f"parede escondida sem nenhuma referência visível ({100 * sem_ref:.1f}% da foto): seria "
+                       "inventada")
+        lose("plano_sem_referencia", 1.0)
     # o limite da cor do preenchimento só relaxa se o que não tem plano não tem mancha forte (resto de móvel que a
     # reconferência não pegou): senão uma tentativa com fantasma passaria antes da tentativa limpa
     relax_fill = per.get("sem_plano", {}).get("costura_p90_de", 0.0) <= LIMITS["costura_sem_plano_max"]
@@ -1121,6 +1144,8 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         reasons.append(f"contorno da peça removida visível na sala vazia (severidade {cont:.2f})")
     hard_detail = {"nevoa": round(fog, 3), "fantasma": round(ghost, 3), "estrutura_nova": round(struct, 3),
                    "material": round(mat, 3), "contorno": round(cont, 3)}
+    if sem_ref >= LIMITS["sem_referencia_max"]:
+        hard_detail["sem_referencia"] = 1.0
     red, opn = [], []
     if redetect is not None:
         seg2, pan2 = redetect(plate)
@@ -1442,7 +1467,28 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
             warnings.append(f"modelo da sala inválido ({e}); sala vazia só no espaço da imagem")
     else:
         warnings.append("sem modelo da sala: sala vazia só no espaço da imagem (linhas podem entortar)")
+    beyond_ids: list = []
+    if strategy == "geometria" and box is not None and depth is not None:
+        # peça vista por uma porta/abertura (cama do quarto ao lado): não há plano desta sala atrás dela; tirá-la
+        # deixaria uma silhueta lisa inventada. Fica na foto (e no vídeo não entra: já está lá)
+        beyond_ids = pieces_beyond_openings(pieces, box, depth, groups)
+        if beyond_ids:
+            pieces = [p for p in pieces if getattr(p, "id", None) not in beyond_ids]
+            warnings.append(f"{len(beyond_ids)} peça(s) vista(s) por uma porta/abertura ficaram na foto")
+            if not pieces:
+                return PlateResult(photo.copy(), np.zeros((H, W), bool), np.zeros((H, W), bool),
+                                   np.zeros((H, W), bool), np.zeros((H, W), bool), np.zeros((H, W), bool),
+                                   np.full((H, W), OTHER, np.int32), None,
+                                   {"planos": {}, "tempos": {}, "pecas_alem_da_abertura": beyond_ids}, warnings)
     core = core_mask(pieces, (H, W), core_dilate)
+    holes = np.zeros((H, W), bool)
+    if strategy == "geometria":
+        core2 = fill_mask_holes(core, MASK_HOLE_MAX * H * W)
+        core2 |= resting_on_removed(core2, groups, RESTING_MAX * H * W)
+        if box is not None:
+            core2 |= wall_halo(photo, pieces, groups, box.label, core2, zmap=box.Z)
+        holes = core2 & ~core          # devolvidos com as peças (região de efeito), como sombra/reflexo
+        core = core2
     rug = rug_mask(seg, (H, W))
     cand = effect_candidates(pieces, groups, core)
     t["mascaras"] = time.perf_counter() - t0
@@ -1458,6 +1504,7 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
         plate1 = inpaint(photo, core | cand)            # passada 1 (barata): só para medir os efeitos
     t["passada1"] = time.perf_counter() - t0
     effect, shadow, light = verify_effects(photo, plate1, cand, core)
+    effect = effect | holes
     del plate1
     mask = core | _dil(effect, 3)
     t0 = time.perf_counter()
@@ -1490,8 +1537,136 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
         q = assess(photo, plate, mask, labels, groups, box, redetect, pinfo, core=core, rug=rug)
         t["nota"] = time.perf_counter() - t0
     return PlateResult(plate, mask, core, effect, shadow, light, labels, q,
-                       {"planos": pinfo, "tempos": t, "estrategia": strategy, "dilatacao_nucleo": core_dilate},
+                       {"planos": pinfo, "tempos": t, "estrategia": strategy, "dilatacao_nucleo": core_dilate,
+                        "pecas_alem_da_abertura": beyond_ids},
                        warnings)
+
+
+def attempt_rank(q: PlateQuality) -> tuple:
+    """Ordem das tentativas do portão: aprovada > área gerada no limite > nota sem teto, com as falhas duras e o
+    nº de motivos só como penalidade pequena (desempate dentro de poucos pontos). Antes a falha dura arredondada e
+    o nº de motivos vinham antes da nota: uma tentativa de nota 0,5 ganhava de outra de 17,6."""
+    raw = q.raw_score if q.raw_score is not None else q.score
+    return (q.ok, q.area_generated <= LIMITS["area_gerada_max"],
+            float(raw) - RANK_HARD_PTS * float(getattr(q, "hard", 0.0) or 0.0) - RANK_REASON_PTS * len(q.reasons))
+
+
+def pieces_beyond_openings(pieces: Sequence, box: RoomBox, depth: np.ndarray, groups: np.ndarray | None = None,
+                           ratio: float = BEYOND_RATIO, frac: float = BEYOND_FRAC) -> list:
+    """Ids das peças vistas **além** de uma parede da caixa (por uma porta ou abertura, em outro cômodo): a
+    profundidade do MoGe na maior parte da peça fica bem atrás do plano da parede que o raio atravessa. Não há
+    superfície desta sala atrás delas para copiar; ficam na foto (regra geral, sem ajuste por foto)."""
+    H, W = box.label.shape
+    dep = cv2.resize(depth.astype(np.float32), (W, H), interpolation=cv2.INTER_NEAREST) \
+        if depth.shape != (H, W) else depth.astype(np.float32)
+    wall = box.label >= 0
+    # piso da caixa além de todo o piso visível desta sala (caixa sem parede do fundo: o "piso" segue pela porta)
+    far_t = np.inf
+    if groups is not None and pieces:
+        allm = np.zeros((H, W), bool)
+        for p in pieces:
+            allm |= np.asarray(p.mask, bool)
+        vis = (box.label == FLOOR) & ~_dil(allm, 3) & (groups == G_FLOOR) & np.isfinite(box.t)
+        vis &= ~((dep > ratio * box.t) & np.isfinite(dep))          # piso visto pela porta não conta
+        if vis.sum() >= 200:
+            far_t = float(np.percentile(box.t[vis], 97)) * 1.08
+    out = []
+    for p in pieces:
+        m = np.asarray(p.mask, bool)
+        n = int(m.sum())
+        if n < 50:
+            continue
+        # sobre o piso da caixa além do piso visível, e a própria peça (profundidade) também lá longe
+        on_far = m & (box.label == FLOOR) & np.isfinite(box.t) & (box.t > far_t) & np.isfinite(dep) & (dep > far_t)
+        sel = m & wall & np.isfinite(dep) & (dep > 0) & np.isfinite(box.t)
+        if on_far.sum() >= frac * n:
+            out.append(getattr(p, "id", None))
+            continue
+        if sel.sum() < 0.6 * n:                    # a peça cai sobre o piso/teto da caixa: está nesta sala
+            continue
+        r = dep[sel] / np.maximum(box.t[sel], 1e-3)
+        if float(np.mean(r > ratio)) >= frac and float(np.median(r)) > ratio:
+            out.append(getattr(p, "id", None))
+    return [i for i in out if i is not None]
+
+
+def resting_on_removed(core: np.ndarray, groups: np.ndarray, max_area: float) -> np.ndarray:
+    """Objeto pequeno não detectado **apoiado** numa peça que sai (bola decorativa na mesinha, enfeite na
+    cômoda): componente pequena de material que não é superfície da sala nem abertura, com a base encostada na
+    máscara por baixo. Ficaria flutuando no ar da sala vazia; sai junto (volta com a peça)."""
+    surf = np.isin(groups, (G_FLOOR, G_WALL, G_CEIL) + G_PROTECTED + (GROUP_IDS["ceiling_fixture"],))
+    cand = ~core & ~surf
+    if not cand.any():
+        return np.zeros_like(core)
+    n, cc, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    below = np.zeros_like(core)
+    for k in range(1, 5):
+        below[:-k] |= core[k:]
+    out = np.zeros_like(core)
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if a > max_area or a < 15:
+            continue
+        comp = cc[y:y + h, x:x + w] == i
+        # base da componente: o pixel mais baixo de cada coluna
+        cols = np.nonzero(comp.any(0))[0]
+        bot = y + (comp.shape[0] - 1 - np.argmax(comp[::-1], axis=0))[cols]
+        if float(below[bot, x + cols].mean()) >= 0.5:
+            out[y:y + h, x:x + w] |= comp
+    return out
+
+
+def wall_halo(photo: np.ndarray, pieces: Sequence, groups: np.ndarray, box_label: np.ndarray, core: np.ndarray,
+              cap: float = HALO_CAP, k_grain: float = 3.0, min_dark: float = 6.0,
+              zmap: np.ndarray | None = None) -> np.ndarray:
+    """Sombra projetada, oclusão e borda escura (antisserrilhado) de peça na parede ou encostada nela (quadro,
+    espelho, sofá, estante), logo fora da máscara e só sobre a parede: a parede lisa no anel é prevista pela parede um pouco mais longe; o anel cresce enquanto fica
+    mais escuro que essa previsão (além de ``k_grain`` × grão), até ``cap`` × diagonal. Sem isso a parede lisa
+    refeita copiava a borda escura e o contorno do quadro (ou a faixa escura em cima do sofá) ficava desenhado na
+    sala vazia. O que entra volta no vídeo com a peça (região de efeito)."""
+    H, W = core.shape
+    diag = float(np.hypot(H, W))
+    capr = max(3, int(cap * diag))
+    lum = cv2.cvtColor(photo, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    wall = (groups == G_WALL) & (box_label >= 0)
+    if zmap is not None:                               # a faixa do rodapé é escura de propósito: nunca é sombra
+        wall &= ~(np.isfinite(zmap) & (zmap < HALO_MIN_Z))
+    out = np.zeros_like(core)
+    for p in pieces:
+        m = np.asarray(p.mask, bool)
+        if m.sum() < 100 or float((groups[_dil(m, 3) & ~m] == G_WALL).mean()) < 0.1:
+            continue                                   # só peça encostada na parede (quadro, sofá, estante)
+        near = _dil(m, capr) & ~core & wall
+        outer = _dil(m, 3 * capr) & ~_dil(m, 2 * capr) & wall & ~core
+        if outer.sum() < 50 or not near.any():
+            continue
+        ref = _nblur(lum, outer, max(3.0, capr))
+        hp = lum - cv2.GaussianBlur(lum, (0, 0), 1.0)
+        g = 1.4826 * float(np.median(np.abs(hp[outer]))) + 0.5
+        dark = near & (lum < ref - max(min_dark, k_grain * g))
+        # só o que está ligado à máscara (crescimento a partir da borda)
+        grown = core.copy()
+        for _ in range(capr):
+            nxt = grown | (_dil(grown, 1) & dark)
+            if nxt.sum() == grown.sum():
+                break
+            grown = nxt
+        out |= grown & ~core
+    return out
+
+
+def fill_mask_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
+    """Buracos fechados pequenos dentro da máscara (etiqueta, canto de tapete, vão entre pés) entram na máscara:
+    ilhas da foto no meio do preenchimento viram manchas soltas na sala vazia."""
+    inv = ~mask
+    n, cc, st, _ = cv2.connectedComponentsWithStats(inv.astype(np.uint8), connectivity=4)
+    out = mask.copy()
+    H, W = mask.shape
+    for k in range(1, n):
+        x, y, w, h, a = st[k]
+        if a <= max_area and x > 0 and y > 0 and x + w < W and y + h < H:
+            out[cc == k] = True
+    return out
 
 
 def extend_wall_panels(plate: np.ndarray, mask: np.ndarray, labels: np.ndarray, panels: np.ndarray) -> int:
@@ -1695,9 +1870,7 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
 
     # as reprovadas têm a nota limitada a 59: compara pela aprovação, pela área gerada dentro do limite (a máscara
     # larga não pode "ganhar" trocando uma costura por uma sala quase toda inventada), nº de motivos e nota sem teto
-    rank = lambda r: (r.quality.ok, r.quality.area_generated <= LIMITS["area_gerada_max"],  # noqa: E731
-                      -round(getattr(r.quality, "hard", 0.0), 1), -len(r.quality.reasons),
-                      r.quality.raw_score if r.quality.raw_score is not None else r.quality.score)
+    rank = lambda r: attempt_rank(r.quality)
     risk = keep_builtins_reason(inst_set, photo.shape[:2])
     keep_why = risk if KEEP_BUILTINS_FIRST else ""
     geo = (GEOMETRY_FIRST if geometry is None else geometry) and room is not None \

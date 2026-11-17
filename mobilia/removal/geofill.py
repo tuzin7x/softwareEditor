@@ -17,8 +17,9 @@ nas vistas retificadas da caixa da sala (:class:`mobilia.removal.plate.RoomBox`,
    Parede **com textura** (papel, madeira, pedra): síntese por exemplos com os retalhos presos à mesma altura (o
    rodapé e as faixas horizontais continuam). Parede sem nada à vista: perfil das outras paredes.
 4. **Acabamento:** membrana de tom na borda (Poisson) e grão casado com o anel; a costura fica em poucos pixels.
-5. **Protegidos** (janela, porta, cortina) nunca são repintados fora da máscara; o pedaço escondido continua, coluna
-   a coluna, os pixels reais da abertura (cortina até o chão; vidro só alguns pixels, depois é parede). **"Outro"**
+5. **Protegidos** (janela, porta, cortina) nunca são repintados fora da máscara; o pedaço escondido continua os
+   pixels reais da abertura, decidido por componente (cortina até a linha do piso; vidro até o piso ou até o
+   peitoril, ver :func:`continue_openings`; o resto é parede). **"Outro"**
    (sem plano confiável, vista por uma porta): cor neutra do entorno, lisa, sem conteúdo inventado. Sobras sem
    vista: continuação dos vizinhos já refeitos. Nenhum inpainter é chamado.
 
@@ -40,8 +41,17 @@ MIN_KNOWN_PX = 600            # material visível mínimo (vista retificada) par
 PLAIN_BAND_STD = 2.6          # desvio robusto da banda média do albedo abaixo disto -> parede/teto lisos
 N_CAND = 128                  # candidatos por bloco na síntese por exemplos
 PERIOD_MIN_ACF = 0.35
+SILL_MIN_M = 0.85             # vidro visto abaixo disto (m sobre o piso): porta/janela de piso a teto, vai até o chão
+#                               (peitoril de janela comum fica em ~0,9-1,1 m)
+SILL_TYPICAL_M = 0.9          # sem medida do peitoril: o vidro escondido para nesta altura (m)
+MIN_PERIODS = 3               # período horizontal de parede só com >= 3 repetições visíveis
+STRIPE_INV_MIN = 0.6          # invariância vertical do detalhe a partir da qual a parede é "listras" (veio, ripas)
+STRIPE_TEX_MIN = 0.8          # ... desde que tenha alguma textura (parede lisa com ruído não tem invariância)
+WALL_RES_DECAY = 0.06         # o resíduo de cor/luz da borda da parede se apaga em ~6% da diagonal dentro do buraco
+WALL_AO_RING = 0.035          # faixa (fração da diagonal) em volta do móvel onde a parede mais escura é oclusão
+WALL_AO_DARK = 0.06           # ... escurecer mais que 6% em relação ao entorno largo não é luz da parede
+FLOOR_DARK_MAX = 0.03         # a correção de luz do piso na borda escurece no máximo 3% (sombra/reflexo não entra)
 FINE_DETAIL_MIN = 4.0         # desvio robusto do passa-alta do piso visível a partir do qual copia o detalhe fino
-SHORT_OPENING = 0.03          # janela/porta vista só de um lado continua até 3% da altura; o resto vira parede
 
 
 # ============================================================================================================
@@ -450,6 +460,33 @@ def far_floor(mask: np.ndarray, groups: np.ndarray, box, labels: np.ndarray, mar
     return cand & (t > lim)
 
 
+def other_to_opening(labels: np.ndarray, mask: np.ndarray, groups: np.ndarray) -> int:
+    """Pixel mascarado "outro" (sem plano confiável) cujo 1º pixel visível acima, na mesma coluna, é
+    janela/cortina/porta (mesinha na frente da cortina, com o "piso" da caixa indo além do piso visível): atrás
+    dele está a abertura e ele vira "protegido" (:func:`continue_openings`). Nunca uma cor neutra lisa no meio da
+    cortina. (Os de parede só são candidatos: ver :func:`fill_geometry`.)"""
+    sel = opening_below(labels, mask, groups, (rp.OTHER,))
+    labels[sel] = rp.PROTECTED
+    return int(sel.sum())
+
+
+def opening_below(labels: np.ndarray, mask: np.ndarray, groups: np.ndarray, which) -> np.ndarray:
+    """Pixels mascarados com rótulo em ``which`` (ou de parede, se ``which`` é None) cujo 1º pixel visível acima,
+    na mesma coluna, é janela/cortina/porta."""
+    other = mask & (np.isin(labels, which) if which is not None else labels >= 0)
+    if not other.any():
+        return other
+    H, W = mask.shape
+    vis = ~rp._dil(mask, 2)
+    rows = np.where(vis, np.arange(H)[:, None], -1)
+    last = np.maximum.accumulate(rows, axis=0)              # última linha visível acima (ou -1)
+    ok = last >= 0
+    g_above = np.full((H, W), -1, np.int64)
+    cols = np.broadcast_to(np.arange(W)[None], (H, W))
+    g_above[ok] = groups[last[ok], cols[ok]]
+    return other & np.isin(g_above, rp.G_PROTECTED)
+
+
 def apply_floor_lines(labels: np.ndarray, mask: np.ndarray, box, lines: dict) -> int:
     """Rótulos dentro da máscara entre a linha da caixa e a corrigida: abaixo da corrigida piso, acima parede."""
     H, _W = labels.shape
@@ -701,6 +738,12 @@ def fill_plane(ctx: _Ctx, key: int, sel: np.ndarray, line_pts: np.ndarray | None
     per = detect_axis_periods(_lum(orig), known) if nk >= MIN_KNOWN_PX else (None, None)
     if is_wall:
         per = (None, per[1])
+        if per[1]:
+            # período horizontal só vale com pelo menos 3 repetições na largura visível (senão é uma quina/borda)
+            kx = np.nonzero(known.any(0))[0]
+            if kx.size == 0 or (kx.max() - kx.min()) < MIN_PERIODS * per[1]:
+                info["periodo_descartado_px"] = round(float(per[1]), 1)
+                per = (None, None)
     pmax = float(max([p for p in per if p] or [0]))
     sig0 = float(max(6.0, 0.025 * max(tw, th)))
     sig = float(max(sig0, 1.5 * pmax))
@@ -736,6 +779,15 @@ def fill_plane(ctx: _Ctx, key: int, sel: np.ndarray, line_pts: np.ndarray | None
     tex = _band_std(orig / np.maximum(low, 1e-3), known) if nk >= MIN_KNOWN_PX else 0.0
     info.update(grao=round(grain, 2), textura=round(tex, 2), sigma_luz=round(sig, 1))
     plain = nk < MIN_KNOWN_PX or (key != rp.FLOOR and tex < PLAIN_BAND_STD and not pmax)
+    stripes_v = False
+    if is_wall and nk >= MIN_KNOWN_PX and not pmax:
+        # veio de madeira, painel ripado, frisos verticais: textura de escala média que corre na vertical, mesmo
+        # sem período (a banda fina sozinha a chamava de lisa e o painel virava uma placa laranja chapada)
+        tex2 = _band_std(orig / np.maximum(low, 1e-3), known, 3.0, 12.0)
+        inv = axis_invariance(_lum(detail), known, 0, max(6, int(0.03 * th)))
+        info.update(textura_larga=round(tex2, 2), inv_v=round(inv, 2))
+        if inv > STRIPE_INV_MIN and max(tex, tex2) > STRIPE_TEX_MIN:
+            plain, stripes_v = False, True
     det = detail.copy()
     info["periodo_px"] = [per[0], per[1]]
     if plain:
@@ -746,8 +798,8 @@ def fill_plane(ctx: _Ctx, key: int, sel: np.ndarray, line_pts: np.ndarray | None
         # padrão periódico: rejunte/frisos são o material (não manchas); sem período, sai o que destoa
         src = known if pmax else clean_sources(detail, known)
         left = hole.copy()
-        inv_ax = None
-        if bool(per[0]) != bool(per[1]):
+        inv_ax = 0 if stripes_v else None
+        if inv_ax is None and bool(per[0]) != bool(per[1]):
             ax = 0 if per[1] else 1                  # período em x -> listras correm em y (e vice-versa)
             lag = int(max(6, round(0.6 * (per[1] or per[0]))))
             if axis_invariance(_lum(detail), src, ax, lag) > 0.6:
@@ -819,7 +871,8 @@ def floor_light(ratio: np.ndarray, low_k: np.ndarray, inl: np.ndarray, hole: np.
     ring = inl & rp._dil(hole, max(6, int(0.02 * max(h, w))))
     if ring.sum() < 30:
         return glob
-    d = np.where(ring[..., None], low_k - glob, 0.0).astype(np.float32)
+    # só um lado: o escuro da borda (reflexo/sombra de contato do móvel) não entra no buraco além de um pouco
+    d = np.where(ring[..., None], np.maximum(low_k - glob, -FLOOR_DARK_MAX * glob), 0.0).astype(np.float32)
     corr = rp.push_pull(d, ring.astype(np.float32))
     corr = _nblur(corr, np.ones_like(inl), 3.0)
     dist = ndimage.distance_transform_edt(hole)
@@ -889,8 +942,28 @@ def wall_light_field(ctx: _Ctx) -> np.ndarray | None:
         wk = up
     if wk.sum() < 300:
         return None
-    sig = max(4.0, 0.012 * float(np.hypot(ctx.H, ctx.W)))
-    low_k, inl = robust_lowpass(ctx.photo.astype(np.float32), wk, sig)
+    diag = float(np.hypot(ctx.H, ctx.W))
+    sig = max(4.0, 0.012 * diag)
+    # faixa larga: a parede que escurece de verdade (canto, oclusão ao lado do móvel) é luz que a borda lateral do
+    # preenchimento precisa casar; só manchas fortes (tomada, sombra dura) saem
+    low_k, inl = robust_lowpass(ctx.photo.astype(np.float32), wk, sig, lo=0.6, hi=1.4)
+    # assimétrico perto do móvel: a sombra/oclusão que o móvel faz na parede (fora da máscara) não é luz da
+    # parede; escurecer além de WALL_AO_DARK em relação ao entorno largo sai, clarear pode ficar
+    # só acima do móvel (é o que desce coluna a coluna para dentro do buraco); ao lado fica: é a luz que a borda
+    # lateral do preenchimento precisa casar
+    rr = max(6, int(WALL_AO_RING * diag))
+    m_below = np.zeros_like(m)
+    for k in range(1, rr + 1, max(1, rr // 8)):
+        m_below[:-k] |= m[k:]
+    ring = rp._dil(m, rr) & inl & m_below
+    if ring.any():
+        far = inl & ~ring
+        if far.sum() >= 500:
+            ref = _lum(_nblur(ctx.photo.astype(np.float32), far, 3.0 * sig))
+            dark = ring & (_lum(low_k) < (1.0 - WALL_AO_DARK) * ref)
+            if dark.any() and (inl & ~dark).sum() >= 300:
+                inl = inl & ~rp._dil(dark, 2)
+                low_k = _nblur(ctx.photo.astype(np.float32), inl, sig)
     # gradiente de luz suave (polinômio robusto em toda a parede visível) × resíduo continuado coluna a coluna: a
     # parede clareando para cima não deixa o contorno do sofá desenhado (cada coluna parte de uma altura)
     P = np.ones((ctx.H, ctx.W), np.float32)
@@ -903,8 +976,22 @@ def wall_light_field(ctx: _Ctx) -> np.ndarray | None:
             # mesma escala do global no visível da parede (a média geométrica 1 é por ajuste)
             k = np.median(glob[inl & sel_l] / Pi[inl & sel_l])
             P[sel_l] = (Pi * k)[sel_l]
+    # a divisa entre paredes da caixa pode ser falsa (uma parede real partida em fatias): o gradiente por parede
+    # passa suave de uma para outra, nunca em degrau dentro do buraco
+    P = cv2.GaussianBlur(P, (0, 0), 0.03 * diag)
     P = P[..., None]
     res = column_continue(low_k / P, inl, hole).astype(np.float32)
+    # o resíduo da borda (luz rebatida do móvel claro, mancha) se apaga com a distância dentro do buraco: no fundo
+    # fica o gradiente da parede ajustado em todo o visível (sem a silhueta do sofá desenhada em tom)
+    # longe da borda de cima: membrana com TODA a borda (de cima e dos lados): a parede que escurece para baixo ao
+    # lado do sofá continua escurecendo atrás dele, sem degrau no contorno
+    r0 = low_k / P
+    band = inl & rp._dil(hole, max(6, int(0.02 * diag)))
+    mem = rp.push_pull(np.where(band[..., None], r0, 0.0).astype(np.float32), band.astype(np.float32)) \
+        if band.sum() >= 50 else np.broadcast_to(np.median(r0[inl], axis=0), r0.shape)
+    dist = ndimage.distance_transform_edt(hole)
+    fade = np.exp(-dist / max(8.0, WALL_RES_DECAY * diag)).astype(np.float32)[..., None]
+    res = np.where(hole[..., None], mem + (res - mem) * fade, res).astype(np.float32)
     res = smooth_inside(res, hole, 3.0 * sig, 0.5 * sig)
     return res * P
 
@@ -997,52 +1084,174 @@ def fine_detail(out: np.ndarray, photo: np.ndarray, sel: np.ndarray, known: np.n
     return res, {"antes": round(have, 2), "alvo": round(want, 2), "ganho": round(gain, 2)}
 
 
+def corrected_floor_rows(box, lines: dict) -> np.ndarray:
+    """Por coluna: linha (y, float) da divisa parede/piso da caixa já corrigida pela segmentação (H = sem piso)."""
+    yf, above = _box_floor_rows(box)
+    yc = yf.astype(np.float32)
+    for wid, (c0, c1, _) in lines.items():
+        cols = np.nonzero(above == wid)[0]
+        yc[cols] = yf[cols] + c0 + c1 * cols
+    return yc
+
+
+def _opening_bottom_gap(vis_kind: np.ndarray, mask: np.ndarray, floor_rows: np.ndarray, x0: int, x1: int,
+                        top: int, bot: int) -> float | None:
+    """Altura (px) do peitoril da abertura acima da linha do piso, medida nas colunas vizinhas ao buraco onde a
+    abertura aparece inteira (o fim de baixo dela não encosta na máscara). ``0`` = vai até o chão; ``None`` =
+    nada medido."""
+    H, W = mask.shape
+    R = max(10, int(0.6 * (x1 - x0 + 1)))
+    near_m = rp._dil(mask, 3)
+    gaps = []
+    for x in list(range(max(0, x0 - R), x0)) + list(range(x1 + 1, min(W, x1 + 1 + R))):
+        k = np.nonzero(vis_kind[:, x])[0]
+        if k.size < 5 or k.min() > bot or k.max() < top:
+            continue
+        b = int(k.max())
+        if near_m[min(H - 1, b + 1):min(H, b + 4), x].any() or b >= H - 2:
+            continue                                   # o fim dela está escondido (ou é a borda da foto)
+        fr = floor_rows[x]
+        if fr >= H:
+            continue
+        gaps.append(float(fr - b - 1))
+    if len(gaps) < 3:
+        return None
+    g = float(np.median(gaps))
+    return 0.0 if g < 0.02 * H else g
+
+
 def continue_openings(out: np.ndarray, photo: np.ndarray, region: np.ndarray, mask: np.ndarray,
-                      groups: np.ndarray, rng: np.random.Generator, filled: np.ndarray | None = None) -> int:
-    """Pedaço escondido de janela, porta ou cortina: continua, coluna a coluna, os pixels **reais** da abertura
-    vistos acima/abaixo (cortina: as dobras verticais seguem; caixilho e peitoril: a faixa continua). Nada é
-    inventado. Colunas sem nada da abertura à vista: continuação dos vizinhos. Devolve os pixels dessas colunas."""
+                      groups: np.ndarray, rng: np.random.Generator, filled: np.ndarray | None = None,
+                      floor_rows: np.ndarray | None = None, zmap: np.ndarray | None = None,
+                      optional: np.ndarray | None = None) -> tuple[int, np.ndarray]:
+    """Pedaço escondido de janela, porta ou cortina: continua os pixels **reais** da abertura vistos acima/abaixo.
+
+    A decisão é **por componente** do buraco (não por coluna): todas as colunas de uma componente param na mesma
+    reta, então a barra de baixo não fica serrilhada. Cortina: cai até a linha do piso (as dobras seguem). Vidro e
+    porta: se as colunas vizinhas mostram o fim da abertura, param à mesma altura sobre o piso (peitoril, ou o
+    chão); sem essa medida, vão até o chão quando o vidro visto já desce abaixo de :data:`SILL_MIN_M` (porta de
+    correr, janela de piso a teto) e, senão, até a altura típica de peitoril :data:`SILL_TYPICAL_M` (``zmap``:
+    altura de cada pixel sobre o piso, da caixa). O vidro continua refletindo, na vertical, a última faixa vista (as barras
+    do guarda-corpo e os caixilhos seguem retos), a cortina continua a última linha. Visível acima e abaixo:
+    ponte. Nada é inventado. O resto (abaixo do peitoril) é parede: continuação da superfície vizinha, exceto em
+    ``optional`` (parede já refeita pelo plano, candidata a abertura): ali só entra o que a abertura cobre.
+    Devolve (pixels do resto, pixels refeitos como abertura)."""
+    H, W = region.shape
     vis = ~rp._dil(mask, 2) & np.isin(groups, rp.G_PROTECTED)
     curtain = groups == rp.GROUP_IDS["window_covering"]
-    short = max(6, int(SHORT_OPENING * mask.shape[0]))
+    opt = np.zeros_like(region) if optional is None else (optional & region)
     if vis.sum() < 20:
-        extend_fill(out, photo, region, ~mask, rng)
-        return int(region.sum())
-    src = cv2.GaussianBlur(photo.astype(np.float32), (0, 0), 1.0)
-    H, _W = region.shape
+        extend_fill(out, photo, region & ~opt, ~mask, rng)
+        return int((region & ~opt).sum()), np.zeros_like(region)
+    if floor_rows is None:
+        floor_rows = np.full(W, float(H), np.float32)
+    src = cv2.GaussianBlur(photo.astype(np.float32), (0, 0), 0.7)
     rows = np.arange(H, dtype=np.float32)
     done = np.zeros_like(region)
     res = out.astype(np.float32)
-    for x in np.nonzero(region.any(0))[0]:
-        k = np.nonzero(vis[:, x])[0]
-        r = region[:, x]
-        if k.size < 3:
+    band_max = max(6, int(0.06 * H))
+    # linha do piso por coluna: a da caixa, a menos que ela fique acima da abertura (caixa sem parede do fundo, o
+    # "piso" sobe até o horizonte): aí o 1º piso visível abaixo do buraco (ou a borda da foto)
+    vis_floor = ~rp._dil(mask, 2) & (groups == rp.G_FLOOR)
+    floor_rows = floor_rows.astype(np.float32).copy()
+    ys_r, xs_r = np.nonzero(region)
+    top_r = np.full(W, H, np.int64)
+    np.minimum.at(top_r, xs_r, ys_r)
+    bot_r = np.full(W, -1, np.int64)
+    np.maximum.at(bot_r, xs_r, ys_r)
+    for x in np.nonzero(bot_r >= 0)[0]:
+        if floor_rows[x] <= top_r[x]:
+            fv = np.nonzero(vis_floor[bot_r[x]:, x])[0]
+            floor_rows[x] = float(bot_r[x] + fv[0]) if fv.size else float(H)
+    n, cc, st, _ = cv2.connectedComponentsWithStats(region.astype(np.uint8), connectivity=8)
+    for ci in range(1, n):
+        x0, y0c, wc, _hc, _ = st[ci]
+        x1 = x0 + wc - 1
+        comp = cc == ci
+        cols = np.nonzero(comp.any(0))[0]
+        # tipo da abertura: o pixel visível logo acima de cada coluna
+        n_cur = n_any = 0
+        tops = []
+        for x in cols:
+            k = np.nonzero(vis[:, x])[0]
+            ys = np.nonzero(comp[:, x])[0]
+            ab = k[k < ys.min()]
+            if ab.size:
+                n_any += 1
+                n_cur += bool(curtain[ab.max(), x])
+                tops.append(int(ab.min()))
+        if n_any == 0:
             continue
-        ys = np.nonzero(r)[0]
-        above = k[k < ys.min()]
-        below = k[k > ys.max()]
-        if below.size:                      # visível acima e abaixo: ponte entre os dois
-            lim = 0.25 * H
-        elif above.size and curtain[above.max(), x]:
-            lim = 0.25 * H                  # cortina: cai até o chão
-        else:                               # vidro/porta só de um lado: continua pouco; o resto é parede
-            lim = short
-        near = np.min(np.abs(ys[:, None] - k[None]), axis=1) <= lim
-        ys = ys[near]
-        if ys.size == 0:
-            continue
-        for c in range(3):
-            res[ys, x, c] = np.interp(rows[ys], k.astype(np.float32), src[k, x, c])
-        done[ys, x] = True
-    g = _grain(photo, vis)
-    res = _add_grain(res, done, min(g, 3.0), rng)
-    out[done] = np.clip(res[done], 0, 255).round().astype(np.uint8)
-    rest = region & ~done
+        is_curtain = n_cur > 0.5 * n_any
+        gap, z_stop = 0.0, None
+        if not is_curtain:
+            kind = vis & ~curtain
+            g = _opening_bottom_gap(kind, mask, floor_rows, x0, x1, int(np.median(tops)), y0c)
+            if g is not None:
+                gap = g
+            elif zmap is not None:
+                zb = []
+                for x in cols:
+                    k = np.nonzero(vis[:, x])[0]
+                    ys = np.nonzero(comp[:, x])[0]
+                    ab = k[k < ys.min()]
+                    if ab.size and np.isfinite(zmap[ab.max(), x]):
+                        zb.append(float(zmap[ab.max(), x]))
+                if zb and float(np.median(zb)) >= SILL_MIN_M:
+                    z_stop = max(SILL_TYPICAL_M, float(np.median(zb)) - 0.15)
+        for x in cols:
+            k = np.nonzero(vis[:, x])[0]
+            ys = np.nonzero(comp[:, x])[0]
+            if k.size < 3:
+                continue
+            above = k[k < ys.min()]
+            below = k[k > ys.max()]
+            if below.size and above.size:                 # visível acima e abaixo: ponte
+                sel = ys
+                for c in range(3):
+                    res[sel, x, c] = np.interp(rows[sel], k.astype(np.float32), src[k, x, c])
+                done[sel, x] = True
+                continue
+            if not above.size:                            # só abaixo: continua pouco (raro: soleira vista)
+                sel = ys[ys >= below.min() - band_max] if below.size else ys[:0]
+                for c in range(3):
+                    res[sel, x, c] = np.interp(rows[sel], k.astype(np.float32), src[k, x, c])
+                done[sel, x] = True
+                continue
+            stop = floor_rows[x] - gap if floor_rows[x] < H else H
+            sel = ys[ys < stop]
+            if z_stop is not None:
+                zz = zmap[sel, x]
+                sel = sel[~(np.isfinite(zz) & (zz < z_stop))]
+            if sel.size == 0:
+                continue
+            ya = int(above.max())
+            if is_curtain:
+                res[sel, x] = src[ya, x]
+            else:
+                # última faixa contígua vista acima, refletida para baixo (onda triangular): sem emenda
+                run = 1
+                while run < band_max and ya - run >= 0 and vis[ya - run, x]:
+                    run += 1
+                d = sel - ya
+                t = np.mod(d, 2 * run)
+                srow = np.where(t < run, ya - t, ya - (2 * run - t))
+                srow = np.clip(srow, ya - run + 1, ya)
+                res[sel, x] = src[srow, x]
+            done[sel, x] = True
+    if done.any():
+        # emenda horizontal entre colunas (fiapo de coluna sem fonte) e grão da abertura
+        g = _grain(photo, vis)
+        res = _add_grain(res, done, min(g, 3.0), rng)
+        out[done] = np.clip(res[done], 0, 255).round().astype(np.uint8)
+    rest = region & ~done & ~opt
     if rest.any():
-        # o resto é parede/superfície: continua a superfície vizinha (visível ou já refeita), nunca o vidro
+        # o resto é parede/superfície (abaixo do peitoril, coluna sem nada à vista): continua a superfície vizinha
+        # (visível ou já refeita), nunca o vidro
         ok = (~mask & np.isin(groups, (rp.G_WALL, rp.G_FLOOR))) | (filled if filled is not None else False)
+        ok = ok & ~(done & opt) if isinstance(ok, np.ndarray) else ok
         extend_fill(out, photo, rest, ok, rng)
-    return int(rest.sum())
+    return int(rest.sum()), done
 
 
 def neutral_fill(out: np.ndarray, photo: np.ndarray, region: np.ndarray, mask: np.ndarray,
@@ -1087,6 +1296,9 @@ def fill_geometry(photo: np.ndarray, mask: np.ndarray, groups: np.ndarray, box, 
     if far.any():
         labels[far] = rp.OTHER
         info["piso_alem_do_visivel_px"] = int(far.sum())
+    n_op = other_to_opening(labels, mask, groups)
+    if n_op:
+        info["outro_virou_abertura_px"] = n_op
     lines = floor_lines(mask, groups, box)
     if lines:
         n = apply_floor_lines(labels, mask, box, lines)
@@ -1152,14 +1364,21 @@ def fill_geometry(photo: np.ndarray, mask: np.ndarray, groups: np.ndarray, box, 
         if back is not None:
             out[cover] = back[cover]
             done_all |= cover
-        info[f"parede{wid}"] = {**pinfo, "area_px": int(cover.sum())}
+        info[f"parede{wid}"] = {**pinfo, "area_px": int(cover.sum()), "buraco_px": int(wall_sel[wid].sum())}
 
     surf = np.isin(groups, (rp.G_FLOOR, rp.G_WALL, rp.G_CEIL) + rp.G_PROTECTED)
     # ---- protegidos: continuação local da abertura (inpainter com contexto local), nunca fora da máscara
     prot = mask & (labels == rp.PROTECTED) & ~done_all
-    if prot.any():
-        n = continue_openings(out, photo, prot, mask, groups, rng, done_all)
-        info["protegido"] = {"metodo": "continuacao_vertical", "area_px": int(prot.sum()), "sem_coluna_px": n}
+    # parede (já refeita) logo abaixo de janela/cortina/porta visível: candidata; a abertura decide se desce
+    cand = opening_below(labels, mask, groups, None) & done_all
+    if prot.any() or cand.any():
+        n, got = continue_openings(out, photo, prot | cand, mask, groups, rng, done_all & ~cand,
+                                   floor_rows=corrected_floor_rows(box, lines),
+                                   zmap=np.where(box.label >= 0, box.Z, np.nan), optional=cand)
+        moved = got & cand
+        labels[moved] = rp.PROTECTED
+        info["protegido"] = {"metodo": "continuacao_vertical", "area_px": int((prot | moved).sum()),
+                             "sem_coluna_px": n, "parede_virou_abertura_px": int(moved.sum())}
         done_all |= prot
     # ---- "outro" (sem plano confiável): cor neutra do entorno; sobras sem vista: continuação dos vizinhos
     rest = mask & ~done_all

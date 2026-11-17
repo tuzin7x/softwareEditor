@@ -138,7 +138,8 @@ def test_mode_b_end_to_end_cpu(env, tmp_path, monkeypatch, name):
     empty = np.asarray(Image.open(Path(res.work_dir) / "sala_vazia.png").convert("RGB"))
     assert frames[1].shape == empty.shape
     # relatório
-    assert 0 < rep["pixels_gerados"]["area_pct"] < 75
+    # a máscara inclui a sombra/oclusão da peça na parede (volta com ela no vídeo): a sala dos sofás fica em ~75%
+    assert 0 < rep["pixels_gerados"]["area_pct"] < 80
     assert rep["pecas"]["n_pecas"] >= 2 and rep["pecas_no_video"]
     assert rep["semente"] == 7 and rep["placa"]["qualidade"]["nota"] is not None
     assert rep["portao_qualidade"]["aprovada"] and rep["portao_qualidade"]["tentativas"] == 1
