@@ -177,6 +177,17 @@ móveis soltos e a decoração. As regras de §3.4 (sem pedaço oculto visível,
 inventada passar do limite para aquela foto, o software refaz **mantendo os fixos** (só os soltos saem) e registra o motivo no
 `report.json`. Nunca entregar uma placa ruim em silêncio.
 
+**Ajuste da rodada de robustez 1 (planejados grandes):** em 10 fotos variadas a sala crua inventou a arquitetura atrás dos
+planejados (parede de "pedra derretida", relevo inventado, bloco de carpete flutuando), e numa cozinha a nota ainda aprovou. Por
+isso os fixos ficam na foto **por padrão**, sem tentar a sala crua, quando só eles cobrem 10% ou mais da foto ou quando tirar tudo
+reconstruiria 35% ou mais dela (`keep_builtins_reason`; o motivo vai para `placa.planejados_por_padrao` no `report.json`). Abaixo
+disso a sala crua continua sendo a 1ª tentativa. Painéis fixos na parede que o OneFormer cola na máscara da cama ou da mesa
+(cabeceira-painel de hotel, painel ripado) são recortados e ficam na foto, como acabamento de parede; uma mesa presa a um painel
+alto (divisória com TV), uma bancada de trabalho de parede a parede e um "armário" que é só um painel no plano da
+parede viram planejados. O pedaço do painel que a cama escondia é continuado para baixo (espelhando o próprio painel),
+em vez de virar parede lisa. Com os planejados mantidos, o que está guardado neles (livros na estante embutida, vaso
+na prateleira) fica junto: tirar só isso abriria buracos cinzentos no móvel que ficou.
+
 **Teste de aceite:** as fotos de cozinha planejada (paisagem e retrato) e de banheiro do conjunto de teste do usuário: placa crua sem
 objetos inventados, linhas parede/piso retas, revestimento contínuo, último quadro idêntico à foto.
 

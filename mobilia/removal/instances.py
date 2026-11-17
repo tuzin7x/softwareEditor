@@ -86,6 +86,24 @@ MODE_B_MAJOR_TOTAL = 0.02
 MODE_B_LOOSE_AREA = 0.01        # sem móvel solto (>= 1%), só planejados não bastam ...
 MODE_B_BUILTIN_ONLY = 0.10      # ... a não ser que cubram >= 10% (cozinha/banheiro completos)
 MAX_REMOVAL_AREA = 0.75         # acima disto quase toda a sala vazia é gerada (aviso)
+# Painel fixo na parede (cabeceira-painel de hotel, painel de TV/ripado): pontos no plano da parede (<= 15 cm) e
+# acima do tampo/colchão (> 75 cm). Tirar isso obriga a placa a inventar a parede inteira atrás dele.
+PANEL_WALL_DIST = 0.15          # m
+PANEL_MIN_Z = 0.75              # m acima do piso
+PANEL_PARENTS = frozenset({"bed", "desk"})   # o painel vem colado na máscara destas peças: é recortado e fica
+PANEL_MIN_FRAC = 0.10           # ... se for >= 10% da peça
+PANEL_MIN_AREA = 0.005          # ... e >= 0,5% da foto
+INSIDE_BUILTIN_MAX_AREA = 0.06  # objeto guardável até 6% da foto ...
+INSIDE_BUILTIN_RING = 0.5       # ... com >= 50% do anel em volta num planejado está guardado nele (livro na estante)
+STORED_CLASSES = frozenset({    # o que se guarda num armário/estante (assento e mesa nunca: saem sempre)
+    "book", "vase", "plant", "flower", "pot", "box", "basket", "bottle", "glass", "plate", "tray", "food",
+    "clock", "sculpture", "towel", "clothes", "bag", "plaything", "blanket",
+})
+DESK_PANEL_Z = 1.1              # m: uma mesa com >= 20% da máscara acima disto está presa a um painel alto
+DESK_PANEL_FRAC = 0.2
+DESK_WALL_DEPTH = 0.8           # m: profundidade de uma bancada de trabalho encostada
+DESK_WALL_MIN_LEN = 2.0         # m: só paredes longas (mesa solta de 1,2 m numa parede curta continua solta)
+PANEL_WHOLE_FRAC = 0.5          # classe ambígua (armário) com >= 50% no plano da parede: é um painel → planejado
 
 
 def base_name(label: str) -> str:
@@ -132,6 +150,8 @@ class FurnitureInstance:
     merged_from: list[int] = field(default_factory=list)
     kind_reason: str = ""
     touches: tuple[str, ...] = ()   # bordas da foto tocadas: "esquerda", "direita", "topo", "base"
+    wall_panel: np.ndarray | None = None   # painel fixo recortado da peça: fica na foto (nem efeito/sombra sai)
+    inside_builtin: str = ""        # peça solta pequena dentro de um planejado (livro na estante): fica com ele
 
     @property
     def area(self) -> int:
@@ -147,6 +167,7 @@ class FurnitureInstance:
                 "score": round(self.score, 3), "area_pct": round(100.0 * self.area / image_area, 3),
                 "bbox": list(self.bbox), "sam_iou": None if self.sam_iou is None else round(self.sam_iou, 3),
                 "sam_usado": self.sam_used, "fundidos": list(self.merged_from), "motivo_tipo": self.kind_reason,
+                "dentro_de_planejado": self.inside_builtin,
                 "bordas": list(self.touches)}
 
 
@@ -168,8 +189,11 @@ class InstanceSet:
     timings: dict = field(default_factory=dict)
 
     def removal(self, keep_builtins: bool = False) -> list[FurnitureInstance]:
-        """Peças que saem da placa. ``keep_builtins`` é o recuo do portão de qualidade (só os soltos saem)."""
-        return [i for i in self.instances if not (keep_builtins and i.kind == KIND_BUILTIN)]
+        """Peças que saem da placa. ``keep_builtins`` é o recuo do portão de qualidade (só os soltos saem; os
+        soltos pequenos guardados dentro de um planejado, como livros na estante embutida, ficam com ele: tirá-los
+        abre buracos no móvel que fica)."""
+        return [i for i in self.instances
+                if not (keep_builtins and (i.kind == KIND_BUILTIN or i.inside_builtin))]
 
     def removal_mask(self, keep_builtins: bool = False) -> np.ndarray:
         m = np.zeros(self.shape, bool)
@@ -507,7 +531,19 @@ def builtin_reason(inst: FurnitureInstance, seg, others: Sequence[FurnitureInsta
     """Motivo para tratar a peça como planejada ("" = solta)."""
     if inst.label in BUILTIN_CLASSES:
         return "classe fixa (cozinha/banheiro)"
-    if inst.label not in AMBIGUOUS_CLASSES:
+    if inst.label == "desk":            # mesa presa a um painel alto (divisória com TV, estante embutida)
+        P = _room_points(inst.mask, geometry, room)
+        if P is not None and (P[:, 2] > DESK_PANEL_Z).mean() >= DESK_PANEL_FRAC:
+            return "mesa presa a painel alto"
+        if P is not None:               # bancada de trabalho de parede a parede (nicho de escritório)
+            for w in room.walls:
+                near = np.abs(w.signed_distance(P[:, :2])) <= DESK_WALL_DEPTH
+                if w.length >= DESK_WALL_MIN_LEN and near.mean() >= 0.5:
+                    along = w.along(P[near, :2])
+                    if np.percentile(along, 98) - np.percentile(along, 2) >= 0.8 * w.length:
+                        return f"mesa de parede a parede ({w.id})"
+        # segue as regras das classes ambíguas (bancada embutida no nicho, de parede a parede, junto da cozinha)
+    elif inst.label not in AMBIGUOUS_CLASSES:
         return ""
     names = _label_lut(seg.id2label)
     ring = _ring(inst.mask, 4)
@@ -541,9 +577,73 @@ def builtin_reason(inst: FurnitureInstance, seg, others: Sequence[FurnitureInsta
             along = w.along(xy[near])
             if w.length > 0.5 and (np.percentile(along, 98) - np.percentile(along, 2)) >= 0.8 * w.length:
                 return f"ocupa a parede {w.id} inteira"
+        if _on_wall(P, room).mean() >= PANEL_WHOLE_FRAC:
+            return "painel na parede"
     if inst.label == "mirror":
         return "espelho (preso na parede)"
     return ""
+
+
+def _on_wall(P: np.ndarray, room) -> np.ndarray:
+    """Pontos (referencial da sala) no plano de alguma parede e acima de :data:`PANEL_MIN_Z`."""
+    if not room.walls:
+        return np.zeros(len(P), bool)
+    d = np.min([np.abs(w.signed_distance(P[:, :2])) for w in room.walls], 0)
+    return (d <= PANEL_WALL_DIST) & (P[:, 2] > PANEL_MIN_Z)
+
+
+def wall_panel_mask(inst: FurnitureInstance, geometry: dict | None, room) -> np.ndarray | None:
+    """Parte da máscara da peça que é painel fixo na parede (cabeceira-painel, painel de TV), ou None."""
+    if geometry is None or room is None or not getattr(room, "walls", None):
+        return None
+    pts = np.asarray(geometry["points"], np.float32)
+    s = int(geometry.get("stride", 1))
+    valid = np.asarray(geometry.get("mask", np.ones(pts.shape[:2], bool)), bool)
+    h, w = pts.shape[:2]
+    sub = inst.mask[::s, ::s][:h, :w]
+    sel = sub & valid[:sub.shape[0], :sub.shape[1]] & np.isfinite(pts[:sub.shape[0], :sub.shape[1]]).all(-1)
+    if sel.sum() < 20:
+        return None
+    M = np.asarray(room.cam_to_room, np.float64)
+    P = (pts[:sub.shape[0], :sub.shape[1]][sel].astype(np.float64) @ M[:3, :3].T) + M[:3, 3]
+    on = np.zeros(sub.shape, bool)
+    on[sel] = _on_wall(P, room)
+    on = ndimage.binary_opening(on, iterations=1)
+    H, W = inst.mask.shape
+    up = np.repeat(np.repeat(on, s, 0), s, 1)[:H, :W]
+    full = np.zeros((H, W), bool)
+    full[:up.shape[0], :up.shape[1]] = up
+    full = ndimage.binary_fill_holes(ndimage.binary_closing(full, iterations=max(1, s))) & inst.mask
+    lab, n = ndimage.label(full)
+    if n == 0:
+        return None
+    sizes = ndimage.sum(full, lab, range(1, n + 1))
+    keep = [k + 1 for k, a in enumerate(sizes) if a >= 0.002 * H * W]
+    return np.isin(lab, keep) if keep else None
+
+
+def split_wall_panels(insts: list[FurnitureInstance], geometry: dict | None, room) -> list[str]:
+    """Recorta das camas e mesas o painel fixo na parede que veio junto na máscara (cabeceira-painel de hotel,
+    painel da TV): ele fica na foto, como acabamento de parede (§3.6), e a peça entra na frente dele. Sem isso a
+    sala vazia precisa inventar a parede inteira atrás do painel (parede derretida)."""
+    notes = []
+    for i in insts:
+        if i.label not in PANEL_PARENTS or i.kind != KIND_LOOSE:
+            continue
+        panel = wall_panel_mask(i, geometry, room)
+        if panel is None:
+            continue
+        a, area = int(panel.sum()), i.area
+        if a < PANEL_MIN_FRAC * area or a < PANEL_MIN_AREA * panel.size or area - a < PANEL_MIN_AREA * panel.size:
+            continue
+        rem = i.mask & ~panel           # filetes finos da peça na borda do painel (contorno do OneFormer) ficam com ele
+        sliver = rem & ~ndimage.binary_opening(rem, iterations=3) & ndimage.binary_dilation(panel, iterations=6)
+        panel = panel | sliver
+        i.mask = rem & ~sliver
+        i.wall_panel = panel
+        i.alpha = np.where(panel, 0.0, i.alpha).astype(np.float32)
+        notes.append(f"painel fixo na parede atrás de {i.label} ({100 * a / panel.size:.1f}% da foto) fica na foto")
+    return notes
 
 
 def classify(insts: list[FurnitureInstance], seg, geometry: dict | None = None, room=None) -> None:
@@ -551,7 +651,7 @@ def classify(insts: list[FurnitureInstance], seg, geometry: dict | None = None, 
     for _ in range(2):
         for i in insts:
             r = builtin_reason(i, seg, insts, geometry, room)
-            if not r and i.label in AMBIGUOUS_CLASSES:
+            if not r and (i.label in AMBIGUOUS_CLASSES or i.label == "desk"):   # mesa embutida entre módulos
                 ring = _ring(i.mask, 4)
                 for o in insts:
                     if o is not i and o.kind == KIND_BUILTIN and o.label in AMBIGUOUS_CLASSES \
@@ -559,6 +659,18 @@ def classify(insts: list[FurnitureInstance], seg, geometry: dict | None = None, 
                         r = f"junto de {o.label} planejado"
                         break
             i.kind, i.kind_reason = (KIND_BUILTIN, r) if r else (KIND_LOOSE, "")
+    built = [o for o in insts if o.kind == KIND_BUILTIN]
+    for i in insts:
+        i.inside_builtin = ""
+        if i.kind != KIND_LOOSE or i.label not in STORED_CLASSES or not built \
+                or i.area > INSIDE_BUILTIN_MAX_AREA * i.mask.size:
+            continue
+        ring = _ring(i.mask, 6)
+        n = max(1, int(ring.sum()))
+        for o in built:
+            if (o.mask & ring).sum() >= INSIDE_BUILTIN_RING * n:
+                i.inside_builtin = o.label
+                break
 
 
 # ============================================================================================================
@@ -736,6 +848,7 @@ def detect_instances(rgb8: np.ndarray, seg=None, pan: PanopticResult | None = No
                                        iou, used))
     insts = merge_fragments(insts)
     classify(insts, seg, geometry, room)
+    warnings.extend(split_wall_panels(insts, geometry, room))
     for i in insts:
         i.touches = _touches(i.mask)
     for new_id, i in enumerate(insts):

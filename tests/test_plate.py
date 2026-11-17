@@ -215,10 +215,11 @@ def test_gate_falls_back_to_keeping_builtins(monkeypatch):
     loose = np.zeros((H, W), bool)
     loose[250:320, 60:140] = True
     built = np.zeros((H, W), bool)
-    built[120:240, 250:420] = True
+    built[150:240, 250:400] = True                     # 7,8% da foto: abaixo do limite de "mantidos por padrão"
     insts = [_piece(loose, "solto", "chair"), _piece(built, "planejado", "cabinet")]
     inst_set = SimpleNamespace(instances=insts,
                                removal=lambda keep=False: [i for i in insts if not (keep and i.kind == "planejado")])
+    assert rp.keep_builtins_reason(inst_set, (H, W)) == ""
     calls = []
 
     def fake_redetect(plate_rgb):
@@ -235,6 +236,49 @@ def test_gate_falls_back_to_keeping_builtins(monkeypatch):
     assert not r.mask[built & ~rp._dil(loose, 30)].any()
     assert any("planejados mantidos" in w for w in r.warnings)
     assert r.report()["placa"]["planejados_mantidos"] is True
+
+
+def _inst_set(insts):
+    return SimpleNamespace(instances=insts,
+                           removal=lambda keep=False: [i for i in insts if not (keep and i.kind == "planejado")])
+
+
+def test_keep_builtins_reason_thresholds():
+    H, W = 100, 100
+    def box(y0, y1, x0, x1):
+        m = np.zeros((H, W), bool)
+        m[y0:y1, x0:x1] = True
+        return m
+    chair = _piece(box(60, 80, 0, 20), "solto", "chair")                      # 4%
+    assert rp.keep_builtins_reason(_inst_set([chair]), (H, W)) == ""            # sem planejados
+    small = _piece(box(0, 5, 50, 60), "planejado", "cabinet")                   # 0,5%: não muda nada
+    assert rp.keep_builtins_reason(_inst_set([chair, small]), (H, W)) == ""
+    big = _piece(box(0, 30, 40, 80), "planejado", "cabinet")                    # 12%: cozinha planejada
+    assert "planejados cobrem 12%" in rp.keep_builtins_reason(_inst_set([chair, big]), (H, W))
+    sofa = _piece(box(40, 80, 0, 100), "solto", "sofa")                         # 40% + 5% de estante
+    shelf = _piece(box(0, 10, 50, 100), "planejado", "bookcase")
+    assert "reconstruiria 45%" in rp.keep_builtins_reason(_inst_set([sofa, shelf]), (H, W))
+
+
+def test_gate_keeps_large_builtins_from_the_first_attempt(monkeypatch):
+    """Cozinha planejada de ponta a ponta: a sala crua nem é tentada (a parede atrás seria inventada), mesmo que
+    a nota dela pudesse aprovar."""
+    room = _room()
+    img, groups, box = _render(room)
+    H, W = groups.shape
+    loose = np.zeros((H, W), bool)
+    loose[250:320, 60:140] = True
+    built = np.zeros((H, W), bool)
+    built[100:240, 200:440] = True                     # 19% da foto
+    insts = [_piece(loose, "solto", "chair"), _piece(built, "planejado", "cabinet")]
+    monkeypatch.setattr(rp, "redetected_furniture", lambda *a, **k: [])
+    r = rp.build_plate_gated(img, _inst_set(insts), SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+                             redetect=lambda p: (None, None), alternatives=False)
+    assert r.kept_builtins
+    assert [t["estrategia"] for t in r.info["tentativas"]] == ["planejados_mantidos"]
+    assert not r.mask[built & ~rp._dil(loose, 30)].any()
+    assert "planejados cobrem" in r.report()["placa"]["planejados_por_padrao"]
+    assert any("por padrão" in w for w in r.warnings)
 
 
 def test_gate_warns_when_still_bad(monkeypatch):
@@ -502,3 +546,23 @@ def test_fill_limit_relaxes_only_with_good_seam_and_grain():
     assert lo < rp.fill_de_limit(3.5, 0.1) < hi
     assert rp.fill_de_limit(1.5, 0.9) == lo                         # grão ruim não relaxa
     assert rp.fill_de_limit(1.5, 0.1, relax=False) == lo           # mancha forte no resto da placa
+
+
+def test_extend_wall_panels_continues_panel_down_to_the_floor():
+    H, W = 120, 160
+    plate = np.full((H, W, 3), 230, np.uint8)            # parede clara
+    plate[20:60, 40:120] = 60                            # painel escuro que ficou na foto
+    plate[20:60:6, 40:120] = 90                          # com textura (linhas)
+    panels = np.zeros((H, W), bool)
+    panels[20:100, 40:120] = True                        # painel inteiro (a parte de baixo estava atrás da cama)
+    mask = np.zeros((H, W), bool)
+    mask[60:110, 30:130] = True                          # buraco da cama (o LaMa pôs parede clara)
+    labels = np.zeros((H, W), np.int32)                  # parede 0 ...
+    labels[100:] = rp.FLOOR                              # ... e piso a partir da linha 100
+    before = plate.copy()
+    n = rp.extend_wall_panels(plate, mask, labels, panels)
+    assert n == 40 * 80
+    assert plate[60:100, 40:120].mean() < 100            # continua escuro até o piso
+    assert (plate[100:] == before[100:]).all()           # o piso não muda
+    assert (plate[60:100, 30:40] == 230).all()           # nem a parede fora das colunas do painel
+    assert (plate[~mask] == before[~mask]).all()

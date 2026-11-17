@@ -289,6 +289,14 @@ def test_builtin_rules_3d():
         == "ocupa a parede 0 inteira"
     chest = _inst(0, "chest of drawers", m)
     assert ri.builtin_reason(chest, seg, [chest], _geometry_for(m, (-0.4, 0.4), (0.0, 0.9)), room) == ""
+    divider = _inst(0, "desk", m)                    # mesa presa à divisória com TV (vai a 2 m)
+    assert ri.builtin_reason(divider, seg, [divider], _geometry_for(m, (-0.5, 0.5), (0.0, 2.0), y=2.0), room) \
+        == "mesa presa a painel alto"
+    desk = _inst(0, "desk", m)
+    assert ri.builtin_reason(desk, seg, [desk], _geometry_for(m, (-0.5, 0.5), (0.0, 0.76), y=2.0), room) == ""
+    wide = _inst(0, "desk", m)                       # bancada de parede a parede (parede de 4 m)
+    assert ri.builtin_reason(wide, seg, [wide], _geometry_for(m, (-1.9, 1.9), (0.0, 0.76), y=2.5), room) \
+        == "mesa de parede a parede (0)"
 
 
 def test_ceiling_lamp_stays_floor_lamp_leaves():
@@ -353,3 +361,58 @@ def test_mode_features_only_loose_pieces_count_as_major():
     f = ri.mode_features([(_rect(shape, 0, 0, 30, 30), "cabinet"), (_rect(shape, 50, 50, 60, 60), "chair")], shape)
     assert f["rotulo_maior_peca"] == "chair" and f["area_soltos"] == pytest.approx(0.01)
     assert f["area_removivel"] == pytest.approx(0.1)
+
+
+def test_wall_panel_is_cut_from_bed_and_panel_cabinet_is_builtin():
+    """Cabeceira-painel de hotel: a parte da máscara da cama no plano da parede e acima do colchão fica na foto
+    (a placa não inventa a parede atrás dela); o colchão continua saindo."""
+    room = _room()
+    shape = (120, 120)
+    panel = _rect(shape, 20, 10, 100, 50)                       # painel na parede (y = 2,97), z de 0,8 a 1,6 m
+    mattress = _rect(shape, 25, 50, 95, 110)                    # colchão à frente (y = 2,0), z de 0,2 a 0,6 m
+    g1 = _geometry_for(panel, (-1.0, 1.0), (0.8, 1.6), y=2.97)
+    g2 = _geometry_for(mattress, (-0.9, 0.9), (0.2, 0.6), y=2.0)
+    pts = np.where(panel[..., None], g1["points"], g2["points"])
+    geo = {"points": pts, "stride": 1, "mask": np.isfinite(pts).all(-1)}
+    bed = _inst(0, "bed", panel | mattress)
+    notes = ri.split_wall_panels([bed], geo, room)
+    assert len(notes) == 1 and "painel fixo" in notes[0]
+    assert not (bed.mask & panel).any() and (bed.alpha[panel] == 0).all()
+    assert bed.mask[mattress].mean() > 0.95
+    assert bed.wall_panel is not None and bed.wall_panel[panel].mean() > 0.95
+    # o painel não vira "sombra/efeito" da cama na sala vazia
+    from mobilia.removal import plate as rp
+    groups = np.full(shape, rp.G_WALL, np.uint8)
+    cand = rp.effect_candidates([bed], groups, bed.mask)
+    assert not (cand & panel).any() and cand.any()
+    # sem geometria nada muda
+    bed2 = _inst(1, "bed", panel | mattress)
+    assert ri.split_wall_panels([bed2], None, None) == [] and bed2.mask.sum() == (panel | mattress).sum()
+    # armário (classe ambígua) que é só um painel no plano da parede: planejado
+    seg = _seg(np.zeros(shape, np.uint8))
+    cab = _inst(2, "cabinet", panel)
+    assert ri.builtin_reason(cab, seg, [cab], _geometry_for(panel, (-0.4, 0.4), (0.5, 1.5)), room) == "painel na parede"
+    # cômoda solta encostada (frente a 40 cm da parede): continua solta
+    chest = _inst(3, "chest of drawers", panel)
+    assert ri.builtin_reason(chest, seg, [chest], _geometry_for(panel, (-0.4, 0.4), (0.5, 1.5), y=2.6), room) == ""
+
+
+def test_small_loose_piece_inside_builtin_stays_with_it():
+    """Livros guardados na estante embutida: se o portão mantém os planejados, eles ficam junto (tirá-los abriria
+    buracos cinzentos nas prateleiras); um vaso solto no chão continua saindo."""
+    lab = _scene()
+    seg = _seg(lab)
+    shape = lab.shape
+    case = _rect(shape, 20, 30, 120, 90) & ~_rect(shape, 40, 45, 70, 60)   # estante com um nicho
+    shelf = _inst(0, "bookcase", case)
+    book = _inst(1, "book", _rect(shape, 40, 45, 70, 60))
+    vase = _inst(2, "vase", _rect(shape, 200, 140, 215, 160))
+    chair = _inst(3, "chair", _rect(shape, 80, 62, 100, 80))              # cadeira cercada pela estante: sai
+    insts = [shelf, book, vase, chair]
+    ri.classify(insts, seg)
+    assert shelf.kind == ri.KIND_BUILTIN and book.inside_builtin == "bookcase" and vase.inside_builtin == ""
+    assert chair.inside_builtin == ""
+    s = ri.InstanceSet(insts, shape)
+    assert {i.id for i in s.removal(keep_builtins=True)} == {2, 3}
+    assert {i.id for i in s.removal()} == {0, 1, 2, 3}
+    assert s.report()["pecas"][1]["dentro_de_planejado"] == "bookcase"

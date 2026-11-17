@@ -79,6 +79,12 @@ MIN_CONTEXT_FRAC = 0.01      # ... e em fração do buraco
 # "imagem" = LaMa direto no espaço da imagem (melhor quando o modelo da sala erra: linhas tortas por plano errado)
 STRATEGIES = ("planos", "imagem")
 GATE_WIDE_DILATE = 2.5       # máscara ampla do portão: núcleo dilatado 2,5× (sobra de borda/sombra do móvel)
+# Planejados mantidos **por padrão** (a 1ª tentativa já os deixa na foto, sem tentar a sala crua): quando a remoção
+# completa passa de 35% da foto ou só os planejados cobrem 10% ou mais. Atrás de armários, estantes e bancadas grandes
+# não há parede visível para copiar: o LaMa inventa "pedra derretida" e a nota pode até aprovar (cor média certa).
+KEEP_BUILTINS_TOTAL = 0.35
+KEEP_BUILTINS_AREA = 0.10
+KEEP_BUILTINS_MIN = 0.01     # planejados abaixo disto não mudam a decisão
 
 LIMITS = {
     "costura_de_max": 6.0,           # ΔE76 entre faixa interna e anel, por plano (aceite PT-V3-3: <= 3)
@@ -553,6 +559,10 @@ def effect_candidates(pieces: Sequence, groups: np.ndarray, core: np.ndarray) ->
         band = cv2.morphologyEx(band.astype(np.uint8), cv2.MORPH_CLOSE, disk(6)) > 0
         cand |= band & (wallish if builtin else floorish)
     prot = np.isin(groups, G_PROTECTED)
+    for p in pieces:                   # painel fixo recortado da peça (cabeceira-painel): fica na foto
+        panel = getattr(p, "wall_panel", None)
+        if panel is not None:
+            prot = prot | panel
     return cand & ~core & ~prot
 
 
@@ -736,7 +746,9 @@ class PlateResult:
         return {"placa": {"mascara_pct": round(100 * float(self.mask.mean()), 2),
                           "efeitos_pct": round(100 * float(self.effect.mean()), 2),
                           "sombra_px": int(self.shadow.sum()), "luz_px": int(self.light.sum()),
-                          "planejados_mantidos": self.kept_builtins, "planos": self.info.get("planos", {}),
+                          "planejados_mantidos": self.kept_builtins,
+                          "planejados_por_padrao": self.info.get("planejados_por_padrao"),
+                          "planos": self.info.get("planos", {}),
                           "tempos_s": {k: round(v, 2) for k, v in self.info.get("tempos", {}).items()},
                           "qualidade": None if self.quality is None else self.quality.to_dict(),
                           "estrategia": self.info.get("estrategia_portao", self.info.get("estrategia", "planos")),
@@ -1263,6 +1275,11 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
     else:
         plate, labels, pinfo = fill_planes(inpaint, photo, mask, groups, box, depth, rng, max_side)
     t["passada2_planos"] = time.perf_counter() - t0
+    panels = [pp.wall_panel for pp in pieces if getattr(pp, "wall_panel", None) is not None]
+    if panels:
+        n_ext = extend_wall_panels(plate, mask, labels, np.logical_or.reduce(panels))
+        if n_ext:
+            pinfo["painel_estendido"] = {"metodo": "painel espelhado para baixo", "area_px": n_ext}
     if not np.array_equal(plate[~mask], photo[~mask]):     # regra absoluta: nunca deveria acontecer
         raise AssertionError("placa difere da foto fora da máscara")
     q = None
@@ -1275,6 +1292,60 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
                        warnings)
 
 
+def extend_wall_panels(plate: np.ndarray, mask: np.ndarray, labels: np.ndarray, panels: np.ndarray) -> int:
+    """Continua para baixo o painel fixo que ficou na foto (cabeceira-painel atrás da cama): o pedaço dele que a
+    cama e as almofadas escondiam é parede da mesma madeira, não a parede lisa em volta que o LaMa copiaria.
+    Por componente do painel, as linhas logo acima da base dele são espelhadas para baixo, coluna a coluna, sobre a
+    máscara e só sobre parede (rótulo >= 0), até o piso. Altera ``plate`` no lugar; devolve os pixels trocados."""
+    keep = panels & ~mask
+    if keep.sum() < 50:
+        return 0
+    H, W = mask.shape
+    lab, n = ndimage.label(_dil(keep, 4))
+    done = 0
+    for k in range(1, n + 1):
+        comp = (lab == k) & keep
+        cols = np.nonzero(comp.any(0))[0]
+        if len(cols) < 8 or comp.sum() < 0.003 * H * W:  # pedaço pequeno do painel: o espelho viraria listras
+            continue
+        tops = np.array([np.nonzero(comp[:, c])[0].min() for c in cols])
+        bots = np.array([np.nonzero(comp[:, c])[0].max() for c in cols])
+        b0 = int(np.percentile(bots, 30))
+        hb = int(np.clip(0.5 * (b0 - np.median(tops)), 4, 40))
+        for c, bc in zip(cols, bots):
+            y = int(bc) + 1
+            while y < H and mask[y, c] and labels[y, c] >= 0:
+                # acima da base comum (coluna em que o painel acabou antes): repete o último pixel do painel
+                src = int(bc) if y <= b0 else b0 - ((y - b0 - 1) % hb)
+                plate[y, c] = plate[src, c]
+                done += 1
+                y += 1
+    return done
+
+
+def keep_builtins_reason(inst_set, shape: tuple[int, int]) -> str:
+    """Motivo para manter os planejados já na 1ª tentativa ("" = tenta a sala crua primeiro). Mede a área das
+    peças que saem com e sem os planejados (``inst_set.removal(keep)``), antes de qualquer preenchimento."""
+    def area(keep: bool) -> float:
+        m = np.zeros(shape, bool)
+        for i in inst_set.removal(keep):
+            m |= np.asarray(i.mask, bool)
+            a = getattr(i, "alpha", None)
+            if a is not None:
+                m |= np.asarray(a) > 0
+        return float(m.mean())
+
+    full, loose = area(False), area(True)
+    built = full - loose
+    if built < KEEP_BUILTINS_MIN:
+        return ""
+    if built >= KEEP_BUILTINS_AREA:
+        return f"os planejados cobrem {100 * built:.0f}% da foto"
+    if full >= KEEP_BUILTINS_TOTAL:
+        return f"tirar tudo reconstruiria {100 * full:.0f}% da foto"
+    return ""
+
+
 def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, inpaint: InpaintFn | None = None,
                       redetect: Callable | None = None, seed: int = 0, max_side: int = MAX_SIDE,
                       alternatives: bool = True, on_attempt: Callable | None = None) -> PlateResult:
@@ -1284,6 +1355,9 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     2. ``planejados_mantidos`` (só se há planejados): só os soltos saem;
     3. ``lama_imagem`` (``alternatives``): LaMa direto na imagem, com o conjunto da melhor tentativa até aqui;
     4. ``mascara_ampla`` (``alternatives``): por plano com o núcleo dilatado :data:`GATE_WIDE_DILATE` vezes.
+
+    Se :func:`keep_builtins_reason` acusa risco (planejados grandes ou remoção total grande), a 1ª tentativa já é
+    ``planejados_mantidos`` e a sala crua não é tentada: a parede atrás deles seria toda inventada.
 
     Fica a melhor (aprovada > menos motivos > nota sem teto). Se nenhuma passa, devolve a melhor com aviso (a
     interface oferece gerar mesmo assim, o modo A ou outra foto); nunca entrega uma placa ruim em silêncio.
@@ -1316,10 +1390,17 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     rank = lambda r: (r.quality.ok, r.quality.area_generated <= LIMITS["area_gerada_max"],  # noqa: E731
                       -len(r.quality.reasons),
                       r.quality.raw_score if r.quality.raw_score is not None else r.quality.score)
-    best = run("crua_por_plano", False, "planos", CORE_DILATE)
+    keep_why = keep_builtins_reason(inst_set, photo.shape[:2])
+    if keep_why:
+        best = run("planejados_mantidos", True, "planos", CORE_DILATE)
+        best.warnings.append(f"planejados mantidos na foto por padrão ({keep_why}): a parede atrás deles seria "
+                             "toda inventada")
+    else:
+        best = run("crua_por_plano", False, "planos", CORE_DILATE)
+    first_name = best.info["estrategia_portao"]
     if best.quality is not None and not best.quality.ok:
         first_reasons = list(best.quality.reasons)
-        if any(i.kind == "planejado" for i in inst_set.instances):
+        if not keep_why and any(i.kind == "planejado" for i in inst_set.instances):
             r2 = run("planejados_mantidos", True, "planos", CORE_DILATE)
             r2.warnings.append("sala crua reprovada (" + "; ".join(first_reasons) + "): planejados mantidos na foto")
             if rank(r2) >= rank(best):
@@ -1337,10 +1418,11 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
                     best = r
                 if best.quality.ok:
                     break
-        if best.quality.ok and best.info["estrategia_portao"] != "crua_por_plano":
+        if best.quality.ok and best.info["estrategia_portao"] != first_name:
             best.warnings.append(f"sala vazia aprovada na tentativa \"{best.info['estrategia_portao']}\" "
                                  f"(a primeira reprovou: {'; '.join(first_reasons)})")
     best.info["tentativas"] = attempts
+    best.info["planejados_por_padrao"] = keep_why or None
     if best.quality is not None and not best.quality.ok:
         best.warnings.append("a sala vazia ficou abaixo da qualidade mínima (" + "; ".join(best.quality.reasons)
                              + "): use o modo A ou envie outra foto")
