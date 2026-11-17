@@ -251,9 +251,13 @@ quadros: cada quadro é marco + camada dele, e a sombra da camada é cortada com
   (azulejo) ou LaMa + grão, casamento de tom (mediana Lab do anel), membrana tipo Poisson e corte de ilhas.
   Parede quase toda escondida: pintura lisa (cor mediana + gradiente de luz ajustado de forma robusta);
   rodapé detectado no perfil por altura e redesenhado reto. Objetos pequenos da parede (tomadas) não servem
-  de contexto.
-- **Nota (`PlateQuality`)** por plano: ΔE de costura local, razão de grão, distância/continuidade da linha
-  parede/piso e OneFormer rodado de novo na placa. **Portão:** reprovada → refaz mantendo os planejados →
+  de contexto. Sem material do plano à vista (menos de 1% do buraco na vista retificada) ou peça apoiada em
+  algo que fica (copo na bancada mantida: o anel é bancada, não piso), o trecho vai para o espaço da imagem
+  com contexto local, em vez de o LaMa inventar uma cor de piso/parede.
+- **Nota (`PlateQuality`)** por plano: ΔE de costura local, ΔE da média do preenchimento contra o anel (o
+  critério do aceite), razão de grão, distância/continuidade da linha parede/piso, costura do que não tem
+  plano (contra o anel inteiro) e OneFormer rodado de novo na placa. Plano preenchido que não pôde ser medido
+  (nenhum pixel do próprio material em volta) reprova. **Portão:** reprovada → refaz mantendo os planejados →
   se ainda reprovada, aviso (modo A ou outra foto). `scripts/avaliar_placa.py` mede isso num conjunto.
 
 ## 5. Render 3D sobre a foto (validado com testes reais no Blender 5.3)

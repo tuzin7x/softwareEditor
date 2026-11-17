@@ -68,13 +68,18 @@ def test_plate_with_lama_guarantees(lama, oneformer, room_fixture, name):
 @pytest.mark.xfail(strict=False, reason=(
     "aceite PT-V3-3 ainda não atingido nas fixtures só com máscaras do OneFormer (sem SAM), medido na CPU em "
     "17/11/2026: Nice costura do piso 3,66 ΔE (> 3); sala_sofas_brancos o OneFormer reencontra 'towel' 1,65% e "
-    "'table' 0,75% na placa. O portão reprova essas placas."))
+    "'table' 0,75% na placa; a média de cor do piso preenchido destoa do anel (sala_sofas_brancos ~9,6 ΔE na "
+    "revisão). O portão reprova essas placas."))
 @pytest.mark.parametrize("name", ["sala_sofas_brancos", "nice_terrazzo"])
 def test_plate_acceptance_thresholds(lama, oneformer, room_fixture, name):
-    """Aceite PT-V3-3: costura do piso <= 3 ΔE, linha parede/piso <= 3 px, nenhum móvel > 0,5% reencontrado."""
+    """Aceite PT-V3-3: média de cor do preenchimento x anel <= 3 ΔE em cada plano (e costura local do piso
+    <= 3 ΔE), linha parede/piso <= 3 px, nenhum móvel > 0,5% reencontrado."""
     _, r = _plate(name, lama, oneformer, room_fixture)
     q = r.quality
     assert q.per_plane["piso"]["costura_de"] <= 3.0, q.per_plane
+    for plane, s in q.per_plane.items():
+        if "preenchimento_de" in s:
+            assert s["preenchimento_de"] <= 3.0, (plane, q.per_plane)
     if "distancia_px" in q.line:
         assert q.line["distancia_px"] <= 3.0, q.line
     assert q.redetected == [], q.redetected

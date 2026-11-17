@@ -292,3 +292,65 @@ def test_nice_window_pixels_are_protected(room_fixture):
     sel = win & r.mask
     assert sel.sum() > 500
     assert (r.labels[sel] == rp.PROTECTED).mean() > 0.8
+
+
+# ------------------------------------------------------------------------------------------- revisão PT-V3-3
+def test_piece_resting_on_kept_object_is_not_filled_as_floor():
+    """Copo sobre a bancada mantida: a caixa diz "piso" atrás dele, mas em volta só há bancada. Não pode virar
+    uma mancha de piso no meio da bancada: vai para o espaço da imagem (contexto local)."""
+    room = _room()
+    img, groups, box = _render(room)
+    H, W = groups.shape
+    counter = np.zeros((H, W), bool)
+    counter[230:330, 120:360] = True                        # bancada (objeto que fica) sobre o piso
+    img[counter] = (40, 120, 60)
+    groups[counter] = 255
+    cup = np.zeros((H, W), bool)
+    cup[260:290, 220:250] = True
+    img[cup] = (250, 30, 30)
+    r = rp.build_plate(img, [_piece(cup, label="vase")], SimpleNamespace(groups=groups), room,
+                       inpaint=rp.telea_inpaint, assess_quality=False)
+    assert r.info["planos"].get("apoiado_em_objeto_px", 0) > 0
+    assert (r.labels[cup] == rp.OTHER).all()
+    fill = r.plate[cup].astype(float).mean(0)
+    assert np.abs(fill - (40, 120, 60)).max() < 25, fill          # cor da bancada, não do piso
+
+
+def test_plane_without_visible_material_is_not_filled_by_plane_and_gate_rejects_unmeasured():
+    """Piso todo coberto (nada do material à vista): o LaMa na vista retificada inventaria a cor. Os pixels vão
+    para o espaço da imagem; e um plano preenchido que não pôde ser medido reprova a nota."""
+    room = _room()
+    img, groups, box = _render(room)
+    H, W = groups.shape
+    fl = box.label == rp.FLOOR
+    groups[fl] = G_CEIL           # nenhum pixel de piso visível (rótulo de superfície, mas de outro material)
+    m = np.zeros((H, W), bool)
+    m[250:330, 150:330] = True
+    out, labels, info = rp.fill_planes(rp.telea_inpaint, img, m, groups, box)
+    assert info.get("piso", {}).get("metodo") == "sem_contexto"
+    assert not (labels[m] == rp.FLOOR).any()
+    # nota: um plano com área relevante e sem referência visível do material reprova
+    lab = np.where(m, rp.FLOOR, labels)
+    q = rp.assess(img, out, m, lab, groups, box)
+    assert not q.ok and any("sem referência" in s for s in q.reasons)
+
+
+def test_gate_rejects_fill_whose_mean_color_is_off():
+    """A média de cor do preenchimento muito longe da do anel (aceite do plano: ΔE da média) reprova, mesmo com
+    a costura local boa (mancha clara no meio do piso)."""
+    room = _room()
+    img, groups, box = _render(room)
+    H, W = groups.shape
+    m = np.zeros((H, W), bool)
+    m[230:350, 100:380] = True
+    plate = img.copy()
+    yy, xx = np.nonzero(m)
+    cy, cx = yy.mean(), xx.mean()
+    rr = np.hypot((yy - cy) / 60.0, (xx - cx) / 140.0)
+    glow = np.clip(1.0 - rr, 0, 1) ** 0.5 * 90.0                 # mancha clara no centro, borda casada
+    plate[yy, xx] = np.clip(plate[yy, xx] + glow[:, None], 0, 255).astype(np.uint8)
+    lab = np.where(m, box.label, box.label)
+    q = rp.assess(img, plate, m, lab, groups, box)
+    s = q.per_plane["piso"]
+    assert s["costura_de"] < rp.LIMITS["costura_de_max"], s
+    assert not q.ok and any("destoa" in t for t in q.reasons), (q.reasons, s)

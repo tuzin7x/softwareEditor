@@ -71,6 +71,8 @@ PLAIN_WALL_VISIBLE = 0.25    # parede com menos que isto visível -> pintura lis
 PROTECT_REACH = 0.012        # pixel mascarado a menos disto (diag) de janela/porta/cortina -> protegido
 PERIOD_MIN_ACF = 0.40
 MAX_SIDE = 1024              # lado máximo de uma vista retificada
+MIN_CONTEXT_PX = 1500        # material visível mínimo do plano na vista retificada para preencher por plano
+MIN_CONTEXT_FRAC = 0.01      # ... e em fração do buraco
 
 # --- limites da nota (portão) ----------------------------------------------------------------------------------
 LIMITS = {
@@ -78,6 +80,8 @@ LIMITS = {
     "grao_log2_max": 1.0,            # |log2(grão dentro / grão no anel)|
     "linha_px_max": 4.0,             # distância mediana da borda à linha parede/piso projetada (aceite: <= 3)
     "linha_continuidade_min": 0.5,   # fração dos pontos da linha (dentro da máscara) com borda achada
+    "preenchimento_de_max": 6.0,     # ΔE76 média do preenchimento x média do anel, por plano (aceite: <= 3)
+    "costura_sem_plano_max": 16.0,   # ΔE76 da costura do que não tem plano (vãos, protegidos, sobre bancadas)
     "area_gerada_max": 0.70,         # fração da foto reconstruída
     "redetectado_area_min": 0.005,   # móvel reencontrado pelo OneFormer na placa (> 0,5% da foto)
 }
@@ -690,6 +694,7 @@ class PlateQuality:
     area_generated: float
     redetected: list = field(default_factory=list)   # [{rotulo, area_pct}] reencontrados pelo OneFormer
     reasons: list = field(default_factory=list)       # motivos de reprovação (português)
+    raw_score: float | None = None                    # nota antes do teto de 59 (compara duas placas reprovadas)
 
     def to_dict(self) -> dict:
         return {"nota": round(self.score, 1), "aprovada": self.ok, "por_plano": self.per_plane,
@@ -768,6 +773,18 @@ def plane_stats(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: 
         name = LABEL_NAMES.get(int(L), f"parede{int(L)}")
         out[name] = {"area_px": int(sel.sum()), "costura_de": round(seam, 2), "preenchimento_de": round(fill, 2),
                      "grao_log2": round(float(np.log2(g_in / g_out)), 2)}
+    # o que não tem plano (vãos, protegidos, peças apoiadas em algo que fica): costura local contra o anel inteiro
+    # (qualquer material), para que uma mancha ali também conte na nota
+    sel = mask & np.isin(labels, (OTHER, PROTECTED))
+    if sel.sum() >= min_area * H * W:
+        sig = max(3.0, w_seam / 2.0)
+        lk = _nblur(lab_p, ring, sig)
+        lf = _nblur(lab_p, sel, sig)
+        valid = inner & sel & (cv2.GaussianBlur(ring.astype(np.float32), (0, 0), sig) > 0.05)
+        if valid.sum() >= 30:
+            de = np.linalg.norm((lk - lf)[valid], axis=1)
+            out["sem_plano"] = {"area_px": int(sel.sum()), "costura_de": round(float(de.mean()), 2),
+                                "costura_p90_de": round(float(np.percentile(de, 90)), 2)}
     return out
 
 
@@ -842,14 +859,33 @@ def redetected_furniture(seg, pan, mask: np.ndarray, min_area: float = LIMITS["r
 
 
 def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.ndarray, groups: np.ndarray,
-           box: RoomBox | None, redetect: Callable | None = None) -> PlateQuality:
-    """Nota automática da placa (0..100) e aprovação pelo :data:`LIMITS`."""
-    per = plane_stats(photo, plate, mask, labels, groups)
+           box: RoomBox | None, redetect: Callable | None = None, fill_info: dict | None = None,
+           min_area: float = 0.002) -> PlateQuality:
+    """Nota automática da placa (0..100) e aprovação pelo :data:`LIMITS`. Plano preenchido que não pôde ser
+    medido (nenhum pixel visível do próprio material em volta) reprova: o que não se mede não é aprovado."""
+    per = plane_stats(photo, plate, mask, labels, groups, min_area=min_area)
     line = line_stats(plate, photo, mask, box, labels=labels) if box is not None else {}
     area = float(mask.mean())
     reasons = []
     terms = []
+    H, W = mask.shape
+    for L in np.unique(labels[mask]):
+        if L in (OTHER, PROTECTED):
+            continue
+        name = LABEL_NAMES.get(int(L), f"parede{int(L)}")
+        n = int((mask & (labels == L)).sum())
+        if name in per or n < min_area * H * W or (fill_info or {}).get(name, {}).get("metodo") == "liso":
+            continue
+        reasons.append(f"{name} preenchido sem referência visível do material ({100 * n / (H * W):.1f}% da foto)")
+        terms.append(0.0)
     for name, s in per.items():
+        if name == "sem_plano":
+            if s["costura_de"] > LIMITS["costura_sem_plano_max"]:
+                reasons.append(f"mancha no preenchimento sem plano (ΔE {s['costura_de']:.1f})")
+            terms.append(np.clip(1 - (s["costura_de"] - 4.0) / 12.0, 0, 1))
+            continue
+        if s["preenchimento_de"] > LIMITS["preenchimento_de_max"]:
+            reasons.append(f"cor do preenchimento destoa no(a) {name} (ΔE {s['preenchimento_de']:.1f})")
         if s["costura_de"] > LIMITS["costura_de_max"]:
             reasons.append(f"costura visível no(a) {name} (ΔE {s['costura_de']:.1f})")
         if abs(s["grao_log2"]) > LIMITS["grao_log2_max"]:
@@ -873,10 +909,9 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         if red:
             reasons.append("móvel reaparece na sala vazia: " + ", ".join(r["rotulo"] for r in red))
         terms.append(0.0 if red else 1.0)
-    score = 100.0 * float(np.mean(terms)) if terms else 50.0
-    if reasons:
-        score = min(score, 59.0)
-    return PlateQuality(score, not reasons, per, line, area, red, reasons)
+    raw = 100.0 * float(np.mean(terms)) if terms else 50.0
+    score = min(raw, 59.0) if reasons else raw
+    return PlateQuality(score, not reasons, per, line, area, red, reasons, raw)
 
 
 # ============================================================================================================
@@ -899,6 +934,35 @@ def _protected_labels(mask, labels, groups, box: RoomBox | None, diag) -> np.nda
                 z0 = 0.0
             near |= sel & ins & (box.Z >= z0) & (box.Z <= op.z1)
     return near
+
+
+def _resting_on_kept(mask, labels, groups, diag, ring_frac: float = 0.015) -> np.ndarray:
+    """Pixels mascarados cujo plano da caixa (piso/teto/parede) está escondido atrás de algo que FICA na foto
+    (copo sobre a bancada mantida, vaso sobre a ilha): o anel visível em volta quase não tem o material do plano
+    e é dominado por objetos. Preencher na vista do plano aí inventa uma mancha de piso/parede no meio da bancada;
+    esses pixels vão para o espaço da imagem com contexto local."""
+    out = np.zeros(mask.shape, bool)
+    plane = mask & ((labels >= 0) | (labels == FLOOR) | (labels == CEIL))
+    if not plane.any():
+        return out
+    surfaces = np.isin(groups, (G_FLOOR, G_WALL, G_CEIL) + G_PROTECTED)
+    r = max(4, int(ring_frac * diag))
+    H, W = mask.shape
+    for L in np.unique(labels[plane]):
+        grp = G_FLOOR if L == FLOOR else (G_CEIL if L == CEIL else G_WALL)
+        n, cc, st, _ = cv2.connectedComponentsWithStats((plane & (labels == L)).astype(np.uint8), connectivity=8)
+        for k in range(1, n):
+            x, y, w, h, _ = st[k]
+            x0, y0, x1, y1 = max(0, x - r - 1), max(0, y - r - 1), min(W, x + w + r + 1), min(H, y + h + r + 1)
+            comp = cc[y0:y1, x0:x1] == k
+            ring = _dil(comp, r) & ~mask[y0:y1, x0:x1]
+            nr = int(ring.sum())
+            if nr < 30:
+                continue
+            g = groups[y0:y1, x0:x1][ring]
+            if (g == grp).mean() < 0.15 and surfaces[y0:y1, x0:x1][ring].mean() < 0.5:
+                out[y0:y1, x0:x1] |= comp
+    return out
 
 
 def clutter_mask(photo: np.ndarray, surface: np.ndarray, max_area: float = 0.0015, de: float = 14.0) -> np.ndarray:
@@ -976,6 +1040,10 @@ def fill_planes(inpaint: InpaintFn, photo: np.ndarray, mask: np.ndarray, groups:
                                                                              "px": int(sel.sum())}
     prot = _protected_labels(mask, labels, groups, box, diag)
     labels[prot] = PROTECTED
+    on_obj = _resting_on_kept(mask, labels, groups, diag)
+    if on_obj.any():
+        labels[on_obj] = OTHER
+        info["apoiado_em_objeto_px"] = int(on_obj.sum())
     out = photo.copy()
     remaining = mask.copy()
 
@@ -1068,6 +1136,11 @@ def _fill_rect(inpaint, cur, photo, hole_img, same_img, Hm, size, rng, ctx_restr
     rh = _dil(_warp_mask_in(hole_img, Hm, size), 2)
     inside = _warp_in(np.full((H, W), 255, np.uint8), Hm, size, cv2.INTER_NEAREST, cv2.BORDER_CONSTANT) > 0
     same = _warp_mask_in(same_img, Hm, size, 200) & ~rh & inside
+    n_hole = int((rh & inside).sum())
+    if int(same.sum()) < max(MIN_CONTEXT_PX, MIN_CONTEXT_FRAC * n_hole):
+        # quase nada do material do plano à vista: o LaMa com o buraco do tamanho da vista devolve uma cor
+        # inventada (cinza/verde-azulado). Esses pixels vão para o espaço da imagem com contexto local.
+        return cur, np.zeros((H, W), bool), {"metodo": "sem_contexto", "contexto_px": int(same.sum())}
     rmask = rh | ~inside
     if ctx_restrict:
         rmask |= ~same
@@ -1126,7 +1199,7 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
     q = None
     if assess_quality:
         t0 = time.perf_counter()
-        q = assess(photo, plate, mask, labels, groups, box, redetect)
+        q = assess(photo, plate, mask, labels, groups, box, redetect, pinfo)
         t["nota"] = time.perf_counter() - t0
     return PlateResult(plate, mask, core, effect, shadow, light, labels, q, {"planos": pinfo, "tempos": t},
                        warnings)
@@ -1147,7 +1220,9 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
         res2 = build_plate(photo, inst_set.removal(True), seg, room, depth, inpaint, redetect, seed, max_side)
         res2.kept_builtins = True
         res2.warnings.append("sala crua reprovada (" + "; ".join(first_reasons) + "): planejados mantidos na foto")
-        if res2.quality.ok or res2.quality.score >= res.quality.score:
+        # as duas reprovadas têm a nota limitada a 59: compara pela nota sem teto e pelo nº de motivos
+        rank = lambda q: (q.ok, -len(q.reasons), q.raw_score if q.raw_score is not None else q.score)
+        if rank(res2.quality) >= rank(res.quality):
             res = res2
     if not res.quality.ok:
         res.warnings.append("a sala vazia ficou abaixo da qualidade mínima (" + "; ".join(res.quality.reasons)
