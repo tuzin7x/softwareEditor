@@ -213,3 +213,60 @@ def psnr(a: np.ndarray, b: np.ndarray, mask: np.ndarray | None = None) -> float:
         d = d[mask]
     mse = float(d.mean()) if d.size else 0.0
     return float("inf") if mse == 0 else 10 * np.log10(255.0 ** 2 / mse)
+
+
+# ============================================================================================================
+# MKV sem perdas para auditoria (PT-V3-7): RGB direto, sem conversão para YUV
+# ============================================================================================================
+LOSSLESS_CODECS = ("libx264rgb", "ffv1")
+
+
+class LosslessWriter:
+    """MKV sem perdas dos quadros mestres (auditoria: decodificado, cada quadro volta byte a byte).
+
+    ``libx264rgb`` com ``-qp 0`` (rápido, padrão) ou ``ffv1`` (arquivo, mais lento). Os quadros vão em RGB sem
+    filtro de cor, por isso a ida e volta é exata. Mesmo contrato do :class:`VideoWriter` (``write``/``close``/
+    ``abort``; o arquivo só aparece no ``close`` sem erro)."""
+
+    def __init__(self, path: str | Path, width: int, height: int, fps: int, codec: str = "libx264rgb",
+                 log_path: str | Path | None = None):
+        if codec not in LOSSLESS_CODECS:
+            raise ValueError(f"codec sem perdas não suportado: {codec}")
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.size = (width, height)
+        self.frames = 0
+        self._tmp = self.path.with_name(self.path.stem + ".partial" + self.path.suffix)
+        if codec == "libx264rgb":
+            cargs = ["-c:v", "libx264rgb", "-preset", "ultrafast", "-qp", "0", "-pix_fmt", "rgb24"]
+        else:
+            cargs = ["-c:v", "ffv1", "-level", "3", "-slices", "16", "-g", "1", "-pix_fmt", "rgb24"]
+        cmd = [ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}", "-r", str(fps), "-i", "-",
+               *cargs, "-an", "-f", "matroska", str(self._tmp)]
+        self._log = open(log_path, "wb") if log_path else subprocess.DEVNULL
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=self._log,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    write = VideoWriter.write
+    abort = VideoWriter.abort
+    close = VideoWriter.close
+
+
+def decode_lossless(path: str | Path, width: int, height: int):
+    """Quadros RGB do MKV sem perdas, em ordem (1 = primeiro), sem conversão de cor."""
+    cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-i", str(path),
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    n = width * height * 3
+    idx = 0
+    try:
+        while True:
+            buf = p.stdout.read(n)
+            if len(buf) < n:
+                break
+            idx += 1
+            yield idx, np.frombuffer(buf, np.uint8).reshape(height, width, 3)
+    finally:
+        p.stdout.close()
+        p.wait()

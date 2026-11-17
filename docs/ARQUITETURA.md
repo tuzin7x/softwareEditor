@@ -308,6 +308,29 @@ após o movimento eles têm de cair fora do quadro ou sob outra peça presente).
   quadros (só o arredondamento da pilha, ≤ 2 níveis) e ≥ 1 s de foto exata. `frame_at`/`render_frames`
   (numpy, CPU) começam na placa corrigida e terminam `array_equal` à foto; a versão em GPU é o PT-V3-7.
 
+### 4.4 Composição, verificação e codificação do modo B (`layers2d/compose.py`, `layers2d/video.py`, PT-V3-7)
+
+- **Compositor** (`FrameCompositor`): a mesma conta de `layers.composite` (placa → sombreamento → RGBA
+  pré-multiplicado → delta de contato, float32, `rint`), mas só dentro das caixas das camadas presentes,
+  agrupadas em regiões disjuntas; fora delas o quadro é a placa sem conta nenhuma. Backend `numpy` (CPU,
+  bit a bit igual a `layers.composite`) ou `torch` (CUDA quando há: as camadas sobem uma vez e só o quadro
+  uint8 desce; ≤ 1 nível do numpy). Escala < 1 usa o `warpAffine` da CPU nos dois. `MOBILIA_COMPOSITOR_2D`
+  força `numpy`/`torch`/`cuda`; o padrão é CUDA se houver, senão numpy (torch na CPU é ~2× mais lento).
+- **Verificação** (`composite/verify.py`, `ModeBVerifier`, em fluxo, 100% dos quadros, regras do PLANO_V3 §3.5):
+  quadro 0 = placa; último = foto; fora de (máscara de remoção ∪ caixa das peças em movimento) todo quadro =
+  foto; placa = foto fora da máscara; pixel oculto visível = 0 (de `choreo.verify`); anti-morph entre quadros
+  consecutivos fora da região dinâmica. A caixa móvel sai só da geometria (caixa + deslocamento + escala), sem
+  o compositor.
+- **Codificação** (`render_mode_b`): os quadros vão por uma fila para o mesmo `video/encoder.py` do modo A
+  (NVENC quando a GPU codifica, x264 senão) e, opcionalmente, para um MKV sem perdas (`libx264rgb -qp 0`, RGB
+  sem conversão) de auditoria, que é decodificado inteiro e conferido por hash quadro a quadro. Qualquer falha
+  aborta e apaga os arquivos parciais: nenhum MP4 fica no disco. O 1º e o último quadro do MP4 são
+  decodificados e medidos (PSNR) contra a placa e a foto. Exige largura e altura pares (a foto é recortada na
+  resolução do vídeo antes das camadas, no PT-V3-8).
+- **Tempo** (`scripts/medir_composicao_modo_b.py`, sala sintética de 6 peças, 1920×1440, CPU de 4 núcleos do
+  ambiente de desenvolvimento, normalizado para 240 quadros): composição ≈ 3 s, verificação ≈ 2 s, total com
+  x264 em paralelo ≈ 7,5 s (169 quadros reais, escala linear; 0,7 s fixo de preparo). Na RTX 5070 Laptop é **estimativa, não medido**: ver o relatório do PT-V3-7 no histórico.
+
 ## 5. Render 3D sobre a foto (validado com testes reais no Blender 5.3)
 
 Comportamentos do Cycles **verificados empiricamente** (`tests/test_render_camera.py` e experimentos
