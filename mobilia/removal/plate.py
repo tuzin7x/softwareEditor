@@ -82,7 +82,8 @@ MIN_CONTEXT_FRAC = 0.01      # ... e em fração do buraco
 # --- limites da nota (portão) ----------------------------------------------------------------------------------
 # estratégias do portão (:func:`build_plate_gated`): "planos" = LaMa por plano retificado (padrão);
 # "imagem" = LaMa direto no espaço da imagem (melhor quando o modelo da sala erra: linhas tortas por plano errado)
-STRATEGIES = ("planos", "imagem")
+# "geometria" = sala refeita pela geometria (:mod:`geofill`: só material real da foto, plano a plano; padrão do portão)
+STRATEGIES = ("planos", "imagem", "geometria")
 GATE_WIDE_DILATE = 2.5       # máscara ampla do portão: núcleo dilatado 2,5× (sobra de borda/sombra do móvel)
 # Planejados mantidos **por padrão** (a 1ª tentativa já os deixa na foto, sem tentar a sala crua): quando a remoção
 # completa passa de 35% da foto ou só os planejados cobrem 10% ou mais. Atrás de armários, estantes e bancadas grandes
@@ -94,6 +95,11 @@ KEEP_BUILTINS_MIN = 0.01     # planejados abaixo disto não mudam a decisão
 # os planejados só ficam se o portão (agora com falhas duras: estrutura inventada, material, contorno) reprovar a
 # crua. True volta ao comportamento antigo (mantém por padrão quando ``keep_builtins_reason`` acusa risco).
 KEEP_BUILTINS_FIRST = False
+# Sala vazia pela geometria (:mod:`geofill`) é a 1ª estratégia do portão quando há modelo da sala: nada imaginado, só o
+# material real copiado plano a plano. As tentativas por LaMa ("crua_por_plano", "lama_imagem") só entram se a sala
+# não tem modelo (sem planos não há o que copiar) ou com ``GATE_LAMA_ALTERNATIVES`` ligado.
+GEOMETRY_FIRST = True
+GATE_LAMA_ALTERNATIVES = False
 
 LIMITS = {
     "costura_de_max": 6.0,           # ΔE76 entre faixa interna e anel, por plano (aceite PT-V3-3: <= 3)
@@ -216,6 +222,37 @@ def load_lama(device: str = "auto", offline: bool = False) -> Lama:
     return Lama(big_lama_path(offline=offline), device)
 
 
+class LazyLama:
+    """big-lama carregado só no 1º uso (a estratégia "geometria" não chama o inpainter; a LaMa fica como último
+    recurso das outras estratégias)."""
+
+    def __init__(self, device: str = "auto", offline: bool = False):
+        self.device, self.offline = device, offline
+        self._m: Lama | None = None
+
+    @property
+    def model(self):
+        return None if self._m is None else self._m.model
+
+    @property
+    def calls(self) -> list:
+        return [] if self._m is None else self._m.calls
+
+    @property
+    def loaded(self) -> bool:
+        return self._m is not None
+
+    def __call__(self, rgb8: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        if self._m is None:
+            self._m = load_lama(self.device, self.offline)
+        return self._m(rgb8, mask)
+
+    def release(self) -> None:
+        if self._m is not None:
+            self._m.release()
+            self._m = None
+
+
 def telea_inpaint(rgb8: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Inpainting clássico do OpenCV (Telea). Sem modelo: usado nos testes rápidos e como último recurso."""
     if not mask.any():
@@ -316,14 +353,23 @@ class RoomBox:
 
     def rect_for(self, plane: Plane, sel: np.ndarray, max_side: int = MAX_SIDE, pad_px: int = 40):
         """Homografia e tamanho da vista retificada que cobre ``sel`` (dilatado) com densidade ~ a da foto."""
+        p = self.rect_params(plane, sel, max_side, pad_px)
+        if p is None:
+            return None
+        a0, b1, ppm, size = p
+        return self.homography(plane, a0, b1, ppm), size
+
+    def rect_params(self, plane: Plane, sel: np.ndarray, max_side: int = MAX_SIDE, pad_px: int = 40,
+                    pct: float = 0.5, near_pct: float = 50.0):
+        """(a0, b1, ppm, tamanho) da vista retificada de :meth:`rect_for` (u = (a - a0)·ppm, v = (b1 - b)·ppm)."""
         vs, us = np.nonzero(_dil(sel, pad_px))
         a, b, dist = self.coords(plane, us, vs)
         ok = np.isfinite(a) & np.isfinite(b) & (dist > 0) & (dist < 15.0)
         if ok.sum() < 20:
             return None
         a, b, dist = a[ok], b[ok], dist[ok]
-        a0, a1 = np.percentile(a, [0.5, 99.5])
-        b0, b1 = np.percentile(b, [0.5, 99.5])
+        a0, a1 = np.percentile(a, [pct, 100 - pct])
+        b0, b1 = np.percentile(b, [pct, 100 - pct])
         if plane.wall is not None:
             a0, a1 = max(a0, -0.5), min(a1, plane.wall.length + 0.5)
             b0, b1 = max(b0, -0.3), min(b1, float(self.room.ceiling_height) + 0.2)
@@ -331,10 +377,10 @@ class RoomBox:
         sv, su = np.nonzero(sel)
         _, _, dsel = self.coords(plane, su, sv)
         dsel = dsel[np.isfinite(dsel) & (dsel > 0)]
-        med = float(np.median(dsel)) if dsel.size else float(np.median(dist))
+        med = float(np.percentile(dsel, near_pct)) if dsel.size else float(np.median(dist))
         ppm = min(self.K[0, 0] / max(med, 0.3), max_side / ext)
         size = (max(16, int((a1 - a0) * ppm) + 1), max(16, int((b1 - b0) * ppm) + 1))
-        return self.homography(plane, a0, b1, ppm), size
+        return float(a0), float(b1), float(ppm), size
 
     def floor_line(self, wall, step_px: float = 4.0) -> tuple[np.ndarray, np.ndarray]:
         """Pontos (N, 2) da linha parede/piso projetada (centro de pixel) e a normal da linha na imagem (N, 2)."""
@@ -1197,6 +1243,21 @@ def fill_planes(inpaint: InpaintFn, photo: np.ndarray, mask: np.ndarray, groups:
         # repinta: antes todo pixel ficava "outro" e o SDXL trocava a janela escondida por parede)
         labels[_protected_labels(mask, labels, groups, None, diag)] = PROTECTED
         return out, labels, info
+    labels, linfo = assign_labels(mask, groups, box, depth)
+    info.update(linfo)
+    out = photo.copy()
+    remaining = mask.copy()
+    return _fill_planes_body(inpaint, photo, mask, groups, box, labels, info, out, remaining, rng, max_side, rug, diag)
+
+
+def assign_labels(mask: np.ndarray, groups: np.ndarray, box: RoomBox, depth: np.ndarray | None = None,
+                  wall_to_floor: bool = True) -> tuple[np.ndarray, dict]:
+    """Rótulo de plano de cada pixel mascarado: ray-cast na caixa, "outro" para o que a profundidade mostra além da
+    caixa (vista por uma porta), parede da caixa que vira piso onde a foto mostra piso (``wall_to_floor``),
+    protegidos (janela/porta/cortina) e o que está apoiado em objeto que fica."""
+    H, W = mask.shape
+    diag = float(np.hypot(H, W))
+    info: dict = {}
     labels = box.label.copy()
     if depth is not None:                             # visto por uma porta: bem mais longe que a caixa
         dep = cv2.resize(depth.astype(np.float32), (W, H), interpolation=cv2.INTER_NEAREST) \
@@ -1214,7 +1275,7 @@ def fill_planes(inpaint: InpaintFn, photo: np.ndarray, mask: np.ndarray, groups:
     # parede da caixa onde a foto mostra piso (MoGe/RoomModel erram muito em cozinhas planejadas): o plano do piso
     # é a parte confiável; os pixels mascarados dessa parede cujo vizinho visível é piso viram piso
     vis_surf = ~_dil(mask, 2) & np.isin(groups, (G_FLOOR, G_WALL, G_CEIL))
-    if vis_surf.sum() >= 100:
+    if wall_to_floor and vis_surf.sum() >= 100:
         idx = ndimage.distance_transform_edt(~vis_surf, return_distances=False, return_indices=True)
         near = groups[idx[0], idx[1]]
         down = box.rays[..., 2] < 0
@@ -1234,9 +1295,11 @@ def fill_planes(inpaint: InpaintFn, photo: np.ndarray, mask: np.ndarray, groups:
     if on_obj.any():
         labels[on_obj] = OTHER
         info["apoiado_em_objeto_px"] = int(on_obj.sum())
-    out = photo.copy()
-    remaining = mask.copy()
+    return labels, info
 
+
+def _fill_planes_body(inpaint, photo, mask, groups, box, labels, info, out, remaining, rng, max_side, rug, diag):
+    H, W = mask.shape
     # ---- piso e teto (vista de cima / de baixo), contexto só do próprio material ------------------------------
     for key, grp in ((FLOOR, G_FLOOR), (CEIL, G_CEIL)):
         sel = mask & (labels == key)
@@ -1360,7 +1423,7 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
     if strategy not in STRATEGIES:
         raise ValueError(f"estratégia de placa desconhecida: {strategy}")
     if inpaint is None:
-        inpaint = load_lama()
+        inpaint = LazyLama()
     t: dict = {}
     t0 = time.perf_counter()
     H, W = photo.shape[:2]
@@ -1384,7 +1447,15 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
     cand = effect_candidates(pieces, groups, core)
     t["mascaras"] = time.perf_counter() - t0
     t0 = time.perf_counter()
-    plate1 = inpaint(photo, core | cand)                # passada 1 (barata): só para medir os efeitos
+    if strategy == "geometria" and box is not None:
+        # passada 1 pela própria geometria: a placa provisória não copia o reflexo/sombra do móvel (o LaMa
+        # reproduzia o reflexo escuro no piso polido e ele ficava fora da máscara)
+        from .geofill import fill_geometry
+
+        plate1 = fill_geometry(photo, core | cand, groups, box, depth, np.random.default_rng(seed), None,
+                               max_side, rug=rug)[0]
+    else:
+        plate1 = inpaint(photo, core | cand)            # passada 1 (barata): só para medir os efeitos
     t["passada1"] = time.perf_counter() - t0
     effect, shadow, light = verify_effects(photo, plate1, cand, core)
     del plate1
@@ -1397,7 +1468,13 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
         # mesmos protegidos da estratégia por plano: a janela/porta escondida pelo móvel não vira parede no refino
         labels[_protected_labels(mask, labels, groups, box, float(np.hypot(H, W)))] = PROTECTED
         pinfo = {"imagem": {"metodo": "lama-imagem", "area_px": int(mask.sum())}}
+    elif strategy == "geometria" and box is not None:
+        from .geofill import fill_geometry
+
+        plate, labels, pinfo = fill_geometry(photo, mask, groups, box, depth, rng, inpaint, max_side, rug=rug)
     else:
+        if strategy == "geometria":
+            warnings.append("sem modelo da sala: a sala vazia não pôde ser refeita pela geometria")
         plate, labels, pinfo = fill_planes(inpaint, photo, mask, groups, box, depth, rng, max_side, rug=rug)
     t["passada2_planos"] = time.perf_counter() - t0
     panels = [pp.wall_panel for pp in pieces if getattr(pp, "wall_panel", None) is not None]
@@ -1534,7 +1611,7 @@ def _free_cuda() -> None:
 def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, inpaint: InpaintFn | None = None,
                       redetect: Callable | None = None, seed: int = 0, max_side: int = MAX_SIDE,
                       alternatives: bool = True, on_attempt: Callable | None = None,
-                      refine: Callable | None = None) -> PlateResult:
+                      refine: Callable | None = None, geometry: bool | None = None) -> PlateResult:
     """Portão de qualidade (§3.6 e PT-V3-8). Tentativas, parando na primeira aprovada:
 
     1. ``crua_por_plano``: soltos + planejados, LaMa por plano;
@@ -1546,6 +1623,10 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     (``info["risco_planejados"]``), a menos que :data:`KEEP_BUILTINS_FIRST` esteja ligado. ``info["cobertura"]``
     diz quais planejados ficaram na foto e por quê. Erro no ``refine`` nunca derruba o trabalho: fica a LaMa.
 
+    Com ``geometry`` (padrão :data:`GEOMETRY_FIRST`) e modelo da sala, as tentativas usam a estratégia "geometria"
+    (:mod:`geofill`): ``crua_geometria`` → ``planejados_mantidos`` → ``mascara_ampla`` (todas pela geometria); as do
+    LaMa só com :data:`GATE_LAMA_ALTERNATIVES`.
+
     Fica a melhor (aprovada > área no limite > menor falha dura > menos motivos > nota sem teto). Se nenhuma passa, devolve a melhor com aviso (a
     interface oferece gerar mesmo assim, o modo A ou outra foto); nunca entrega uma placa ruim em silêncio.
     ``info["tentativas"]`` registra cada tentativa (estratégia, nota, motivos, tempo). ``on_attempt(nome, placa)``
@@ -1555,7 +1636,7 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     (refino SDXL só dentro da máscara, :func:`mobilia.gen.sdxl.refine_plate`); ele mesmo cai para a placa LaMa
     quando nenhuma semente é melhor. A tentativa registra a nota da LaMa e a do refino."""
     if inpaint is None:
-        inpaint = load_lama()
+        inpaint = LazyLama()
     attempts: list[dict] = []
 
     def run(name: str, keep: bool, strategy: str, dil: float) -> PlateResult:
@@ -1619,6 +1700,10 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
                       r.quality.raw_score if r.quality.raw_score is not None else r.quality.score)
     risk = keep_builtins_reason(inst_set, photo.shape[:2])
     keep_why = risk if KEEP_BUILTINS_FIRST else ""
+    geo = (GEOMETRY_FIRST if geometry is None else geometry) and room is not None \
+        and getattr(room, "walls", None) is not None
+    if geo:
+        return _gated_geometry(run, rank, inst_set, alternatives, risk, attempts)
     if keep_why:
         best = run("planejados_mantidos", True, "planos", CORE_DILATE)
         best.warnings.append(f"planejados mantidos na foto por padrão ({keep_why}): a parede atrás deles seria "
@@ -1649,6 +1734,39 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
         if best.quality.ok and best.info["estrategia_portao"] != first_name:
             best.warnings.append(f"sala vazia aprovada na tentativa \"{best.info['estrategia_portao']}\" "
                                  f"(a primeira reprovou: {'; '.join(first_reasons)})")
+    return _gate_finish(best, inst_set, attempts, keep_why, risk)
+
+
+def _gated_geometry(run, rank, inst_set, alternatives: bool, risk: str, attempts: list) -> PlateResult:
+    """Sequência do portão com a sala refeita pela geometria (ver :func:`build_plate_gated`)."""
+    best = run("crua_geometria", False, "geometria", CORE_DILATE)
+    first_reasons = [] if best.quality is None else list(best.quality.reasons)
+    if best.quality is not None and not best.quality.ok:
+        if any(i.kind == "planejado" for i in inst_set.instances):
+            r2 = run("planejados_mantidos", True, "geometria", CORE_DILATE)
+            r2.warnings.append("sala crua reprovada (" + "; ".join(first_reasons) + "): planejados mantidos na foto")
+            if rank(r2) >= rank(best):
+                best = r2
+        area_blocked = any(r.startswith("área reconstruída") for r in best.quality.reasons)
+        if alternatives and not best.quality.ok and not area_blocked:
+            keep = best.kept_builtins
+            alts = [("mascara_ampla", "geometria", CORE_DILATE * GATE_WIDE_DILATE)]
+            if GATE_LAMA_ALTERNATIVES:
+                alts += [("crua_por_plano", "planos", CORE_DILATE), ("lama_imagem", "imagem", CORE_DILATE)]
+            for name, strategy, dil in alts:
+                r = run(name, keep, strategy, dil)
+                if rank(r) > rank(best):
+                    r.warnings.extend(w for w in best.warnings if w not in r.warnings and "planejados" in w)
+                    best = r
+                if best.quality.ok:
+                    break
+        if best.quality.ok and best.info["estrategia_portao"] != "crua_geometria":
+            best.warnings.append(f"sala vazia aprovada na tentativa \"{best.info['estrategia_portao']}\" "
+                                 f"(a primeira reprovou: {'; '.join(first_reasons)})")
+    return _gate_finish(best, inst_set, attempts, "", risk)
+
+
+def _gate_finish(best: PlateResult, inst_set, attempts: list, keep_why: str, risk: str) -> PlateResult:
     best.info["tentativas"] = attempts
     best.info["planejados_por_padrao"] = keep_why or None
     best.info["risco_planejados"] = risk or None

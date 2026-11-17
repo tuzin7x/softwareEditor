@@ -306,7 +306,7 @@ def test_gate_runs_refine_after_each_attempt_and_records_it(monkeypatch):
         r.info["refino_sdxl"] = {"usado": True, "semente": 42, "motivo": "teste", "tempo_s": 0.1}
         return r
 
-    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                              refine=refine)
     assert seen and seen[0] == "crua_por_plano"
     t = r.report()["placa"]["tentativas"][0]

@@ -5,12 +5,14 @@ quando a detecção de modo (``removal.instances.detect_mode``) diz "B" ou o ped
 
 1. **Peças** (``removal/instances.py``): instâncias de móveis da foto na resolução do vídeo (OneFormer da análise,
    reamostrado, + SAM 2.1 se os pesos estão no disco), classificadas em soltos e planejados.
-2. **Sala vazia + portão de qualidade** (``removal/plate.py``, :func:`build_plate_gated`; com o perfil "B com SDXL",
-   cada tentativa passa pelo refino SDXL de ``gen/sdxl.py``, que cai para a LaMa se não melhorar): placa crua por plano,
-   com a nota automática (OneFormer rodado de novo na placa para achar móvel que "voltou"). Reprovada: tenta
-   mantendo os planejados, depois LaMa direto na imagem e máscara mais larga. Ainda reprovada: o trabalho termina
-   **sem MP4** e com um aviso claro (a interface oferece gerar mesmo assim, usar o modo A ou outra foto), a não ser
-   que o pedido traga ``accept_weak_plate`` (o usuário escolheu gerar mesmo assim; o aviso vai para o relatório).
+2. **Sala vazia + portão de qualidade** (``removal/plate.py``, :func:`build_plate_gated`): a sala vazia é
+   **refeita pela geometria** (``removal/geofill.py``): piso, paredes e teto da caixa da sala em vistas
+   retificadas, só com o material real visível (síntese por exemplos alinhada à grade, luz suave medida, rodapé e
+   divisas retas); nada é imaginado. Nota automática (OneFormer rodado de novo na placa para achar móvel que
+   "voltou"). Reprovada: tenta mantendo os planejados e com a máscara mais larga. Ainda reprovada: o trabalho
+   termina **sem MP4** e com um aviso claro (a interface oferece gerar mesmo assim, usar o modo A ou outra foto), a
+   não ser que o pedido traga ``accept_weak_plate``. A LaMa só é carregada se a foto não tiver modelo da sala; o
+   refino SDXL fica desligado por padrão (``MOBILIA_SDXL=auto`` ou ``1`` liga).
 3. **Camadas e coreografia** (``layers2d/layers.py`` e ``choreo.py``): RGBA pré-multiplicado de cada peça, ordem de
    pintura e entradas sem fade nem parte oculta à mostra.
 4. **Vídeo** (``layers2d/video.py``): composição + verificação §3.5 em 100% dos quadros (quadro 0 = placa, último =
@@ -41,6 +43,9 @@ from .telemetry import ETAPAS_B, Stopwatch, stages_sum, torch_peak_mb, torch_res
 ENV_REDETECTAR = "MOBILIA_MODO_B_REDETECTAR"
 # "1" grava também ``auditoria.mkv`` (sem perdas) e confere cada quadro dele byte a byte com os mestres
 ENV_AUDITORIA = "MOBILIA_MODO_B_MKV"
+# refino SDXL da sala vazia: desligado por padrão (a sala vazia é refeita pela geometria, sem imaginar nada);
+# ``MOBILIA_SDXL=auto`` volta a deixar o perfil de hardware decidir, "1" força
+SDXL_DEFAULT = "0"
 GEOMETRY_STRIDE = 4          # passo da geometria entregue à regra solto x planejado (como nas fixtures)
 NARRATIVE_TITLE = "O QUE O 7xAi FEZ"
 
@@ -78,10 +83,11 @@ class ModeBContext:
 
 # ------------------------------------------------------------------ modelos (pontos de troca para os testes)
 def load_inpainter(device: str):
-    """big-lama (CUDA quando há, senão CPU; baixa e confere o SHA-256 no 1º uso)."""
+    """big-lama (CUDA quando há, senão CPU; baixa e confere o SHA-256 no 1º uso), carregado só se alguma tentativa
+    do portão precisar dele: a sala vazia padrão é refeita pela geometria (``removal/geofill.py``), sem LaMa."""
     from .removal import plate as rp
 
-    return rp.load_lama(device)
+    return rp.LazyLama(device)
 
 
 def load_redetector(device: str, use_fp16: bool):
@@ -106,7 +112,7 @@ def sdxl_choice(hw) -> tuple[bool, bool, str]:
     o OneFormer da nota de cada semente divide a VRAM com ele."""
     from .gen.sdxl import ENV_SDXL
 
-    mode = os.environ.get(ENV_SDXL, "auto").strip().lower()
+    mode = os.environ.get(ENV_SDXL, SDXL_DEFAULT).strip().lower()
     if mode in ("0", "false", "nao", "não", "off", "desligado"):
         return False, False, f"refino SDXL desligado ({ENV_SDXL}=0)"
     from .analysis.weights import sdxl_installed
@@ -326,7 +332,8 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
     # -------------------------------------------------------------- sala vazia + portão
     em.stage("sala_vazia", 0.02, "Montando a sala vazia (por trás, não aparece no vídeo)")
     attempt_no = [0]
-    names = {"crua_por_plano": "sala crua, por plano", "planejados_mantidos": "mantendo os planejados",
+    names = {"crua_geometria": "sala crua, refeita pela geometria",
+             "crua_por_plano": "sala crua, por plano", "planejados_mantidos": "mantendo os planejados",
              "lama_imagem": "preenchimento direto na imagem", "mascara_ampla": "máscara mais larga"}
 
     def on_attempt(name, r):
@@ -406,7 +413,7 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
     accepted = (not ok) and bool(req.accept_weak_plate)
     warning = None if ok else gate_message(quality, accepted)
     gate = {"aprovada": ok, "nota": None if quality is None else round(quality.score, 1),
-            "estrategia": res.info.get("estrategia_portao", "crua_por_plano"),
+            "estrategia": res.info.get("estrategia_portao", "crua_geometria"),
             "tentativas": len(res.info.get("tentativas", [])),
             "motivos": [] if quality is None else list(quality.reasons),
             "reconferida_oneformer": _flag(ENV_REDETECTAR, "1"),

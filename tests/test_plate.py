@@ -230,7 +230,7 @@ def test_gate_falls_back_to_keeping_builtins(monkeypatch):
         return [{"rotulo": "cabinet", "area_pct": 3.0}] if len(calls) == 1 else []
 
     monkeypatch.setattr(rp, "redetected_furniture", fake_found)
-    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                              redetect=fake_redetect)
     names = [t["estrategia"] for t in r.info["tentativas"]]
     assert names[:2] == ["crua_por_plano", "planejados_mantidos"]    # a crua reprovou: tenta manter os planejados
@@ -283,7 +283,7 @@ def test_gate_tries_raw_room_first_even_with_large_builtins(monkeypatch):
     risco ("planejados cobrem 19%") só vai para o relatório. Se a crua aprova, entrega a crua."""
     room, img, groups, loose, built, insts = _big_builtin_scene()
     monkeypatch.setattr(rp, "redetected_furniture", lambda *a, **k: [])
-    r = rp.build_plate_gated(img, _inst_set(insts), SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    r = rp.build_plate_gated(img, _inst_set(insts), SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                              redetect=lambda p: (None, None), alternatives=False)
     assert r.info["tentativas"][0]["estrategia"] == "crua_por_plano"
     rep = r.report()["placa"]
@@ -301,7 +301,7 @@ def test_gate_keeps_large_builtins_first_when_configured(monkeypatch):
     room, img, groups, loose, built, insts = _big_builtin_scene()
     monkeypatch.setattr(rp, "redetected_furniture", lambda *a, **k: [])
     monkeypatch.setattr(rp, "KEEP_BUILTINS_FIRST", True)
-    r = rp.build_plate_gated(img, _inst_set(insts), SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    r = rp.build_plate_gated(img, _inst_set(insts), SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                              redetect=lambda p: (None, None), alternatives=False)
     assert r.kept_builtins
     assert [t["estrategia"] for t in r.info["tentativas"]] == ["planejados_mantidos"]
@@ -449,7 +449,7 @@ def test_gate_alternatives_record_attempts_and_skip_when_only_area(monkeypatch):
 
     monkeypatch.setattr(rp, "assess", bad)
     seen = []
-    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                              on_attempt=lambda name, res: seen.append((name, res.info["estrategia"])))
     assert seen == [("crua_por_plano", "planos"), ("lama_imagem", "imagem"), ("mascara_ampla", "planos")]
     t = r.report()["placa"]["tentativas"]
@@ -458,13 +458,13 @@ def test_gate_alternatives_record_attempts_and_skip_when_only_area(monkeypatch):
     assert any("modo A" in w for w in r.warnings)
     reason[:] = ["área reconstruída muito grande (80% da foto)"]
     seen.clear()
-    rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                          on_attempt=lambda name, res: seen.append(name))
     assert seen == ["crua_por_plano"]
     # área acima do limite junto com outros motivos (foto lotada): as alternativas também não podem passar
     reason[:] = ["costura visível no(a) piso (ΔE 9.0)", "área reconstruída muito grande (80% da foto)"]
     seen.clear()
-    rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                          on_attempt=lambda name, res: seen.append(name))
     assert seen == ["crua_por_plano"]
 
@@ -507,7 +507,7 @@ def test_gate_never_prefers_wide_mask_that_breaks_area_limit(monkeypatch):
 
     monkeypatch.setattr(rp, "assess", fake)
     areas = {}
-    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint,
+    r = rp.build_plate_gated(img, inst_set, SimpleNamespace(groups=groups), room, inpaint=rp.telea_inpaint, geometry=False,
                              on_attempt=lambda name, res: areas.update({name: res.quality.area_generated}))
     assert areas["mascara_ampla"] == 0.72 and areas["crua_por_plano"] == 0.30     # a máscara larga "melhorou" a nota
     assert r.info["estrategia_portao"] != "mascara_ampla" and r.quality.area_generated == 0.30

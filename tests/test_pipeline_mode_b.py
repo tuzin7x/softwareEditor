@@ -174,7 +174,9 @@ def test_mode_b_gate_rejects_without_mp4_then_user_accepts(env, tmp_path, monkey
     g = rep["portao_qualidade"]
     assert not g["aprovada"] and rep["video_entregue"] is False and rep["aviso"] == res.warning
     names = [t["estrategia"] for t in g["tentativas_detalhe"]]
-    assert names[0] == "crua_por_plano" and "lama_imagem" in names and "mascara_ampla" in names
+    # sala refeita pela geometria primeiro; sem as tentativas do LaMa (nada imaginado)
+    assert names[0] == "crua_geometria" and "mascara_ampla" in names and "lama_imagem" not in names
+    assert all(t["metodo"] == "geometria" for t in g["tentativas_detalhe"])
     assert "verificacao_modo_b" not in rep
     done = [e for e in events if e["event"] == "done"][-1]
     assert done["output"] is None and done["warning"] == res.warning and done["mode"] == "B"

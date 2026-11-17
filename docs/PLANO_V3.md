@@ -100,6 +100,43 @@ e os móveis surgem e se montam progressivamente.
 
 ### 3.2 Sala vazia (o gargalo de qualidade)
 
+> **Revisão (17/11/2026, decisão do usuário: "parar de pedir para a IA imaginar; reconstruir pela geometria").** As
+> placas do LaMa (+ SDXL) com sofá e mesa grandes saíam com névoa branca na parede, fantasma dos quadros, placas
+> cinza soltas, porcelanato virando "carpete" e portas inventadas (nota do usuário ~2–3/10). A estratégia padrão
+> agora é **"geometria"** (`mobilia/removal/geofill.py`), 1ª tentativa do portão (`crua_geometria`, depois
+> `planejados_mantidos` e `mascara_ampla`, todas pela geometria). Nada é gerado; só o material real visível é
+> copiado, plano a plano:
+>
+> 1. **Estrutura:** rótulos da caixa (`RoomBox`, câmera e planos do MoGe-2), protegidos e "outro" como antes, sem a
+>    regra "parede vira piso por vizinhança". A **linha parede/piso** de cada parede é corrigida pela divisa
+>    parede/piso visível na segmentação (ajuste robusto de deslocamento e inclinação sobre a linha projetada): a
+>    divisa dentro do buraco é reta e fica onde a foto mostra. O "piso" da caixa além de todo piso visível (caixa
+>    sem parede do fundo, até o horizonte) vira "outro".
+> 2. **Piso** (vista de cima): foto = base × luz × detalhe. Luz: polinômio robusto do material visível + diferença
+>    medida na borda levada para dentro por membrana que se apaga com a distância, limitada à faixa de luz vista (sem
+>    mancha de reflexo puxada para o meio). Detalhe: grade nos dois eixos (porcelanato) → cópia pixel a pixel a um
+>    múltiplo exato da grade medida por autocorrelação (subpixel; rejunte alinhado); período num eixo só (tábuas) →
+>    cada tábua continua a si mesma; sem período → síntese por exemplos (retalhos com sobreposição, emendas de poucos
+>    pixels, fontes sem manchas). Piso de textura fina (granilite, carpete): detalhe fino reposto no espaço da imagem
+>    com retalhos da **mesma distância** da câmera.
+> 3. **Paredes e teto:** cor/luz de baixa frequência num campo único no espaço da imagem (todas as paredes visíveis;
+>    gradiente linear por parede × resíduo continuado coluna a coluna: a cor vista acima do móvel desce, atravessa as
+>    divisas falsas da caixa e segue as quinas reais). Parede lisa: + grão medido (sem névoa). Parede com textura
+>    (painel, friso): listras continuadas / retalhos presos à mesma altura. **Rodapé** medido por altura acima da
+>    linha corrigida e redesenhado reto (parede sem rodapé à vista usa o das outras).
+> 4. **Aberturas:** a janela/porta/cortina visível nunca muda; o pedaço escondido continua coluna a coluna os pixels
+>    reais (cortina até o chão; vidro só alguns pixels, o resto é parede). **"Outro"** (vista por porta, sem plano):
+>    cor neutra do entorno, lisa. Sobras sem vista: continuação dos vizinhos já refeitos.
+> 5. **Acabamento:** membrana de tom na borda na escala da textura e grão casado com a foto, por plano.
+> 6. A passada 1 da máscara de efeitos também usa a geometria (o LaMa reproduzia o reflexo escuro do móvel no piso
+>    polido e ele ficava fora da máscara). LaMa só é carregada se a foto não tiver modelo da sala; SDXL desligado por
+>    padrão (`MOBILIA_SDXL=auto`/`1` liga). ~5 s de CPU por placa (1280 px), sem GPU.
+>
+> Limites conhecidos: caixa da sala errada (parede partida em fatias, sem parede do fundo) ainda deixa degraus
+> verticais nas divisas falsas; piso de porcelanato liso cuja grade não aparece o bastante sai liso, sem rejunte (o
+> portão acusa "material"); textura de parede com período curto sai mais suave que a real; os limites do portão
+> foram calibrados para o LaMa e reprovam várias placas da geometria que estão visualmente melhores.
+
 Ordem que o protótipo validou: C > B > A > D (`p_removal/out/cmp_all.jpg`).
 
 1. **Máscara de remoção = peças + anel de 1,2% da diagonal + sombra e reflexo.** Primeira passada de LaMa. Depois, só ficam na máscara os candidatos (faixa espelhada abaixo dos pés, até 45% da altura) em que a foto difere da placa e que estão ligados à peça. Segunda passada.
