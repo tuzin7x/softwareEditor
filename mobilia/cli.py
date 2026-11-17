@@ -9,7 +9,10 @@ Uso:
   python -m mobilia.cli design --photo sala.jpg --funcao mudar_estilo --estilo escandinavo --ambiente sala
                                [--n 4] [--seed 7] [--mask area.png] [--prompt "texto"] [--evento natal]
                                [--out-dir pasta/] [--quality rapido|final] [--json]
-  python -m mobilia.cli ampliar --image versao.jpg --out versao_4k.jpg [--lado 3840] [--json]
+  python -m mobilia.cli ampliar|upscale --image versao.jpg --out versao_4k.jpg [--lado 3840] [--json]
+  python -m mobilia.cli showcase --before antes.jpg --after v1.jpg [v2.jpg ...] --out video.mp4
+                                 [--format 16x9|9x16] [--duracao 15] [--rotulos "Escandinavo" ...]
+                                 [--sem-rotulos] [--sem-marca] [--json]
 
 Com ``--json`` cada evento de progresso é impresso como uma linha JSON (protocolo em
 mobilia/jobs.py) — é assim que a interface gráfica acompanha o trabalho.
@@ -233,6 +236,7 @@ def _cmd_upscale(a) -> int:
     try:
         if not os.path.isfile(a.image):
             raise FileNotFoundError(f"Imagem não encontrada: {a.image}")
+        emit({"event": "progress", "stage": "ampliar", "fraction": 0.0, "message": "Carregando o modelo de ampliação"})
         _, info = upscale(a.image, a.out, long_side=a.lado, device=a.device,
                           progress=lambda f: emit({"event": "progress", "stage": "ampliar", "fraction": round(f, 3),
                                                    "message": "Ampliando para 4K"}))
@@ -241,6 +245,40 @@ def _cmd_upscale(a) -> int:
             print(f"Pronto: {a.out} ({info['para'][0]}x{info['para'][1]})", flush=True)
         return 0
     except Exception as e:  # noqa: BLE001
+        ev = {"event": "error", "message": str(e) or e.__class__.__name__, "detail": traceback.format_exc()}
+        print(json.dumps(ev, ensure_ascii=False) if a.json else f"ERRO: {ev['message']}", flush=True)
+        return 1
+
+
+def _cmd_showcase(a) -> int:
+    """"Vídeo antes e depois": a foto original revelada pelas versões redesenhadas (MP4 H.264 para redes sociais).
+
+    Eventos (``--json``): ``progress`` (stage ``video``) e ``done`` (output, size, frames, fps, duration_s, labels,
+    codec, s); em falha, ``error`` (message, detail)."""
+    from .video.showcase import render_showcase
+
+    emit = _json_or_human(a)
+    try:
+        if not os.path.isfile(a.before):
+            raise FileNotFoundError(f"Foto original não encontrada: {a.before}")
+        for f in a.after:
+            if not os.path.isfile(f):
+                raise FileNotFoundError(f"Versão não encontrada: {f}")
+        emit({"event": "progress", "stage": "video", "fraction": 0.0, "message": "Preparando o vídeo antes e depois"})
+        res = render_showcase(a.before, a.after, a.out, fmt=a.format, fps=a.fps, duration=a.duracao,
+                              labels=a.rotulos, show_labels=not a.sem_rotulos, brand=not a.sem_marca,
+                              codec=a.codec, progress=lambda f: emit(
+                                  {"event": "progress", "stage": "video", "fraction": round(f, 3),
+                                   "message": "Gerando o vídeo antes e depois"}))
+        emit(res.to_event())
+        if not a.json:
+            print(f"Pronto: {res.output} ({res.size[0]}x{res.size[1]}, {res.duration_s:.1f} s, {res.codec})",
+                  flush=True)
+        return 0
+    except KeyboardInterrupt:
+        emit({"event": "error", "message": "Cancelado pelo usuário.", "detail": ""})
+        return 130
+    except Exception as e:  # noqa: BLE001 - erro reportado à UI com detalhe técnico
         ev = {"event": "error", "message": str(e) or e.__class__.__name__, "detail": traceback.format_exc()}
         print(json.dumps(ev, ensure_ascii=False) if a.json else f"ERRO: {ev['message']}", flush=True)
         return 1
@@ -322,12 +360,26 @@ def main(argv=None) -> int:
     d.add_argument("--quality", default="final", choices=["rapido", "final"])
     d.add_argument("--device", default="auto", help="auto | cuda | cpu")
     d.add_argument("--json", action="store_true", help="eventos de progresso em JSON (uso pela UI)")
-    up = sub.add_parser("ampliar", help="amplia uma versão para 4K (Real-ESRGAN x4)")
+    up = sub.add_parser("ampliar", aliases=["upscale"], help="amplia uma versão para 4K (Real-ESRGAN x4)")
     up.add_argument("--image", required=True)
     up.add_argument("--out", required=True)
-    up.add_argument("--lado", type=int, default=3840, help="lado maior final (0 = 4x sem reduzir)")
+    up.add_argument("--lado", "--long-side", type=int, default=3840, help="lado maior final (0 = 4x sem reduzir)")
     up.add_argument("--device", default="auto")
     up.add_argument("--json", action="store_true")
+    sc = sub.add_parser("showcase", help="vídeo antes e depois (foto original -> versões redesenhadas)")
+    sc.add_argument("--before", required=True, help="foto original (ou o antes.jpg do redesenho)")
+    sc.add_argument("--after", required=True, nargs="+", help="versões redesenhadas, na ordem do vídeo")
+    sc.add_argument("--out", required=True, help="MP4 de saída")
+    sc.add_argument("--format", default="16x9", help="16x9 (1920x1080) | 9x16 (1080x1920, Reels/Stories)")
+    sc.add_argument("--duracao", "--duration", type=float, default=None,
+                    help="segundos (padrão: 10-20 s conforme o número de versões)")
+    sc.add_argument("--fps", type=int, default=30)
+    sc.add_argument("--rotulos", "--labels", nargs="*", default=None,
+                    help="nome de cada versão no rótulo 'Depois' (padrão: estilo lido do design.json)")
+    sc.add_argument("--sem-rotulos", action="store_true", help="sem os rótulos Antes/Depois")
+    sc.add_argument("--sem-marca", action="store_true", help="sem a marca 7xAi no canto")
+    sc.add_argument("--codec", default=None, help="libx264 | h264_nvenc (padrão: automático)")
+    sc.add_argument("--json", action="store_true")
     rc = sub.add_parser("recompor", help="refaz composição e MP4 de um trabalho já renderizado "
                                        "(precisa dos EXR: gere o trabalho com MOBILIA_MANTER_EXR=1)")
     rc.add_argument("--work-dir", required=True)
@@ -340,7 +392,8 @@ def main(argv=None) -> int:
     apply_gpu_cache_env(os.environ)
     return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch,
             "prefetch": _cmd_prefetch, "aquecer": _cmd_warmup, "recompor": _cmd_recompose,
-            "design": _cmd_design, "ampliar": _cmd_upscale}[a.cmd](a)
+            "design": _cmd_design, "ampliar": _cmd_upscale, "upscale": _cmd_upscale,
+            "showcase": _cmd_showcase}[a.cmd](a)
 
 
 if __name__ == "__main__":
