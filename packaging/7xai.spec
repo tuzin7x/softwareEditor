@@ -10,7 +10,9 @@ from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
 sys.path.insert(0, str(ROOT / "packaging"))
+sys.path.insert(0, str(ROOT))  # collect_submodules("mobilia.modules") importa o pacote
 from win_version import EXE_NAME, build_version_info  # noqa: E402
+from PyInstaller.utils.hooks import collect_submodules  # noqa: E402
 
 datas = [(str(ROOT / "mobilia"), "payload/mobilia"), (str(ROOT / "requirements"), "payload/requirements"),
          # interface 7xAi: fontes Inter (SIL OFL, com OFL.txt) e imagens da folha de estilo
@@ -23,7 +25,8 @@ excludes = ["torch", "torchvision", "numpy", "scipy", "cv2", "bpy", "transformer
 
 a = Analysis([str(ROOT / "packaging" / "launcher.py")], pathex=[str(ROOT)], datas=datas,
              hiddenimports=["mobilia.ui.app", "mobilia.ui.legacy", "mobilia.ui.design_widgets", "mobilia.ui.widgets",
-                            "mobilia.ui.setup_dialog", "mobilia.bootstrap",
+                            "mobilia.ui.setup_dialog", "mobilia.bootstrap", "mobilia.ui.modules", "mobilia.modules",
+                            *collect_submodules("mobilia.modules"),  # módulos opcionais (abas)
                             "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"],
              excludes=excludes, noarchive=False)
 pyz = PYZ(a.pure)

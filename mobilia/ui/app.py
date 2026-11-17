@@ -29,6 +29,7 @@ from . import brand, theme
 from .design_widgets import (FUNCTION_INFO, FUNCTION_ORDER, STYLE_HINTS, BeforeAfterView, FunctionCard, MaskEditor,
                              Segmented, StyleCard, ThumbStrip, VariantGrid, chip, cover_pixmap)
 from .legacy import StageList
+from .modules import ModuleHost
 from .runner import CliResult, CliTask, HardwareProbe
 from .widgets import (PHOTO_FILTER, DropZone, ImageView, StatusBar, StepHeader, human_size, on_click, paint_chip,
                       rule, tracked_label)
@@ -332,13 +333,15 @@ class MainWindow(QMainWindow):
         self.side.finished.connect(self._on_side_finished)
         self.timer = QTimer(self); self.timer.timeout.connect(self._tick)
 
+        self.modules = ModuleHost(self)                # módulos opcionais (mobilia/modules); sem eles, nada muda
         root = QWidget(); root.setObjectName("root"); self.setCentralWidget(root)
         outer = QVBoxLayout(root); self.outer = outer
         outer.setContentsMargins(32, 18, 32, 18); outer.setSpacing(14)
         outer.addLayout(self._build_header())
         self.stepper = Stepper(); self.stepper.step_clicked.connect(self._on_step_clicked)
-        outer.addWidget(self.stepper)
-        body = QHBoxLayout(); body.setSpacing(20); outer.addLayout(body, 1)
+        view = self.modules.design_layout(outer)       # == outer quando não há módulos
+        view.addWidget(self.stepper)
+        body = QHBoxLayout(); body.setSpacing(20); view.addLayout(body, 1)
         self.left = QStackedWidget()
         self.left.addWidget(self._build_drop())
         self.left.addWidget(self._build_text_stage())
@@ -375,6 +378,7 @@ class MainWindow(QMainWindow):
         on_click(self.btn_legacy, self.open_legacy)
         head.addWidget(mark, 0, Qt.AlignVCenter)
         head.addSpacing(22); head.addWidget(vr, 0, Qt.AlignVCenter); head.addSpacing(22)
+        self.modules.add_nav(head, tag)
         head.addWidget(tag, 0, Qt.AlignVCenter); head.addStretch(1)
         head.addWidget(self.btn_legacy, 0, Qt.AlignVCenter); head.addSpacing(18)
         head.addWidget(lock, 0, Qt.AlignVCenter); head.addSpacing(8); head.addWidget(priv, 0, Qt.AlignVCenter)
@@ -779,6 +783,7 @@ class MainWindow(QMainWindow):
         self._compact = compact
         self.outer.setContentsMargins(*((24, 10, 24, 10) if compact else (32, 18, 32, 18)))
         self.outer.setSpacing(10 if compact else 14)
+        self.modules.set_compact(compact)
         for pg in self.pages:
             pg.set_compact(compact)
         for c in list(self.function_cards.values()) + list(self.style_cards.values()):
