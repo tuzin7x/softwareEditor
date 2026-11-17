@@ -90,7 +90,7 @@ class Upscaler:
         H, W = rgb.shape[:2]
         s, t = self.scale, self.tile
         out = np.zeros((H * s, W * s, 3), np.uint8)
-        x = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1)[None].float() / 255.0
+        x = torch.from_numpy(np.array(rgb, dtype=np.uint8, copy=True)).permute(2, 0, 1)[None].float() / 255.0
         tiles = [(y0, x0) for y0 in range(0, H, t) for x0 in range(0, W, t)]
         for k, (y0, x0) in enumerate(tiles):
             y1, x1 = min(H, y0 + t), min(W, x0 + t)
