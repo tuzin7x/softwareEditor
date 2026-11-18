@@ -64,8 +64,31 @@ Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{ap
 
 [Run]
 Filename: "{app}\{#ExeName}"; Description: "Abrir o {#AppName}"; Flags: nowait postinstall skipifsilent
+; atualização automática (o app roda este instalador com /VERYSILENT ... /AUTOUPDATE e fecha): reabre o 7xAi no fim.
+; Sem /AUTOUPDATE (instalação normal ou silenciosa do CI) esta linha não roda.
+Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"; Flags: nowait; Check: IsAutoUpdate
 
 [Code]
+// /AUTOUPDATE: parâmetro passado só pela atualização automática do app (mobilia/ui/updater.py)
+function IsAutoUpdate: Boolean;
+var I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/AUTOUPDATE') = 0 then begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  // na atualização automática, dá tempo para o 7xAi terminar de fechar (ele fecha logo depois de abrir o instalador)
+  if IsAutoUpdate then
+    Sleep(3000);
+  Result := True;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var Dir: String;
 begin

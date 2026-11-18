@@ -128,6 +128,73 @@ Em **Settings**:
 4. **Releases → Enable release immutability** (recomendado), para que arquivos e tag de uma Release publicada não
    possam ser trocados depois. O workflow é compatível: ele anexa os arquivos **antes** de publicar o rascunho.
 
+## Atualização automática
+
+O 7xAi instalado se atualiza sozinho a partir destas Releases, sem servidor nem custo (código em
+`mobilia/ui/updater.py` e `mobilia/ui/updater_dialog.py`). Por isso **o nome dos arquivos, o `SHA256SUMS.txt` e a
+marca "Latest" fazem parte do contrato**: não renomeie os arquivos à mão.
+
+**Como funciona**
+
+1. Alguns segundos depois de abrir, em segundo plano (a interface nunca espera), o app consulta
+   `https://api.github.com/repos/tuzin7x/softwareEditor/releases/latest` — sem login, sem dados pessoais (o
+   User-Agent é só `7xAi-updater`). No máximo **uma consulta automática por dia**; o botão **Atualizações →
+   Procurar atualizações** (barra de status) consulta na hora. Sem internet, tempo esgotado ou limite de consultas
+   do GitHub (403/429, 60 por hora por IP): nada aparece; na consulta manual, uma mensagem curta explica.
+2. Só conta a Release **estável** marcada como "Latest", com tag `vX.Y.Z` maior que a versão instalada. Rascunhos e
+   pré-lançamentos (`prerelease`) **nunca** são oferecidos.
+3. Se houver versão nova: janela "Nova versão X.Y.Z disponível" com as notas (sem a tabela de downloads e sem a
+   seção de SHA-256; Markdown sem HTML) e os botões **Atualizar agora**, **Depois** e **Pular esta versão** (a
+   versão pulada não volta a aparecer sozinha, só numa consulta manual). Há também a caixa "Procurar atualizações
+   automaticamente ao abrir" (o mesmo que o item do menu **Atualizações**).
+4. **Atualizar agora** (instalado): baixa `SHA256SUMS.txt` e `7xAI-Setup-vX.Y.Z.exe` para
+   `%LOCALAPPDATA%\MobiliaStudio\updates`, com barra de progresso e **Cancelar**; confere o SHA-256 (se não bater,
+   apaga o arquivo e avisa); roda o instalador com
+   `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS /DIR=<pasta atual> /AUTOUPDATE`
+   e fecha o 7xAi. O instalador espera 3 s o app terminar de fechar, troca os arquivos da pasta do programa e, **só
+   com `/AUTOUPDATE`**, reabre o 7xAi (linha extra no `[Run]` do `installer.iss`). Se houver um trabalho em
+   andamento, o app pergunta antes.
+5. **Portátil** (arquivo único): o botão vira **Baixar nova versão**; o novo `7xAI-Portable-vX.Y.Z.exe` (conferido)
+   é salvo ao lado do atual (ou em Downloads, se a pasta não aceitar escrita). Um `.exe` aberto não pode ser
+   trocado: o usuário clica em **Abrir a nova versão** (o app abre o novo e fecha) e depois pode apagar o antigo.
+6. Ao reabrir, o motor só refaz o que mudou: o `bootstrap` compara as impressões digitais do código e das
+   dependências e, em geral, só copia o código do motor (segundos). PyTorch, Blender e os **modelos de IA não são
+   baixados de novo**; trabalhos, configurações e o banco do Lead Finder (todos em `%LOCALAPPDATA%\MobiliaStudio`)
+   não são tocados — o instalador só escreve na pasta do programa. O código da atualização fica em `mobilia/ui`,
+   fora do motor: mudá-lo nem força essa cópia.
+
+**Segurança:** só HTTPS; só os hosts `api.github.com`, `github.com`, `objects.githubusercontent.com` e
+`release-assets.githubusercontent.com` (conferidos também em cada redirecionamento); o endereço inicial de cada
+arquivo tem de ser `github.com/tuzin7x/softwareEditor/releases/download/...`; o SHA-256 do `SHA256SUMS.txt` é
+obrigatório; nada das notas é executado; nenhum token ou segredo. Observação: a soma vem da mesma Release que o
+instalador, então ela protege contra download corrompido ou trocado no caminho, não contra alguém com acesso de
+escrita ao repositório (por isso as proteções da seção acima, como *release immutability*).
+
+**Preferências:** `%LOCALAPPDATA%\MobiliaStudio\settings\updater.json` (`auto_check`, `last_check`,
+`skipped_version`). Apagar o arquivo volta ao padrão (consulta automática ligada).
+
+**Pelo código-fonte** (`python -m mobilia.ui.app`) a atualização fica desligada e o botão não aparece. Para testar
+a interface sem gerar o `.exe`, use `MOBILIA_UPDATER_TEST=1`.
+
+### Teste manual no Windows (antes de confiar na primeira atualização)
+
+Os testes automáticos (`tests/test_updater.py`) cobrem a lógica e a janela com dublês; a instalação silenciosa e a
+reabertura só dá para conferir num Windows de verdade:
+
+1. Instale a versão N (com este recurso) pelo instalador. Abra o 7xAi, gere algo, crie um lead no Lead Finder.
+2. Publique a versão N+1 (estável). Reabra o 7xAi (ou **Atualizações → Procurar atualizações**): a janela "Nova
+   versão N+1 disponível" aparece com as notas.
+3. **Pular esta versão** → feche e reabra: não aparece. **Procurar atualizações**: aparece de novo.
+4. **Atualizar agora** → barra de progresso; teste **Cancelar** uma vez e depois atualize até o fim. O 7xAi fecha e,
+   em alguns segundos, abre de novo sozinho; a barra de status mostra a versão N+1.
+5. Confira: os trabalhos e os leads continuam lá; os modelos não foram baixados de novo (o assistente do motor, se
+   aparecer, só copia o motor); o atalho da Área de Trabalho continua funcionando. O registro do instalador fica em
+   `%LOCALAPPDATA%\MobiliaStudio\updates\7xAI-Setup-vN+1.log`; o instalador usado é apagado quando o 7xAi abre de novo.
+6. Sem internet: reabra o 7xAi — nada aparece; **Procurar atualizações** avisa "sem internet".
+7. Portátil: abra o `7xAI-Portable-vN.exe` → **Baixar nova versão** → o arquivo N+1 aparece na mesma pasta →
+   **Abrir a nova versão** abre a N+1.
+8. Desligue a consulta automática no menu **Atualizações** e reabra: nenhuma consulta (só a manual).
+
 ## Perguntas rápidas
 
 - **Por que o portátil é um único `.exe`?** O programa leva só a interface (cerca de 65 a 75 MB); o motor de IA
