@@ -241,17 +241,22 @@ class MessagesView(QWidget):
                 return
             self.btn_ai.setEnabled(False)
             self.info.setText("Gerando uma variação com IA…")
+            # a resposta só vale para o mesmo destinatário e o mesmo rascunho que iniciaram a geração
+            origin = ((self.lead or {}).get("id"), base)
             self.ai_task = self.ctx.run(
                 lambda t: msg.generate_with_ai(http, key, s.ai_model, mctx, tone, base, category, t),
-                name="lead-finder-ai", on_done=self._ai_done, on_error=self._ai_failed,
+                name="lead-finder-ai", on_done=lambda text: self._ai_done(text, origin), on_error=self._ai_failed,
                 on_cancel=lambda: self.btn_ai.setEnabled(True))
         self.ctx.db.call(lambda st: st.usage_today("anthropic")[0], on_done=check_and_run)
 
-    def _ai_done(self, text: str) -> None:
+    def _ai_done(self, text: str, origin: tuple | None = None) -> None:
         self.btn_ai.setEnabled(True)
+        self.ctx.db.call(lambda s: s.record_usage("anthropic", 1, 0.0))   # a chamada foi feita: conta no limite
+        if origin is not None and origin != ((self.lead or {}).get("id"), self.editor.toPlainText()):
+            self.info.setText("A variação da IA foi descartada: o destinatário ou o rascunho mudou durante a geração.")
+            return
         self.editor.setPlainText(text)
         self.info.setText("Variação criada pela IA. Revise antes de usar: confira se nada foi inventado.")
-        self.ctx.db.call(lambda s: s.record_usage("anthropic", 1, 0.0))
 
     def _ai_failed(self, e) -> None:
         self.btn_ai.setEnabled(True)

@@ -128,8 +128,8 @@ def test_table_whatsapp_button_review_open_and_confirm(page, qapp):
     dlg = page.ctx.last_dialog
     assert "Imobiliária Exemplo Alfa" in dlg.editor.toPlainText()        # personalizada com o nome real
     assert dlg.lead["wa_status"] == "confirmado"
-    dlg.btn_open.click(); qapp.processEvents()
-    assert len(page.opened) == 1
+    dlg.btn_open.click()
+    assert wait_until(qapp, lambda: len(page.opened) == 1)
     url = page.opened[0]
     assert url.startswith("https://wa.me/5519999000001?text=")
     assert unquote(url.split("text=", 1)[1]) == dlg.editor.toPlainText().strip()

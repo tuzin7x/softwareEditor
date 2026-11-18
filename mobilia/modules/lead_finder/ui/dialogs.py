@@ -123,6 +123,16 @@ class WhatsAppDialog(QDialog):
             url = ph.wa_me_url(self.lead.get("wa_number", ""), text)
         except ValueError as e:
             return self._fail(str(e))
+        # verificação final no banco, sem travar a interface: a lista de não contato pode ter mudado
+        self.btn_open.setEnabled(False)
+        number = self.lead.get("wa_number", "")
+        self.ctx.db.call(lambda s: s.phone_blocked(number), on_done=lambda blocked: self._open_checked(url, text, blocked),
+                         on_error=lambda e: (self.btn_open.setEnabled(True), self._fail(friendly_error(e))))
+
+    def _open_checked(self, url: str, text: str, blocked: bool) -> None:
+        self.btn_open.setEnabled(True)
+        if blocked:
+            return self._fail("Este número está na lista de não contato.")
         self.ctx.open_url(url)
         self.opened = True
         self.ctx.db.call(lambda s: s.add_event(self.lead["id"], "whatsapp_aberto", self.template.currentText(),
@@ -265,8 +275,11 @@ class ManualLeadDialog(QDialog):
 def open_whatsapp(ctx, parent, lead_id: int, text: str = "") -> None:
     """Busca a empresa e os modelos no banco e abre o diálogo de revisão (sem bloquear a interface)."""
     def show(res):
-        lead, custom = res
+        lead, custom, blocked = res
         if lead is None:
+            return
+        if blocked:
+            ctx.status("Este número está na lista de não contato.")
             return
         if lead["status"] == DO_NOT_CONTACT:
             ctx.status("Esta empresa pediu para não ser contatada.")
@@ -278,5 +291,8 @@ def open_whatsapp(ctx, parent, lead_id: int, text: str = "") -> None:
         dlg.setAttribute(Qt.WA_DeleteOnClose)
         ctx.last_dialog = dlg
         dlg.open()
-    ctx.db.call(lambda s: (s.get(lead_id), s.templates()), on_done=show,
+    def fetch(s):
+        lead = s.get(lead_id)
+        return lead, s.templates(), bool(lead and lead["wa_number"] and s.phone_blocked(lead["wa_number"]))
+    ctx.db.call(fetch, on_done=show,
                 on_error=lambda e: ctx.status(friendly_error(e)))

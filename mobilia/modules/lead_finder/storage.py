@@ -174,6 +174,25 @@ class Store:
         return bool(e164) and self.con.execute("SELECT 1 FROM suppression WHERE kind='phone' AND value=?",
                                                (e164,)).fetchone() is not None
 
+    def phone_blocked(self, e164: str) -> bool:
+        """Número na lista de não contato (verificação final antes de abrir o WhatsApp)."""
+        return self._phone_suppressed(ph.normalize(e164).e164)
+
+    def _recompute_sharing(self, row, lead_id: int) -> None:
+        """Recalcula as outras empresas que compartilham um telefone da empresa bloqueada/liberada: o número
+        bloqueado deixa de ser WhatsApp delas na hora, sem esperar uma nova pesquisa."""
+        nums = {ph.normalize(row[k]).e164 for k in ("phone_e164", "phone2", "wa_number", "wa_user_number", "whatsapp")
+                if row[k]} - {""}
+        if not nums:
+            return
+        marks = ",".join("?" * len(nums))
+        args = [*nums] * 4
+        others = self.con.execute(
+            f"SELECT id FROM leads WHERE id != ? AND (phone_e164 IN ({marks}) OR phone2_e164 IN ({marks}) "
+            f"OR wa_number IN ({marks}) OR wa_user_number IN ({marks}))", (lead_id, *args)).fetchall()
+        for (other,) in others:
+            self._recompute(other)
+
     def _strip_suppressed_phones(self, lead: Lead) -> Lead:
         from dataclasses import replace
         clean = {k: "" for k in ("phone", "phone2", "whatsapp")
@@ -427,6 +446,8 @@ class Store:
             row = self._row(lead_id)
             if kind in ("whatsapp_aberto", "mensagem_enviada", "demo_enviada") and row["status"] == DO_NOT_CONTACT:
                 raise PermissionError("Esta empresa pediu para não ser contatada.")
+            if kind == "whatsapp_aberto" and self._phone_suppressed(row["wa_number"]):
+                raise PermissionError("Este número está na lista de não contato.")
             self._event(lead_id, kind, detail, payload)
             if kind == "mensagem_enviada":
                 upd = {"last_contact": now_iso()}
@@ -471,11 +492,13 @@ class Store:
                         + (f" · {note}" if note else ""))
             if status == DO_NOT_CONTACT:
                 self._suppress_lead(row, note or "pedido de não contato")
+                self._recompute_sharing(row, lead_id)
                 self._event(lead_id, "nao_contatar", note)
                 self.con.execute("UPDATE reminders SET done=1 WHERE lead_id=? AND done=0", (lead_id,))
                 self._update(lead_id, {"next_followup": ""})
             elif row["status"] == DO_NOT_CONTACT:
                 self._unsuppress_lead(row)
+                self._recompute_sharing(row, lead_id)
                 self._event(lead_id, "contato_liberado", note)
 
     def add_note(self, lead_id: int, text: str) -> int:
@@ -633,6 +656,8 @@ class Store:
             if do_not_contact:
                 self._suppress_lead(row, "exclusão com pedido de não contato")
             self.con.execute("DELETE FROM leads WHERE id=?", (lead_id,))
+            if do_not_contact:
+                self._recompute_sharing(row, lead_id)
 
     def delete_all(self) -> None:
         with self.con:

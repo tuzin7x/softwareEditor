@@ -730,3 +730,88 @@ def test_failed_site_check_keeps_previous_evidence_and_manual_confirmation(store
     store.set_whatsapp(lid, "confirmado", "19 3200-0001")
     _site(store, lid, [])
     assert store.get(lid)["wa_number"] == "+551932000001"               # confirmação manual preservada
+
+
+# #################################################################################### rodada 5 da revisão
+
+# ============================================== 19. variação de IA descartada se o destinatário mudou
+
+def test_ai_answer_for_previous_recipient_is_discarded(page, qapp, transport):
+    gate = threading.Event()
+    transport.add("POST", r"api\.anthropic\.com",
+                  lambda req: (gate.wait(5), (200, {"content": [{"type": "text", "text": "Texto da IA para Alfa"}],
+                                                    "stop_reason": "end_turn"}))[1])
+    page.ctx.settings.ai_enabled = True
+    page.ctx.secrets.set("anthropic", "sk-ant-teste-000000000000")
+    db(page, lambda s: s.ingest([L(ref="node/1", name="Alfa", phone="19 99900-0001"),
+                                 L(ref="node/2", name="Beta", phone="19 99900-0002", city="Santos")]))
+    ids = {r["name"]: r["id"] for r in db(page, lambda s: s.page()[0])}
+    view = page.views["messages"]
+    page.show_tab("messages")
+    view.compose_for(ids["Alfa"])
+    assert wait_until(qapp, lambda: view.lead is not None and view.lead["name"] == "Alfa")
+    view.generate_ai()
+    assert wait_until(qapp, lambda: view.ai_task is not None and view.ai_task.running())
+    view.compose_for(ids["Beta"])                                        # troca de destinatário durante a geração
+    assert wait_until(qapp, lambda: view.lead["name"] == "Beta")
+    gate.set()
+    assert wait_until(qapp, lambda: "descartada" in view.info.text())
+    assert "Texto da IA para Alfa" not in view.editor.toPlainText() and "Beta" in view.editor.toPlainText()
+    assert wait_until(qapp, lambda: db(page, lambda s: s.usage_today("anthropic")[0]) == 1)   # a chamada conta
+
+
+def test_ai_answer_applies_when_context_unchanged(page, qapp, transport):
+    transport.add("POST", r"api\.anthropic\.com", (200, {"content": [{"type": "text", "text": "Texto novo da IA"}],
+                                                          "stop_reason": "end_turn"}))
+    page.ctx.settings.ai_enabled = True
+    page.ctx.secrets.set("anthropic", "sk-ant-teste-000000000000")
+    db(page, lambda s: s.ingest([L(ref="node/1", name="Alfa", phone="19 99900-0001")]))
+    view = page.views["messages"]
+    view.compose_for(db(page, lambda s: s.page()[0][0]["id"]))
+    assert wait_until(qapp, lambda: view.lead is not None)
+    view.generate_ai()
+    assert wait_until(qapp, lambda: view.editor.toPlainText() == "Texto novo da IA")
+
+
+# ============================================== 20. não contatar afeta empresas que compartilham o número
+
+def test_blocking_one_company_blocks_shared_number_on_the_other(store):
+    """Cenário da revisão: Alfa e Beta (CNPJs diferentes) com o mesmo celular; bloquear Alfa."""
+    store.ingest([L("cnpj_aberto", "11222333000181", "Alfa", cnpj="11222333000181", phone="19 99900-0001"),
+                  L("cnpj_aberto", "00000000000191", "Beta", cnpj="00000000000191", phone="19 99900-0001",
+                    city="Santos")])
+    ids = {r["name"]: r["id"] for r in store.page()[0]}
+    assert store.get(ids["Beta"])["wa_number"] == "+5519999000001"
+    store.set_status(ids["Alfa"], "nao_contatar")
+    beta = store.get(ids["Beta"])
+    assert beta["status"] == "nao_contatado" and beta["wa_number"] == ""   # antes: continuava com o número
+    with pytest.raises(PermissionError):
+        store.con.execute("UPDATE leads SET wa_number='+5519999000001' WHERE id=?", (ids["Beta"],))
+        store.add_event(ids["Beta"], "whatsapp_aberto")                    # verificação final também bloqueia
+    store.set_status(ids["Alfa"], "sem_interesse", "a empresa autorizou")  # liberar restaura o número de Beta
+    assert store.get(ids["Beta"])["wa_number"] == "+5519999000001"
+
+
+def test_delete_with_dnc_blocks_shared_number_on_the_other(store):
+    store.ingest([L("cnpj_aberto", "11222333000181", "Alfa", cnpj="11222333000181", phone="19 99900-0001"),
+                  L("cnpj_aberto", "00000000000191", "Beta", cnpj="00000000000191", phone="19 99900-0001",
+                    city="Santos")])
+    ids = {r["name"]: r["id"] for r in store.page()[0]}
+    store.delete_lead(ids["Alfa"], do_not_contact=True)
+    assert store.get(ids["Beta"])["wa_number"] == ""
+
+
+def test_whatsapp_dialog_refuses_number_blocked_after_opening(page, qapp):
+    db(page, lambda s: s.ingest([L("cnpj_aberto", "11222333000181", "Alfa", cnpj="11222333000181",
+                                   phone="19 99900-0001")]))
+    lid = db(page, lambda s: s.page()[0][0]["id"])
+    from mobilia.modules.lead_finder.ui.dialogs import open_whatsapp
+    page.ctx.last_dialog = None
+    open_whatsapp(page.ctx, page, lid)
+    assert wait_until(qapp, lambda: page.ctx.last_dialog is not None)
+    dlg = page.ctx.last_dialog
+    db(page, lambda s: s.con.execute("INSERT INTO suppression(kind, value, reason, at) VALUES "
+                                     "('phone', '+5519999000001', 'teste', '')") and s.con.commit())
+    dlg.btn_open.click()
+    assert wait_until(qapp, lambda: "lista de não contato" in dlg.error.text())
+    assert page.opened == []
