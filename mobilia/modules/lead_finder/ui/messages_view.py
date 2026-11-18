@@ -83,14 +83,21 @@ class MessagesView(QWidget):
             it.setData(Qt.UserRole, t)
             it.setToolTip("Modelo padrão" if builtin else "Modelo salvo por você")
             self.list.addItem(it)
-        self.list.blockSignals(False)
         names = [self.list.item(i).data(Qt.UserRole)["name"] for i in range(self.list.count())]
         self.list.setCurrentRow(names.index(cur) if cur in names else 0)
+        self.list.blockSignals(False)
+        # só um modelo diferente (ou o primeiro) gera texto novo: recarregar a lista não apaga o rascunho editado
+        if not cur or cur not in names or select:
+            self._template_selected()
+        else:
+            t = self.current_template()
+            self.btn_del.setEnabled(bool(t) and t not in msg.BUILTIN_TEMPLATES)
 
     def load_templates(self) -> None:
         self.ctx.db.call(lambda s: s.templates(), on_done=self._templates_loaded)
 
     def _templates_loaded(self, rows) -> None:
+        self._templates_ready = True       # carregado, mesmo que a pessoa não tenha modelos próprios
         self.custom = [dict(r) for r in rows]
         self._fill_templates()
 
@@ -269,7 +276,7 @@ class MessagesView(QWidget):
         self.btn_ai.setVisible(bool(self.ctx.settings.ai_enabled))
 
     def on_show(self) -> None:
-        if not self.custom:
+        if not getattr(self, "_templates_ready", False):
             self.load_templates()
         if self.lead_combo.count() == 0 and not getattr(self, "_composing", False):
             self._find_leads()

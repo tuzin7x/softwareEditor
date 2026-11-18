@@ -90,6 +90,11 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE leads ADD COLUMN wa_user_number TEXT DEFAULT '';
     UPDATE leads SET wa_user_number = wa_number WHERE wa_user = 'confirmado' AND wa_number != '';
     """,
+    # v4 — telefone secundário normalizado, para consolidar duplicatas também por ele (preenchido em Python)
+    """
+    ALTER TABLE leads ADD COLUMN phone2_e164 TEXT DEFAULT '';
+    CREATE INDEX ix_leads_phone2 ON leads(phone2_e164);
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -139,6 +144,7 @@ class Store:
         v = self.version
         if v > SCHEMA_VERSION:
             raise RuntimeError(f"Banco do Lead Finder é de uma versão mais nova ({v}); atualize o 7xAi.")
+        start = v
         for i in range(v, SCHEMA_VERSION):
             try:   # cada migração é atômica: estrutura + número da versão na mesma transação
                 self.con.executescript(f"BEGIN;\n{MIGRATIONS[i]}\nPRAGMA user_version={i + 1};\nCOMMIT;")
@@ -146,6 +152,11 @@ class Store:
                 if self.con.in_transaction:
                     self.con.execute("ROLLBACK")
                 raise
+        if 0 < start < 4 <= SCHEMA_VERSION:   # banco existente: normaliza o telefone 2 que já estava gravado
+            with self.con:
+                rows = self.con.execute("SELECT id, phone2 FROM leads WHERE phone2 != ''").fetchall()
+                self.con.executemany("UPDATE leads SET phone2_e164=? WHERE id=?",
+                                     [(ph.normalize(r["phone2"]).e164, r["id"]) for r in rows])
         return self.version
 
     # --------------------------------------------------------------------------------- supressão
@@ -194,8 +205,7 @@ class Store:
                     t = now_iso()
                     lead_id = self.con.execute("INSERT INTO leads(name, created_at, updated_at) VALUES (?,?,?)",
                                                (lead.name, t, t)).lastrowid
-                    self._event(lead_id, "criado", f"{lead.name} · {lead.query}".strip(" ·"),
-                                {"fonte": lead.source})
+                    self._event(lead_id, "criado", self._created_detail(lead), {"fonte": lead.source})
                 existing = self.con.execute("SELECT lead_id FROM lead_sources WHERE source=? AND source_ref=?",
                                             (lead.source, lead.source_ref)).fetchone()
                 payload = _j(lead.fields())
@@ -217,6 +227,15 @@ class Store:
                 self._recompute(lead_id)
         return stats
 
+    @staticmethod
+    def _created_detail(lead: Lead) -> str:
+        """Texto do evento "criado". O histórico é permanente: dados de fontes com prazo de guarda (Google) não
+        entram nele — só a fonte e a consulta feita pelo usuário."""
+        from .sources import TITLES
+        if source_policy(lead.source).store_days:
+            return f"via {TITLES.get(lead.source, lead.source)} · {lead.query}".strip(" ·")
+        return f"{lead.name} · {lead.query}".strip(" ·")
+
     def _keys(self, lead: Lead) -> dict:
         phones = [ph.normalize(p).e164 for p in (lead.whatsapp, lead.phone, lead.phone2)]
         domain = dedupe.domain_of(lead.website)
@@ -235,8 +254,8 @@ class Store:
             if r:
                 return r[0]
         for e in info["phones"]:
-            r = self.con.execute("SELECT id, cnpj FROM leads WHERE phone_e164=? OR wa_number=? LIMIT 1",
-                                 (e, e)).fetchone()
+            r = self.con.execute("SELECT id, cnpj FROM leads WHERE phone_e164=? OR wa_number=? OR phone2_e164=? "
+                                 "LIMIT 1", (e, e, e)).fetchone()
             if r and not (info["cnpj"] and r[1] and r[1] != info["cnpj"]):
                 return r[0]
         if info["domain"]:
@@ -281,7 +300,7 @@ class Store:
         sources = sorted({r["source"] for r in rows})
         search = fold(" ".join([name, vals["legal_name"], vals["city"], vals["uf"], vals["category"],
                                 vals["address"], domain, cnpj, p1.digits, p2.digits]))
-        vals.update(phone_e164=p1.e164, phone_kind=p1.kind if (p1.valid or merged.get("phone")) else "",
+        vals.update(phone_e164=p1.e164, phone2_e164=p2.e164, phone_kind=p1.kind if (p1.valid or merged.get("phone")) else "",
                     wa_number=wa_num, wa_status=wa_status, domain=domain, sources=",".join(sources),
                     origin=_j(origin), name_key=dedupe.name_key(name, vals["city"], vals["uf"]),
                     search_text=search, restricted=int(restricted), needs_refresh=needs_refresh,
@@ -683,6 +702,10 @@ class Store:
         with self.con:
             for r in rows:
                 self.con.execute("UPDATE lead_sources SET payload='{}', purged=1, query='' WHERE id=?", (r["id"],))
+                # bancos antigos guardavam o nome vindo da fonte no histórico: remove também essa cópia
+                self.con.execute("UPDATE events SET detail='(dados da fonte apagados pelo prazo de guarda)' "
+                                 "WHERE lead_id=? AND kind='criado' AND json_extract(payload, '$.fonte')=?",
+                                 (r["lead_id"], r["source"]))
             for lead_id in {r["lead_id"] for r in rows}:
                 self._recompute(lead_id)
         return len(rows)

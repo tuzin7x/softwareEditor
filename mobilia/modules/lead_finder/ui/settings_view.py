@@ -219,8 +219,12 @@ class SettingsView(QWidget):
 
         def done(rep):
             self._import_finished()
-            self.c_info.setText(f"Importação concluída: {rep.kept:,} empresa(s) ativa(s) do setor de "
-                                f"{rep.rows_read:,} linhas lidas.".replace(",", "."))
+            missing = rep.kept - rep.with_legal_name if rep.kept else 0
+            self.c_info.setText((f"Importação concluída: {rep.kept:,} empresa(s) ativa(s) do setor de "
+                                 f"{rep.rows_read:,} linhas lidas."
+                                 + (f" Atenção: {missing:,} sem razão social/natureza jurídica — inclua os arquivos "
+                                    "Empresas*.zip; sem a natureza, ficam fora da busca padrão." if missing > 0 else ""))
+                                .replace(",", "."))
             self.ctx.settings_changed.emit()
             self.refresh()
         self.import_task = self.ctx.run(lambda t: import_open_data(Path(folder), index, ufs, t, t.progress),

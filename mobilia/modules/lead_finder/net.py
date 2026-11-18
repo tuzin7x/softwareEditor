@@ -136,7 +136,11 @@ class HttpClient:
         return self._json(self.request("POST", url, ctx=ctx, headers=h, data=form.encode("utf-8"), **kw))
 
     def request(self, method: str, url: str, ctx: CancelToken | None = None, headers: dict | None = None,
-                data: bytes | None = None, timeout: float | None = None, ok=(200,)) -> Response:
+                data: bytes | None = None, timeout: float | None = None, ok=(200,),
+                retries: int | None = None) -> Response:
+        """``retries=0`` para requisições pagas: um timeout tem resultado desconhecido (o provedor pode ter
+        processado e cobrado), então não se repete sozinho — cada tentativa precisa passar pelo limite de custo."""
+        max_retries = self.retries if retries is None else max(0, int(retries))
         ctx = ctx or CancelToken()
         host = urllib.request.urlparse(url).hostname or ""
         hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json, text/html;q=0.8, */*;q=0.5",
@@ -165,7 +169,7 @@ class HttpClient:
                 wait = None
             attempt += 1
             log.warning("HTTP %s %s falhou (%s), tentativa %d", method, redact(url), redact(str(err)), attempt)
-            if not err.retryable or attempt > self.retries:
+            if not err.retryable or attempt > max_retries:
                 raise err
             self._wait(ctx, wait if wait is not None else min(30.0, 1.5 * 2 ** (attempt - 1)))
 

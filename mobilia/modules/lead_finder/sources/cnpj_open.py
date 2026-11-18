@@ -176,13 +176,17 @@ def import_open_data(folder: Path, index_path: Path, ufs: list[str] | None, ctx,
                         if k % 50000 == 0:
                             ctx.check()
                         if len(r) >= 3 and r[0].strip() in basicos:
-                            updates.append((r[1].strip(), r[2].strip(), r[0].strip()))
+                            razao = r[1].strip()
+                            updates.append((razao, r[2].strip(), fold(razao), r[0].strip()))
                             if len(updates) >= 5000:
-                                con.executemany("UPDATE estab_new SET razao=?, natureza=? WHERE basico=?", updates)
+                                con.executemany("UPDATE estab_new SET razao=?, natureza=?, "
+                                                "nome_fold=trim(coalesce(nome_fold, '') || ' ' || ?) WHERE basico=?",
+                                                updates)
                                 updates.clear()
             if updates:
-                con.executemany("UPDATE estab_new SET razao=?, natureza=? WHERE basico=?", updates)
-            con.execute("UPDATE estab_new SET nome_fold = trim(nome_fold || ' ' || lower(razao))")
+                # mesma dobra (sem acentos, minúsculas) usada nos termos de busca: o lower() do SQLite só trata ASCII
+                con.executemany("UPDATE estab_new SET razao=?, natureza=?, "
+                                "nome_fold=trim(coalesce(nome_fold, '') || ' ' || ?) WHERE basico=?", updates)
             con.commit()
         ctx.check()
         say(0.99, "Gravando o índice")
@@ -217,6 +221,7 @@ def index_info(index_path: Path) -> dict:
     try:
         meta = dict(con.execute("SELECT key, value FROM meta"))
         meta["rows"] = con.execute("SELECT count(*) FROM estab").fetchone()[0]
+        meta["sem_natureza"] = con.execute("SELECT count(*) FROM estab WHERE natureza = ''").fetchone()[0]
         return meta
     except sqlite3.Error:
         return {}
@@ -244,7 +249,11 @@ class CnpjOpenSource(Source):
         if not info.get("rows"):
             return False, "Importe os arquivos da Receita em Configurações › Base aberta de CNPJ."
         ufs = info.get("ufs", "")
-        return True, f"{info['rows']:,} empresas no índice local ({'Brasil' if ufs == 'BR' else ufs})".replace(",", ".")
+        text = f"{info['rows']:,} empresas no índice local ({'Brasil' if ufs == 'BR' else ufs})"
+        if info.get("sem_natureza"):
+            text += (f" · {info['sem_natureza']:,} sem natureza jurídica (falta Empresas*.zip): ficam fora da busca, "
+                     "a menos que inclua empresários individuais")
+        return True, text.replace(",", ".")
 
     def plan(self, query: SearchQuery) -> list[Unit]:
         cnaes = kw.cnaes_for(query.keywords)
@@ -275,7 +284,8 @@ class CnpjOpenSource(Source):
             conds.append("nome_fold LIKE ?"); args.append(f"%{t}%")
         where.append("(" + " OR ".join(conds) + ")")
         if not query.include_individuals:
-            where.append(f"natureza NOT IN ({','.join('?' * len(INDIVIDUAL_NATUREZAS))})")
+            # natureza desconhecida (Empresas*.zip ausente ou incompleto) também fica de fora: pode ser um MEI
+            where.append(f"natureza != '' AND natureza NOT IN ({','.join('?' * len(INDIVIDUAL_NATUREZAS))})")
             args.extend(INDIVIDUAL_NATUREZAS)
         if not self.index_path.is_file():
             raise SourceUnavailable("O índice local de CNPJ ainda não foi importado.")

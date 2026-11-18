@@ -8,7 +8,8 @@ Termos do Google Maps Platform (resumo aplicado aqui, confira sempre o texto atu
 * esses dados **não** são exportados para CSV.
 
 Custo: cada requisição com telefone e site entra na faixa "Text Search Enterprise" (preço por 1.000 configurável).
-Há limite por pesquisa e limite mensal, contados no banco local.
+Há limite por pesquisa e limite mensal, contados no banco local. Requisições pagas **não** têm novas tentativas
+automáticas: cada envio real passa pelo limite e é registrado; uma falha aparece para o usuário, que decide repetir.
 """
 from __future__ import annotations
 
@@ -104,7 +105,8 @@ class GooglePlacesSource(Source):
         for _page in range(unit.params.get("pages", 1)):
             if budget is not None and not budget(1):
                 return
-            data = self.http.post_json(SEARCH_URL, body, ctx=ctx, headers=self._headers(SEARCH_MASK))
+            # paga: sem novas tentativas automáticas (cada tentativa real consome e registra uma unidade do limite)
+            data = self.http.post_json(SEARCH_URL, body, ctx=ctx, headers=self._headers(SEARCH_MASK), retries=0)
             for p in data.get("places", []) if isinstance(data, dict) else []:
                 lead = parse_place(p, unit.label)
                 if lead is not None:
@@ -118,5 +120,6 @@ class GooglePlacesSource(Source):
         """Atualiza um lugar pelo ``place_id`` (Place Details: também é cobrado)."""
         if not re.fullmatch(r"[\w-]{10,300}", place_id or ""):
             raise NetError("Identificador do Google inválido.")
-        data = self.http.get_json(DETAILS_URL.format(id=place_id), ctx=ctx, headers=self._headers(DETAILS_MASK))
+        data = self.http.get_json(DETAILS_URL.format(id=place_id), ctx=ctx, headers=self._headers(DETAILS_MASK),
+                                  retries=0)
         return parse_place(data, "atualização") if isinstance(data, dict) else None

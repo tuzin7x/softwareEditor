@@ -1,4 +1,4 @@
-"""Regressões dos 6 problemas P2 apontados pela revisão do Codex no PR #1 (e do caso irmão no Place Details).
+"""Regressões dos problemas P2 apontados pelas revisões do Codex no PR #1 (rodadas 1 e 2).
 
 Cada teste reproduz o cenário descrito na revisão e falhava no código anterior às correções.
 """
@@ -309,7 +309,7 @@ def test_migration_v3_keeps_previous_confirmation(tmp_path):
     con.execute("INSERT INTO leads(name, wa_user, wa_number, created_at) VALUES ('X', 'confirmado', '+5519999000001', '')")
     con.commit(); con.close()
     s = Store(path)
-    assert s.version == SCHEMA_VERSION == 3
+    assert s.version == SCHEMA_VERSION >= 3
     assert s.con.execute("SELECT wa_user_number FROM leads").fetchone()[0] == "+5519999000001"
     s.close()
 
@@ -358,3 +358,190 @@ def test_google_refresh_respects_monthly_cap(page, qapp, transport, no_modal):
     view.refresh_google(lid)
     wait_until(qapp, lambda: False, 0.4)
     assert transport.requests == [] and view.bg_task is None
+
+
+# #################################################################################### rodada 2 da revisão
+
+# ============================================== 7. novas tentativas automáticas contam no limite do Google
+
+def test_paid_google_request_is_not_retried_automatically(transport, tmp_path):
+    """Cenário da revisão: limites = 1 e timeouts seguidos. Antes: 4 envios e 1 unidade registrada."""
+    calls = {"n": 0}
+
+    def timeout_then_ok(req):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise TimeoutError("timed out")
+        return 200, fixture_json("google_textsearch.json")
+    transport.add("POST", r"places\.googleapis\.com", timeout_then_ok)
+    http = HttpClient(transport=transport, sleeper=lambda s: None)        # cliente padrão: retries=3
+    srcs, _ = _google(http, tmp_path, google_max_requests_per_search=1, google_monthly_request_cap=1)
+    ctx = Ctx()
+    summary = run_search(ctx, SearchQuery(GeoScope("uf", ufs=["SP"]), ["Imobiliária"], ["google_places"]), srcs)
+    assert calls["n"] == 1                                               # um envio real...
+    assert [i[2] for i in ctx.items if i[0] == "usage"] == [1]           # ...uma unidade registrada
+    assert summary["google_places"]["errors"]                            # a falha aparece para o usuário
+
+
+def test_place_details_is_not_retried_automatically(transport, tmp_path):
+    calls = {"n": 0}
+
+    def flaky(req):
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+    transport.add("GET", r"places\.googleapis\.com/v1/places/", flaky)
+    http = HttpClient(transport=transport, sleeper=lambda s: None)
+    srcs, _ = _google(http, tmp_path)
+    with pytest.raises(Exception):
+        srcs["google_places"].details("ChIJTESTE0000001")
+    assert calls["n"] == 1
+
+
+def test_free_sources_still_retry(transport):
+    calls = {"n": 0}
+
+    def flaky(req):
+        calls["n"] += 1
+        return (503, {}) if calls["n"] < 3 else (200, {"ok": 1})
+    transport.add("GET", r"livre\.test", flaky)
+    assert HttpClient(transport=transport, sleeper=lambda s: None).get_json("https://livre.test/x") == {"ok": 1}
+    assert calls["n"] == 3
+
+
+# ============================================== 8. razão social com acentos na busca da base de CNPJ
+
+def _receita(tmp_path, with_empresas=True):
+    import zipfile
+    d = tmp_path / "receita"; d.mkdir()
+
+    def estab(basico, fantasia, muni="6291"):
+        cols = [basico, "0001", "00", "1", fantasia, "02", "20200101", "00", "", "", "20150310", "6821801", "",
+                "RUA", "X", "1", "", "CENTRO", "13000000", "SP", muni, "19", "32000001", "", "", "", "", "", "", ""]
+        return ";".join(f'"{c}"' for c in cols)
+    with zipfile.ZipFile(d / "Estabelecimentos0.zip", "w") as z:
+        z.writestr("E.ESTABELE", "\n".join([estab("10000001", ""), estab("10000002", "INDIVIDUAL SEM EMPRESAS"),
+                                             estab("10000003", "")]).encode("latin-1"))
+    if with_empresas:
+        with zipfile.ZipFile(d / "Empresas0.zip", "w") as z:
+            z.writestr("E.EMPRECSV", '"10000001";"SÃO JOSÉ IMÓVEIS LTDA";"2062";"49";"0";"01";""\n'
+                                     '"10000003";"CORRETORA ÁGUA BRANCA LTDA";"2062";"49";"0";"01";""\n'.encode("latin-1"))
+    with zipfile.ZipFile(d / "Municipios.zip", "w") as z:
+        z.writestr("M.MUNICCSV", '"6291";"CAMPINAS"\n'.encode("latin-1"))
+    return d
+
+
+def test_accented_legal_name_matches_custom_keyword(transport, tmp_path):
+    from mobilia.modules.lead_finder.sources.cnpj_open import import_open_data
+    import_open_data(_receita(tmp_path), tmp_path / "cnpj_index.sqlite3", ["SP"], Ctx(), None)
+    srcs = build(HttpClient(transport=transport), Settings(), Secrets(tmp_path, env={}), tmp_path)
+    src = srcs["cnpj_aberto"]
+    for kw, expected in (("São José", "10000001000100"), ("sao jose", "10000001000100"),
+                         ("Água Branca", "10000003000100")):
+        q = SearchQuery(GeoScope("uf", ufs=["SP"]), [kw], ["cnpj_aberto"])
+        found = [lead.cnpj for lead in src.fetch(src.plan(q)[0], q, Ctx())]
+        assert found == [expected], kw                                    # antes: nenhum resultado
+
+
+# ============================================== 9. natureza jurídica desconhecida fora da busca padrão
+
+def test_unknown_legal_nature_excluded_unless_individuals_enabled(transport, tmp_path):
+    from mobilia.modules.lead_finder.sources.cnpj_open import import_open_data, index_info
+    idx = tmp_path / "cnpj_index.sqlite3"
+    rep = import_open_data(_receita(tmp_path, with_empresas=False), idx, ["SP"], Ctx(), None)
+    assert rep.kept == 3 and rep.with_legal_name == 0 and index_info(idx)["sem_natureza"] == 3
+    srcs = build(HttpClient(transport=transport), Settings(), Secrets(tmp_path, env={}), tmp_path)
+    src = srcs["cnpj_aberto"]
+    ok, why = src.availability()
+    assert ok and "sem natureza jurídica" in why
+    q = SearchQuery(GeoScope("uf", ufs=["SP"]), ["Imobiliária"], ["cnpj_aberto"])
+    assert list(src.fetch(src.plan(q)[0], q, Ctx())) == []               # antes: os 3 apareciam
+    q2 = SearchQuery(GeoScope("uf", ufs=["SP"]), ["Imobiliária"], ["cnpj_aberto"], include_individuals=True)
+    assert len(list(src.fetch(src.plan(q2)[0], q2, Ctx()))) == 3
+
+
+# ============================================== 10. prazo de guarda alcança o histórico
+
+def test_purge_removes_google_name_from_history(store):
+    store.ingest([L("google_places", "ChIJONLY000001", "Only Google Company", phone="+55 21 99999-0002",
+                    city="Rio", uf="RJ", query="Imobiliária · Rio de Janeiro")])
+    lid = store.page()[0][0]["id"]
+    assert "Only Google Company" not in str(store.get(lid)["events"])    # nem entra no histórico
+    store.con.execute("UPDATE lead_sources SET expires_at='2000-01-01T00:00:00+00:00'"); store.con.commit()
+    store.purge_expired()
+    d = store.get(lid)
+    dump = str({k: v for k, v in d.items() if k != "source_records"}) + str(d["source_records"])
+    assert "Only Google Company" not in dump and "99999-0002" not in dump and "999990002" not in dump
+
+
+def test_purge_scrubs_name_copied_by_older_versions(store):
+    """Bancos gravados antes da correção têm o nome no evento "criado": a limpeza também apaga essa cópia."""
+    store.ingest([L("google_places", "ChIJONLY000001", "Only Google Company", city="Rio", uf="RJ")])
+    lid = store.page()[0][0]["id"]
+    store.con.execute("UPDATE events SET detail='Only Google Company · Imobiliária' WHERE kind='criado'")
+    store.con.execute("UPDATE lead_sources SET expires_at='2000-01-01T00:00:00+00:00'"); store.con.commit()
+    store.purge_expired()
+    assert "Only Google Company" not in str(store.get(lid)["events"])
+
+
+def test_open_sources_keep_name_in_history(store):
+    store.ingest([L(name="Imobiliária Aberta")])
+    assert "Imobiliária Aberta" in store.get(store.page()[0][0]["id"])["events"][-1]["detail"]
+
+
+# ============================================== 11. rascunho de mensagem preservado ao voltar à aba
+
+def test_message_draft_survives_switching_tabs(page, qapp):
+    page.show_tab("messages")
+    view = page.views["messages"]
+    assert wait_until(qapp, lambda: getattr(view, "_templates_ready", False))
+    view.editor.setPlainText("Rascunho editado à mão")
+    for _ in range(2):
+        page.show_tab("leads"); qapp.processEvents()
+        page.show_tab("messages")
+        wait_until(qapp, lambda: False, 0.3)
+    assert view.editor.toPlainText() == "Rascunho editado à mão"         # antes: texto regenerado
+    view.list.setCurrentRow(1)                                           # escolher outro modelo gera texto novo
+    assert view.editor.toPlainText() != "Rascunho editado à mão"
+
+
+def test_template_list_reload_keeps_draft(page, qapp):
+    page.show_tab("messages")
+    view = page.views["messages"]
+    assert wait_until(qapp, lambda: getattr(view, "_templates_ready", False))
+    view.editor.setPlainText("Outro rascunho")
+    view.load_templates()
+    wait_until(qapp, lambda: False, 0.3)
+    assert view.editor.toPlainText() == "Outro rascunho"
+
+
+# ============================================== 12. telefone secundário na consolidação
+
+def test_secondary_phone_consolidates_duplicates(store):
+    """Cenário da revisão: CNPJ com dois fixos; OSM com o segundo fixo → uma empresa só."""
+    store.ingest([L("cnpj_aberto", "11222333000181", "Alfa Negócios Ltda", phone="19 3200-0001",
+                    phone2="19 3200-0002", cnpj="11222333000181")])
+    st = store.ingest([L("osm", "node/7", "Imobiliária Alfa", phone="19 3200-0002", city="Campinas")])
+    assert st["consolidados"] == 1 and store.page()[1] == 1               # antes: duas empresas
+
+
+def test_secondary_phone_respects_conflicting_cnpj(store):
+    store.ingest([L("cnpj_aberto", "11222333000181", "Alfa", phone="19 3200-0001", phone2="19 3200-0002",
+                    cnpj="11222333000181")])
+    store.ingest([L("cnpj_aberto", "00000000000191", "Outra", phone="19 3200-0002", cnpj="00000000000191",
+                    city="Outra")])
+    assert store.page()[1] == 2
+
+
+def test_migration_v4_backfills_secondary_phone(tmp_path):
+    path = tmp_path / "v3.sqlite3"
+    con = sqlite3.connect(path)
+    for m in MIGRATIONS[:3]:
+        con.executescript(m)
+    con.execute("PRAGMA user_version=3")
+    con.execute("INSERT INTO leads(name, phone2, cnpj, created_at) VALUES ('Antiga', '(19) 3200-0002', '', '')")
+    con.commit(); con.close()
+    s = Store(path)
+    assert s.con.execute("SELECT phone2_e164 FROM leads").fetchone()[0] == "+551932000002"
+    st = s.ingest([L("osm", "node/7", "Nome Diferente", phone="19 3200-0002", city="Outra")])
+    assert st["consolidados"] == 1
+    s.close()
