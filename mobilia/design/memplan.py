@@ -10,9 +10,17 @@ total/livre e da RAM livre:
 * se o OneFormer da conferência sai da GPU enquanto o SDXL gera;
 * em que precisão os codificadores de texto rodam na CPU (fp32 pede ~3,4 GB de RAM; com pouca RAM, bf16).
 
-Os números de memória são ESTIMATIVAS conservadoras (pesos fp16 do UNet 4,9 GiB + ControlNet small + VAE + contexto
-CUDA; ativações por megapixel e por item do lote com SDPA). O ``engine`` ainda confere o tempo por passo da passada
-de detalhe e desliga o refino das versões seguintes se ele indicar *sysmem fallback* (``refine_spilled``).
+Calibrado com o teste real no mesmo notebook (commit 40c56da): a estimativa antiga (6985 MB para a geração a 1024 px
+contra um orçamento de 6757 MB) ligava o *offload* e desligava o refino numa placa de 8 GB, mas o pico MEDIDO por
+chamada (``torch.cuda.max_memory_allocated``) foi 5813 MB, com codificadores de texto na CPU (``nvidia-smi`` total
+7,0–7,4 GB contando a área de trabalho). Modelo: pesos fp16 (UNet 4,9 GiB + ControlNet small + VAE ≈ 5380 MB) +
+ativações ~280 MB por megapixel por item do lote (×1,1 de folga) + contexto CUDA (~400 MB, fora do alocador do torch
+e dentro do orçamento, que é medido como o ``nvidia-smi``). Geração a 1024×768 com CFG: ~5,86 GB no alocador
+(~6,26 GB no total) — sem offload numa placa de 8 GB. Refino: o de 1536 px transbordava (7,6–7,9 GB) e fica só para
+placas de 12 GB ou mais; numa placa de 8 GB só um refino LEVE (1280 ou 1152 px, sem CFG) e só se a estimativa couber
+no orçamento com folga — senão desligado (registrado nas ``notes``). O ``engine`` ainda confere o tempo por passo
+da passada de detalhe e desliga o refino das versões seguintes se ele indicar *sysmem fallback*
+(``refine_spilled``).
 """
 from __future__ import annotations
 
@@ -20,14 +28,17 @@ import os
 from dataclasses import asdict, dataclass, field
 
 # ---- estimativas (MiB)
-WEIGHTS_MB = 5900          # UNet fp16 (4900) + ControlNet small (~320) + VAE fp16 (~160) + contexto CUDA/cuBLAS (~520)
-ACT_MB_PER_MP = 600        # ativações do UNet+ControlNet por megapixel por item do lote (SDPA, fp16), com folga
+WEIGHTS_MB = 5380          # UNet fp16 (4900) + ControlNet small (~320) + VAE fp16 (~160), no alocador do torch
+ACT_MB_PER_MP = 280        # ativações do UNet+ControlNet por megapixel por item do lote (SDPA, fp16), MEDIDO
+CUDA_CTX_MB = 400          # contexto CUDA/cuBLAS: fora do alocador do torch, mas ocupa a placa
+MEASURED_GEN_PEAK_MB = 5813  # pico medido por chamada a 1024×768 com CFG (RTX 5070 Laptop 8 GB; referência dos testes)
 SEG_GPU_MB = 700           # OneFormer swin-large fp16 + buffers, se ficasse na GPU durante a geração
 RESERVE_MB = 1024          # o que o Windows/driver/tela usam numa GPU de notebook (WDDM)
-SAFETY = 1.15              # fragmentação do alocador
+SAFETY = 1.10              # fragmentação do alocador (sobre as ativações)
 BUDGET_CAP_8GB_MB = 7168   # "cabe em ~7 GB": teto explícito da classe de 8 GB
 TE_FP32_RAM_MB = 3600      # codificadores de texto (CLIP-L + bigG) em fp32 na CPU
 REFINE_SIDES = (1536, 1408, 1280, 1152)
+REFINE_SIDES_TIGHT = (1280, 1152)   # placas < 12 GB: refino leve ou nenhum (o de 1536 transbordava no teste real)
 REFINE_HEADROOM_MB = 400  # o refino deixa esta folga a mais (a estimativa de ativações não é medida aqui)
 SPILL_FACTOR = 3.0         # passo do refino N× mais lento (por megapixel) que o da geração = memória do sistema
 
@@ -56,8 +67,14 @@ def act_mb(width: int, height: int, batch: int) -> float:
 
 
 def peak_mb(width: int, height: int, cfg: bool = True, seg_on_gpu: bool = False) -> int:
-    """Pico estimado de VRAM de um passo do SDXL+ControlNet em ``width × height`` (CFG = lote 2)."""
-    return int(WEIGHTS_MB + SAFETY * act_mb(width, height, 2 if cfg else 1) + (SEG_GPU_MB if seg_on_gpu else 0))
+    """Pico estimado de VRAM do processo (como o ``nvidia-smi`` mostra) num passo do SDXL+ControlNet em
+    ``width × height`` (CFG = lote 2): o do alocador (:func:`torch_peak_mb`) + o contexto CUDA."""
+    return torch_peak_mb(width, height, cfg) + CUDA_CTX_MB + (SEG_GPU_MB if seg_on_gpu else 0)
+
+
+def torch_peak_mb(width: int, height: int, cfg: bool = True) -> int:
+    """Pico estimado do alocador do torch (``max_memory_allocated``, o que o motor registra por chamada)."""
+    return int(WEIGHTS_MB + SAFETY * act_mb(width, height, 2 if cfg else 1))
 
 
 def _dims(long_side: int, aspect: float = 4 / 3) -> tuple[int, int]:
@@ -71,8 +88,10 @@ def plan(device: str, vram_total_mb: int | None = None, vram_free_mb: int | None
 
     GPU: orçamento = min(total − reserva, livre agora − 256, 7 GB se a placa tem até 8 GB). A geração é a 1024 px
     se couber (senão offload). A passada de detalhe usa o maior lado de ``REFINE_SIDES`` que cabe no orçamento sem
-    CFG (lote 1) — numa placa de 8 GB, 1280 px; só placas folgadas (≥ 12 GB) refinam a 1536 com CFG. O OneFormer da
-    conferência fica fora da GPU durante a geração sempre que o orçamento for apertado."""
+    CFG (lote 1) — numa placa de 8 GB no máximo 1280 px (``REFINE_SIDES_TIGHT``); só placas folgadas (≥ 12 GB)
+    refinam a 1536 com CFG. O OneFormer da
+    conferência fica fora da GPU durante a geração sempre que o orçamento for apertado. Estimativas calibradas
+    com o pico medido (ver o cabeçalho do módulo)."""
     notes: list[str] = []
     ram_low = ram_free_mb is not None and ram_free_mb < TE_FP32_RAM_MB + 512
     te = "bfloat16" if ram_low else "float32"
@@ -99,7 +118,7 @@ def plan(device: str, vram_total_mb: int | None = None, vram_free_mb: int | None
     seg_off = (gen_peak + SEG_GPU_MB) > budget or total < 12 * 1024
     roomy = total >= 12 * 1024
     ref_side, ref_cfg, ref_peak = 0, False, 0
-    for side in REFINE_SIDES:
+    for side in (REFINE_SIDES if roomy else REFINE_SIDES_TIGHT):
         for cfg in ((True, False) if roomy else (False,)):
             p = peak_mb(*_dims(side, aspect), cfg=cfg)
             if p <= budget - REFINE_HEADROOM_MB:
@@ -108,7 +127,9 @@ def plan(device: str, vram_total_mb: int | None = None, vram_free_mb: int | None
         if ref_side:
             break
     if not ref_side:
-        notes.append("sem folga para a passada de detalhe: só a geração a 1024 px")
+        notes.append(f"sem folga para a passada de detalhe (1280 px sem CFG pediria ~"
+                     f"{peak_mb(*_dims(1280, aspect), cfg=False)} MB, orçamento {budget} MB menos "
+                     f"{REFINE_HEADROOM_MB} de folga): só a geração a 1024 px")
     else:
         notes.append(f"passada de detalhe a {ref_side} px {'com' if ref_cfg else 'sem'} CFG (~{ref_peak} MB)")
     return MemPlan("cuda", 1024, bool(ref_side), ref_side, ref_cfg, False, seg_off, te, budget, gen_peak, ref_peak,
@@ -158,4 +179,5 @@ def refine_spilled(gen_s_per_step: float, gen_px: int, ref_s_per_step: float, re
     return (ref_s_per_step / ref_px) > factor * (gen_s_per_step / gen_px)
 
 
-__all__ = ["MemPlan", "plan", "current_plan", "peak_mb", "ram_free_mb", "refine_spilled", "REFINE_SIDES"]
+__all__ = ["MemPlan", "plan", "current_plan", "peak_mb", "torch_peak_mb", "ram_free_mb", "refine_spilled",
+           "REFINE_SIDES", "REFINE_SIDES_TIGHT"]
