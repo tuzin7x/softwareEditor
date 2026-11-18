@@ -412,7 +412,7 @@ def step_runners(progress: Progress, paths: runtime.RuntimePaths, payload: Path,
         shutil.copytree(payload / "mobilia", paths.app_dir / "mobilia",
                         ignore=shutil.ignore_patterns("__pycache__", "ui"))
         # a interface não vai para o motor, mas as fontes dela sim: o vídeo antes e depois (``video/showcase``)
-        # escreve os rótulos com a Inter (sem elas cairia na fonte bitmap padrão do PIL)
+        # escreve os rótulos com Exo 2 e IBM Plex Sans (sem elas cairia na fonte bitmap padrão do PIL)
         fonts = payload / "mobilia" / "ui" / "fonts"
         if fonts.is_dir():
             shutil.copytree(fonts, paths.app_dir / "mobilia" / "ui" / "fonts")

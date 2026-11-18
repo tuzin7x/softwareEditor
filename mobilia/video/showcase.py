@@ -17,9 +17,9 @@ Formatos: ``16x9`` (1920×1080) e ``9x16`` (1080×1920). O quadro é sempre pree
 mudou a foto, e a panorâmica percorre a sala; numa foto 4:3 no 16x9, a panorâmica vertical percorre a altura que o
 recorte deixou de fora).
 
-Rótulos opcionais na identidade 7xAi (marfim e latão, fonte Inter): "ANTES / Foto original" embaixo à esquerda,
-"DEPOIS / <estilo>" embaixo à direita (acompanham a imagem a que pertencem, então a revelação também "vira" o
-rótulo) e a marca 7xAi pequena no canto superior direito.
+Rótulos opcionais na identidade 7xAi / 7x Intelligence (branco e violeta, fontes Exo 2 e IBM Plex Sans):
+"ANTES / Foto original" embaixo à esquerda, "DEPOIS / <estilo>" embaixo à direita (acompanham a imagem a que
+pertencem, então a revelação também "vira" o rótulo) e a marca 7xAi pequena no canto superior direito.
 
 Desempenho: cada quadro é um ``cv2.warpAffine`` (bilinear, ~1:1 porque as imagens são ampliadas uma vez para a
 escala de saída) por imagem visível, mais misturas em regiões pequenas; os quadros vão por *pipe* ao FFmpeg
@@ -40,10 +40,11 @@ FORMATS = {"16x9": (1920, 1080), "9x16": (1080, 1920)}
 _FORMAT_ALIASES = {"16:9": "16x9", "paisagem": "16x9", "horizontal": "16x9", "9:16": "9x16", "retrato": "9x16",
                    "vertical": "9x16", "stories": "9x16", "reels": "9x16"}
 
-IVORY = (244, 239, 231)      # #F4EFE7 (marca)
-BRASS = (205, 174, 118)      # #CDAE76
-BRASS_HI = (234, 213, 168)   # #EAD5A8
-GRAPHITE = (15, 15, 17)      # #0F0F11
+# cores da marca (tokens do tema 7x Intelligence, mobilia.ui.theme); os nomes antigos ficaram por compatibilidade
+IVORY = (236, 239, 242)      # #ECEFF2 texto claro (oklch 0.95 0.005 260)
+BRASS = (168, 85, 247)       # #A855F7 violeta do "7x" do logotipo
+BRASS_HI = (215, 159, 255)   # #D79FFF violeta vivo (oklch 0.8 0.17 305)
+GRAPHITE = (14, 13, 21)      # #0E0D15 cartão (oklch 0.165 0.016 290)
 
 MIN_S, MAX_S = 10.0, 20.0
 MAX_DESIGNS = 6
@@ -285,7 +286,7 @@ def _camera(tl: Timeline, src_w: int, src_h: int, out_w: int, out_h: int, center
 def _font(name: str, size: int):
     from PIL import ImageFont
 
-    for cand in (FONTS_DIR / name, FONTS_DIR / "Inter-Medium.otf"):
+    for cand in (FONTS_DIR / name, FONTS_DIR / "IBMPlexSans-Medium.ttf"):
         try:
             return ImageFont.truetype(str(cand), size)
         except OSError:
@@ -294,11 +295,11 @@ def _font(name: str, size: int):
 
 
 def _text_block(kicker: str, title: str, scale: float, align: str = "left") -> np.ndarray:
-    """Sprite RGBA: chamada pequena em latão (versalete espaçado) + título em marfim, com sombra suave."""
+    """Sprite RGBA: chamada pequena em violeta (versalete espaçado) + título claro, com sombra suave."""
     from PIL import Image, ImageDraw, ImageFilter
 
-    fk = _font("Inter-SemiBold.otf", max(12, int(round(24 * scale))))
-    ft = _font("InterDisplay-Medium.otf", max(18, int(round(58 * scale))))
+    fk = _font("IBMPlexSans-SemiBold.ttf", max(12, int(round(24 * scale))))
+    ft = _font("Exo2-SemiBold.ttf", max(18, int(round(58 * scale))))
     track = 0.22 * fk.size
     kicker = kicker.upper()
 
@@ -326,7 +327,7 @@ def _text_block(kicker: str, title: str, scale: float, align: str = "left") -> n
 
     put(ds, 200, 0, int(2 * scale))
     shadow = shadow.filter(ImageFilter.GaussianBlur(5 * scale))
-    # tinta: chamada em latão, título em marfim (desenha de novo, cada parte com a sua cor)
+    # tinta: chamada em violeta, título claro (desenha de novo, cada parte com a sua cor)
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     dr = ImageDraw.Draw(img)
     x = pad if align == "left" else w - pad - kw()
@@ -358,7 +359,8 @@ def _with_shadow(ink: np.ndarray, height: int) -> np.ndarray:
 
 def _wordmark(height: int) -> np.ndarray:
     """Marca 7xAi em RGBA com sombra. Fonte: ``res/marca_7xai.png``, exportada das mesmas formas vetoriais da
-    janela e do ícone (``mobilia.ui.brand``; o motor não depende do Qt). Sem o PNG: Qt, e por fim texto Inter."""
+    janela e do ícone (``mobilia.ui.brand``; o motor não depende do Qt). Sem o PNG: Qt, e por fim texto
+    IBM Plex Sans."""
     png = Path(__file__).resolve().parent / "res" / "marca_7xai.png"
     try:
         from PIL import Image
@@ -393,8 +395,8 @@ def _wordmark(height: int) -> np.ndarray:
 def _wordmark_text(height: int) -> np.ndarray:
     from PIL import Image, ImageDraw
 
-    f = _font("Inter-SemiBold.otf", int(height * 1.35))
-    parts = [("7", IVORY), ("x", BRASS), ("Ai", IVORY)]
+    f = _font("IBMPlexSans-SemiBold.ttf", int(height * 1.35))
+    parts = [("7x", BRASS), ("Ai", IVORY)]
     w = int(sum(f.getlength(s) for s, _ in parts)) + 8
     img = Image.new("RGBA", (w, int(height * 1.8)), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -434,7 +436,7 @@ def _divider_sprites(out_h: int, scale: float) -> tuple[np.ndarray, np.ndarray, 
     a = np.clip(a_light + shade * (1 - a_light), 0, 1)
     rgb = np.where(a[:, None] > 1e-6, (np.array(IVORY, np.float32)[None] * a_light[:, None]) / np.maximum(a, 1e-6)[:, None], 0)
     strip = np.concatenate([rgb, a[:, None] * 255.0], 1)[None].repeat(out_h, 0).astype(np.uint8)
-    # puxador: círculo marfim com duas setas em grafite, desenhado em 4x e reduzido
+    # puxador: círculo claro com duas setas escuras, desenhado em 4x e reduzido
     r = int(round(30 * scale))
     S = 4
     size = (2 * r + int(24 * scale)) | 1

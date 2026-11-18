@@ -23,7 +23,7 @@ from .. import APP_NAME, __version__, bootstrap, diagnostics, runtime
 from ..jobs import ROOM_TYPES, STAGES, JobRequest
 from . import brand, theme
 from .runner import HardwareProbe, JobRunner, QueuedJob
-from .widgets import (DropZone, ImageView, StatusBar, StepHeader, human_size, rule as _rule,
+from .widgets import (Backdrop, DropZone, ImageView, StatusBar, StepHeader, human_size, rule as _rule,
                       tracked_label as _tracked)
 
 PHOTO_FILTER = "Fotos (*.jpg *.jpeg *.png *.webp *.tif *.tiff *.heic)"
@@ -211,7 +211,7 @@ class LegacyWindow(QMainWindow):
         self._gaps: list[tuple[object, int, int]] = []   # (espaçador, normal, compacto)
         self._compact: bool | None = None
 
-        root = QWidget(); root.setObjectName("root")
+        root = Backdrop()
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
         self.outer = outer
@@ -278,7 +278,7 @@ class LegacyWindow(QMainWindow):
     # ------------------------------------------------------------------ páginas
     def _build_header(self) -> QHBoxLayout:
         head = QHBoxLayout(); head.setSpacing(0); head.setContentsMargins(2, 6, 0, 2)
-        mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(30)); mark.setToolTip(APP_NAME)
+        mark = QLabel(); mark.setPixmap(brand.lockup_pixmap(34)); mark.setToolTip(APP_NAME)
         mark.setAccessibleName(APP_NAME)
         rule = QFrame(); rule.setObjectName("vrule"); rule.setFixedSize(1, 22)
         tag = QLabel(TAGLINE); tag.setObjectName("tagline")

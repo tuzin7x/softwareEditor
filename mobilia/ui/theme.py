@@ -1,61 +1,152 @@
-"""Tema visual do 7xAi — "estúdio premium escuro".
+"""Tema visual do 7xAi na identidade 7x Intelligence — "HUD violeta".
 
-Grafite quente + latão/champanhe, filetes de 1 px, cantos generosos e a foto como protagonista.
-Tipografia: Inter (texto) e Inter Display (títulos e números), embutidas em ``ui/fonts``
-(SIL Open Font License, ver ``fonts/OFL.txt``); sem elas cai para Segoe UI.
+Superfícies quase pretas com tom violeta, violeta como cor de marca/destaque (botões principais, seleção, foco,
+progresso), verde para "pronto/verificado", filetes de 1 px com brilho violeta no alto dos cartões, grade técnica
+e halo violeta no fundo da janela (``paint_backdrop``). Os tokens vêm do design system do site 7x Intelligence
+(``src/styles.css``, em oklch) e são convertidos para sRGB aqui mesmo (``oklch``), com corte no gamut sRGB como os
+navegadores fazem; a tabela ``TOKENS`` guarda a origem de cada um.
 
-Os ícones de linha são desenhados em QPainter (sem arquivos externos) na mesma linguagem da
-marca: traço fino de desenho de arquitetura, terminais retos e uma linha de piso sob cada móvel.
-Contraste do texto (WCAG): ver ``CONTRAST`` — tudo >= 4.5:1 sobre as superfícies onde aparece.
+Tipografia (embutida em ``ui/fonts``, todas SIL Open Font License 1.1, ver ``fonts/OFL-*.txt``):
+  * Exo 2 (títulos, rótulos em caixa alta, números de passo);
+  * IBM Plex Sans (texto da interface);
+  * JetBrains Mono (números: porcentagem, contadores).
+Sem elas cai para Segoe UI / Consolas.
+
+Os ícones de linha são desenhados em QPainter (sem arquivos externos), traço fino de desenho técnico.
+Contraste do texto (WCAG): ver ``contrast_table()`` — tudo >= 4.5:1 sobre as superfícies onde aparece.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon, QImage, QPainter, QPainterPath, QPalette, QPen,
-                           QPixmap)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QIcon, QImage, QLinearGradient, QPainter,
+                           QPainterPath, QPalette, QPen, QPixmap, QRadialGradient)
 
 from . import brand
 
+
+# ------------------------------------------------------------------------------------------ oklch
+
+def oklch(L: float, C: float, h: float) -> str:
+    """oklch (CSS Color 4) -> "#RRGGBB" sRGB. Fora do gamut, cada canal é cortado em [0, 1] (como o Chrome)."""
+    a, b = C * math.cos(math.radians(h)), C * math.sin(math.radians(h))
+    l_ = L + 0.3963377774 * a + 0.2158037573 * b
+    m_ = L - 0.1055613458 * a - 0.0638541728 * b
+    s_ = L - 0.0894841775 * a - 1.2914855480 * b
+    l3, m3, s3 = l_ ** 3, m_ ** 3, s_ ** 3
+    rgb = (4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3,
+           -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3,
+           -0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3)
+
+    def enc(x: float) -> int:
+        x = min(1.0, max(0.0, x))
+        return round(255 * (12.92 * x if x <= 0.0031308 else 1.055 * x ** (1 / 2.4) - 0.055))
+
+    return "#%02X%02X%02X" % tuple(enc(v) for v in rgb)
+
+
+def contrast(fg: str, bg: str) -> float:
+    """Razão de contraste WCAG 2.x entre duas cores "#RRGGBB"."""
+    def lum(hx: str) -> float:
+        v = [int(hx[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        v = [x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4 for x in v]
+        return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+    hi, lo = sorted((lum(fg), lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+# (oklch, origem no site). "site": token idêntico ao de src/styles.css; "derivado": tom intermediário
+# na mesma família (mesmo matiz e croma do token citado), para estados que o site não define.
+TOKENS: dict[str, tuple[tuple[float, float, float], str]] = {
+    "BG":              ((0.12, 0.012, 290), "site --background"),
+    "STAGE":           ((0.105, 0.012, 290), "derivado de --background (palco da foto, um pouco mais fundo)"),
+    "SURFACE":         ((0.165, 0.016, 290), "site --card"),
+    "SURFACE_2":       ((0.2, 0.02, 290), "site --surface-raised (campos e botões secundários)"),
+    "SURFACE_3":       ((0.25, 0.03, 292), "site --accent (hover, menus)"),
+    "TILE":            ((0.18, 0.018, 290), "derivado entre --card e --surface-raised (ladrilhos)"),
+    "TILE_HOVER":      ((0.21, 0.024, 292), "derivado de --secondary (hover dos ladrilhos)"),
+    "HAIRLINE":        ((0.25, 0.026, 292), "derivado de --border (filete discreto)"),
+    "HAIRLINE_STRONG": ((0.31, 0.032, 292), "derivado de --input (filete de campos/botões)"),
+    "TEXT":            ((0.95, 0.005, 260), "site --foreground"),
+    "TEXT_2":          ((0.85, 0.012, 280), "derivado de --secondary-foreground"),
+    "MUTED":           ((0.7, 0.025, 290), "site --muted-foreground"),
+    "DISABLED":        ((0.62, 0.02, 290), "derivado de --muted-foreground"),
+    "ACCENT":          ((0.68, 0.22, 298), "site --primary / --ring"),
+    "ACCENT_HI":       ((0.8, 0.17, 305), "site --pick (violeta vivo)"),
+    "ACCENT_LO":       ((0.56, 0.23, 296), "derivado de --primary (fundo do gradiente)"),
+    "GLOW":            ((0.76, 0.18, 315), "site --primary-glow"),
+    "ON_ACCENT":       ((0.13, 0.03, 298), "site --primary-foreground"),
+    "SELECTED_BG":     ((0.23, 0.06, 298), "derivado: --primary ~14% sobre --card"),
+    "ACCENT_LINE":     ((0.42, 0.12, 298), "derivado: --primary ~40% sobre --border (hud-edge)"),
+    "OK":              ((0.74, 0.17, 150), "site --success"),
+    "DANGER":          ((0.64, 0.21, 25), "site --destructive"),
+    "WARNING":         ((0.82, 0.15, 85), "site --warning"),
+    "WARNING_BG":      ((0.22, 0.035, 85), "derivado de --warning (fundo de aviso)"),
+    "INFO":            ((0.68, 0.15, 240), "site --info (halo azul do --gradient-hero)"),
+    "TRACK":           ((0.3, 0.03, 292), "derivado de --border (trilho do progresso)"),
+    "PENDING_MARK":    ((0.5, 0.03, 292), "derivado de --border (contorno de etapa pendente, >= 3:1)"),
+}
+_HEX = {k: oklch(*v[0]) for k, v in TOKENS.items()}
+
 # ------------------------------------------------------------------------------------------ paleta
-BG = "#0F0F11"            # fundo da janela (grafite quase preto)
-SURFACE = "#161619"       # cartões
-SURFACE_2 = "#1E1E22"     # campos, botões secundários
-SURFACE_3 = "#27272C"     # hover / menus
-TILE = "#1A1A1E"          # ladrilhos de ambiente
-STAGE = "#0B0B0D"         # palco da foto/vídeo
-HAIRLINE = "#29292E"      # filetes de 1 px
-HAIRLINE_STRONG = "#3A3A41"
-TEXT = brand.IVORY        # #F4EFE7 marfim
-TEXT_2 = "#CBC5BB"        # texto secundário
-MUTED = "#A39D94"         # legendas
-DISABLED = "#8E8981"
-ACCENT = brand.BRASS      # #CDAE76 latão
-ACCENT_HI = brand.BRASS_HI
-ACCENT_LO = brand.BRASS_LO
-ON_ACCENT = "#17130C"
-SELECTED_BG = "#221E17"   # latão a ~8% sobre o cartão
-ACCENT_LINE = "#5E5038"   # latão a ~35%
-OK = "#8FCB9B"            # sálvia
-DANGER = "#EB8F84"
-NOTICE_TEXT = "#E9D3A6"
-TRACK = "#45454D"         # trilho da barra de progresso (visível já em 0 %)
-PENDING_MARK = "#6E6A63"  # contorno das etapas pendentes: 3.2:1 sobre o cartão (WCAG 1.4.11)
+BG = _HEX["BG"]                      # #06050A fundo da janela
+STAGE = _HEX["STAGE"]                # #040307 palco da foto/vídeo
+SURFACE = _HEX["SURFACE"]            # #0E0D15 cartões
+SURFACE_2 = _HEX["SURFACE_2"]        # #16151F campos, botões secundários
+SURFACE_3 = _HEX["SURFACE_3"]        # #221F2F hover / menus
+TILE = _HEX["TILE"]                  # #111019 ladrilhos
+TILE_HOVER = _HEX["TILE_HOVER"]
+HAIRLINE = _HEX["HAIRLINE"]          # #221F2D filetes de 1 px
+HAIRLINE_STRONG = _HEX["HAIRLINE_STRONG"]
+TEXT = _HEX["TEXT"]                  # #ECEFF2
+TEXT_2 = _HEX["TEXT_2"]              # #CCCDD6 texto secundário
+MUTED = _HEX["MUTED"]                # #9E9CAD legendas
+DISABLED = _HEX["DISABLED"]
+ACCENT = _HEX["ACCENT"]              # #AC70FF violeta da marca
+ACCENT_HI = _HEX["ACCENT_HI"]        # #D79FFF
+ACCENT_LO = _HEX["ACCENT_LO"]
+GLOW = _HEX["GLOW"]                  # #DB8AFE (gradiente "signal" = ACCENT -> GLOW)
+ON_ACCENT = _HEX["ON_ACCENT"]        # #090512 texto sobre o violeta
+SELECTED_BG = _HEX["SELECTED_BG"]    # #211535
+ACCENT_LINE = _HEX["ACCENT_LINE"]
+OK = _HEX["OK"]                      # #47C86E
+DANGER = _HEX["DANGER"]              # #F14445
+WARNING = _HEX["WARNING"]            # #F0BB3B
+WARNING_BG = _HEX["WARNING_BG"]
+NOTICE_TEXT = WARNING
+INFO = _HEX["INFO"]
+TRACK = _HEX["TRACK"]                # trilho da barra de progresso (visível já em 0 %)
+PENDING_MARK = _HEX["PENDING_MARK"]  # contorno das etapas pendentes: >= 3:1 sobre o cartão (WCAG 1.4.11)
 
 # compatibilidade com nomes antigos
 BORDER = HAIRLINE_STRONG
 
-# Contraste WCAG medido (texto sobre fundo), ver README do design.
-CONTRAST = {
-    "TEXT/SURFACE": 15.8, "TEXT_2/SURFACE": 10.5, "MUTED/SURFACE": 6.7, "MUTED/SURFACE_2": 6.2,
-    "ACCENT/SURFACE": 8.5, "OK/SURFACE": 9.6, "DANGER/SURFACE": 7.6, "NOTICE_TEXT/SELECTED_BG": 11.3,
-    "ON_ACCENT/ACCENT": 8.7, "DISABLED/SURFACE_2": 4.8,
-}
 
-FONT_UI = '"Inter", "Segoe UI Variable Text", "Segoe UI", "Noto Sans", sans-serif'
-FONT_DISPLAY = '"Inter Display", "Inter", "Segoe UI Variable Display", "Segoe UI", sans-serif'
-FONT_MONO = '"Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace'
+def rgba(hex_color: str, alpha: float) -> str:
+    c = QColor(hex_color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha:.3f})"
+
+
+# pares (texto, fundo) que aparecem na interface; todos >= 4.5:1 (testado em tests/test_ui.py)
+CONTRAST_PAIRS = [("TEXT", "SURFACE"), ("TEXT_2", "SURFACE"), ("MUTED", "SURFACE"), ("MUTED", "SURFACE_2"),
+                  ("MUTED", "SURFACE_3"), ("MUTED", "BG"), ("ACCENT", "SURFACE"), ("ACCENT_HI", "SURFACE"),
+                  ("ACCENT_HI", "SELECTED_BG"), ("TEXT", "SELECTED_BG"), ("OK", "SURFACE"), ("DANGER", "SURFACE"),
+                  ("DANGER", "SURFACE_2"), ("WARNING", "WARNING_BG"), ("WARNING", "SURFACE"),
+                  ("ON_ACCENT", "ACCENT"), ("ON_ACCENT", "GLOW"), ("DISABLED", "SURFACE_2"), ("TEXT", "SURFACE_3")]
+
+
+def contrast_table() -> dict[str, float]:
+    return {f"{a}/{b}": round(contrast(_HEX[a], _HEX[b]), 2) for a, b in CONTRAST_PAIRS}
+
+
+UI_FAMILY = "IBM Plex Sans"
+DISPLAY_FAMILY = "Exo 2"
+MONO_FAMILY = "JetBrains Mono"
+FONT_UI = f'"{UI_FAMILY}", "Segoe UI Variable Text", "Segoe UI", "Noto Sans", sans-serif'
+FONT_DISPLAY = f'"{DISPLAY_FAMILY}", "{UI_FAMILY}", "Segoe UI Variable Display", "Segoe UI", sans-serif'
+FONT_MONO = f'"{MONO_FAMILY}", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace'
 
 _HERE = Path(__file__).resolve().parent
 _RES = _HERE / "res"
@@ -65,78 +156,87 @@ def _res(name: str) -> str:
     return (_RES / name).as_posix()
 
 
+# bordas "hud-edge" do site: filete com brilho violeta no alto, que se apaga no filete comum embaixo
+EDGE = (f"qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {rgba(ACCENT, 0.55)}, stop:0.22 {rgba(ACCENT, 0.22)}, "
+        f"stop:0.6 {HAIRLINE}, stop:1 {HAIRLINE})")
+CARD_BG = rgba(SURFACE, 0.88)        # "vidro": a grade e o halo do fundo aparecem de leve através do cartão
+SIGNAL = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {ACCENT}, stop:1 {GLOW})"           # --gradient-signal
+SIGNAL_HOVER = (f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {oklch(0.73, 0.2, 300)}, "
+                f"stop:1 {oklch(0.81, 0.15, 315)})")
+
 QSS = f"""
 * {{ font-family: {FONT_UI}; font-size: 13px; color: {TEXT}; outline: none; }}
 QMainWindow, QWidget#root, QDialog {{ background: {BG}; }}
 QMessageBox {{ background: {SURFACE}; }}
 QMessageBox QLabel {{ color: {TEXT}; }}
-QToolTip {{ background: {SURFACE_3}; color: {TEXT}; border: 1px solid {HAIRLINE_STRONG}; border-radius: 6px;
+QToolTip {{ background: {SURFACE_3}; color: {TEXT}; border: 1px solid {ACCENT_LINE}; border-radius: 6px;
             padding: 6px 8px; }}
 
-/* tipografia */
-QLabel#title {{ font-family: {FONT_DISPLAY}; font-size: 22px; font-weight: 500; }}
+/* tipografia: Exo 2 nos títulos e rótulos em caixa alta (label-caps do site), IBM Plex Sans no texto */
+QLabel#title {{ font-family: {FONT_DISPLAY}; font-size: 24px; font-weight: 600; }}
 QLabel#subtitle, QLabel#tagline, QLabel#body {{ color: {TEXT_2}; font-size: 13px; }}
-QLabel#headline {{ font-family: {FONT_DISPLAY}; font-size: 24px; font-weight: 500; }}
-QLabel#section {{ color: {TEXT_2}; font-size: 11px; font-weight: 600; }}
-QLabel#stepnum {{ color: {ACCENT}; font-family: {FONT_DISPLAY}; font-size: 12px; font-weight: 500; }}
+QLabel#headline {{ font-family: {FONT_DISPLAY}; font-size: 25px; font-weight: 600; }}
+QLabel#section {{ font-family: {FONT_DISPLAY}; color: {TEXT_2}; font-size: 11px; font-weight: 600; }}
+QLabel#stepnum {{ color: {ACCENT}; font-family: {FONT_MONO}; font-size: 12px; font-weight: 600; }}
 QLabel#muted {{ color: {MUTED}; }}
 QLabel#hint, QLabel#caption {{ color: {MUTED}; font-size: 12px; }}
 QLabel#filename {{ font-size: 15px; font-weight: 600; }}
-QLabel#result {{ font-family: {FONT_DISPLAY}; font-size: 26px; font-weight: 500; }}
+QLabel#result {{ font-family: {FONT_DISPLAY}; font-size: 27px; font-weight: 600; }}
 QLabel#privacy {{ color: {MUTED}; font-size: 12px; }}
 QLabel#trust {{ color: {TEXT_2}; font-size: 12px; }}
 QLabel#stagecap {{ color: {MUTED}; font-size: 12px; font-style: italic; }}
-QFrame#chip {{ background: {SURFACE}; border: 1px solid {ACCENT_LINE}; border-radius: 15px; }}
+QFrame#chip {{ background: {rgba(ACCENT, 0.08)}; border: 1px solid {ACCENT_LINE}; border-radius: 15px; }}
 QLabel#chiptext {{ color: {TEXT_2}; font-size: 12px; }}
-QLabel#pct {{ font-family: {FONT_DISPLAY}; }}
-QLabel#notice {{ color: {NOTICE_TEXT}; background: {SELECTED_BG}; border: 1px solid {ACCENT_LINE};
+QLabel#pct {{ font-family: {FONT_MONO}; }}
+QLabel#notice {{ color: {WARNING}; background: {WARNING_BG}; border: 1px solid {rgba(WARNING, 0.35)};
                  border-radius: 10px; padding: 10px 12px; font-size: 12px; }}
 QLabel#seal {{ color: {TEXT_2}; font-size: 12px; }}
 QFrame#sealbox {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE}; border-radius: 10px; }}
 QFrame#vrule {{ background: {HAIRLINE_STRONG}; border: none; }}
 QFrame#rule {{ background: {HAIRLINE}; border: none; }}
 
-/* cartões e palco */
-QFrame#card {{ background: {SURFACE}; border: 1px solid {HAIRLINE}; border-radius: 16px; }}
-QFrame#stage {{ background: {STAGE}; border: 1px solid {HAIRLINE}; border-radius: 16px; }}
-QFrame#drop {{ border: 1px solid {HAIRLINE}; border-radius: 16px;
-               background: qradialgradient(cx:0.5, cy:0.42, radius:0.75, fx:0.5, fy:0.42,
-                                           stop:0 #1B1B1F, stop:1 {STAGE}); }}
+/* cartões ("vidro" com hud-edge) e palco */
+QFrame#card {{ background: {CARD_BG}; border: 1px solid {EDGE}; border-radius: 14px; }}
+QFrame#stage {{ background: {rgba(STAGE, 0.92)}; border: 1px solid {EDGE}; border-radius: 14px; }}
+QFrame#drop {{ border: 1px solid {EDGE}; border-radius: 14px;
+               background: qradialgradient(cx:0.5, cy:0.40, radius:0.75, fx:0.5, fy:0.40,
+                                           stop:0 {rgba(ACCENT, 0.10)}, stop:0.55 {rgba(SURFACE, 0.70)},
+                                           stop:1 {rgba(STAGE, 0.92)}); }}
 QFrame#drop[hover="true"] {{ border: 1px solid {ACCENT};
-               background: qradialgradient(cx:0.5, cy:0.42, radius:0.75, fx:0.5, fy:0.42,
-                                           stop:0 #241F17, stop:1 {STAGE}); }}
-QFrame#drop[filled="true"] {{ background: {STAGE}; }}
+               background: qradialgradient(cx:0.5, cy:0.40, radius:0.75, fx:0.5, fy:0.40,
+                                           stop:0 {rgba(ACCENT, 0.22)}, stop:1 {rgba(STAGE, 0.92)}); }}
+QFrame#drop[filled="true"] {{ background: {rgba(STAGE, 0.92)}; }}
 
 /* botões */
 QPushButton {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE_STRONG}; border-radius: 10px;
                padding: 0 16px; min-height: 38px; font-weight: 500; }}
-QPushButton:hover {{ background: {SURFACE_3}; border-color: #4C4C54; }}
-QPushButton:pressed {{ background: #19191C; }}
+QPushButton:hover {{ background: {SURFACE_3}; border-color: {ACCENT_LINE}; }}
+QPushButton:pressed {{ background: {SURFACE}; }}
 QPushButton:disabled {{ color: {DISABLED}; background: {SURFACE_2}; border-color: {HAIRLINE}; }}
-QPushButton#primary {{ color: {ON_ACCENT}; font-size: 14px; font-weight: 600; min-height: 46px; border-radius: 12px;
-                       border: 1px solid #DCC394;
-                       background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #DDC08A, stop:1 {ACCENT}); }}
-QPushButton#primary:hover {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {ACCENT_HI}, stop:1 #D6B97F); }}
+QPushButton#primary {{ color: {ON_ACCENT}; font-family: {FONT_DISPLAY}; font-size: 14px; font-weight: 700;
+                       min-height: 46px; border-radius: 12px; border: 1px solid {rgba(ACCENT_HI, 0.85)};
+                       background: {SIGNAL}; }}
+QPushButton#primary:hover {{ background: {SIGNAL_HOVER}; border-color: {TEXT}; }}
 QPushButton#primary:pressed {{ background: {ACCENT_LO}; }}
 QPushButton#primary:disabled {{ color: {DISABLED}; background: {SURFACE_2}; border: 1px solid {HAIRLINE}; }}
-QPushButton#outline {{ background: transparent; color: {ACCENT_HI}; border: 1px solid {ACCENT_LINE}; }}
-QPushButton#outline:hover {{ background: {SELECTED_BG}; border-color: {ACCENT}; }}
+QPushButton#outline {{ background: {rgba(ACCENT, 0.06)}; color: {ACCENT_HI}; border: 1px solid {ACCENT_LINE}; }}
+QPushButton#outline:hover {{ background: {SELECTED_BG}; border-color: {ACCENT}; color: {TEXT}; }}
 QPushButton#ghost {{ background: transparent; border: 1px solid transparent; color: {TEXT_2}; }}
-QPushButton#ghost:hover {{ background: {SURFACE_2}; color: {TEXT}; border-color: {HAIRLINE}; }}
-QPushButton#danger {{ background: transparent; border: 1px solid #4A302D; color: {DANGER}; }}
-QPushButton#danger:hover {{ background: #211716; border-color: {DANGER}; }}
+QPushButton#ghost:hover {{ background: {SURFACE_2}; color: {TEXT}; border-color: {HAIRLINE_STRONG}; }}
+QPushButton#danger {{ background: transparent; border: 1px solid {rgba(DANGER, 0.40)}; color: {DANGER}; }}
+QPushButton#danger:hover {{ background: {rgba(DANGER, 0.10)}; border-color: {DANGER}; }}
 QPushButton#danger:disabled {{ color: {DISABLED}; border-color: {HAIRLINE}; }}
 
 /* ladrilhos de ambiente */
 QToolButton#room {{ background: {TILE}; border: 1px solid {HAIRLINE}; border-radius: 12px;
                     padding: 12px 4px 10px 4px; color: {TEXT_2}; font-size: 12px; }}
-QToolButton#room:hover {{ background: #202025; border-color: {HAIRLINE_STRONG}; color: {TEXT}; }}
+QToolButton#room:hover {{ background: {TILE_HOVER}; border-color: {ACCENT_LINE}; color: {TEXT}; }}
 QToolButton#room:checked {{ background: {SELECTED_BG}; border: 1px solid {ACCENT}; color: {TEXT}; font-weight: 600; }}
 
-/* redesenho: chips (ambiente, evento, formato) e seletor segmentado (versões) */
+/* redesenho: chips (ambiente, evento, formato) e seletor segmentado (versões, módulos) */
 QToolButton#chip {{ background: {TILE}; border: 1px solid {HAIRLINE}; border-radius: 10px; padding: 6px 4px;
                     color: {TEXT_2}; font-size: 12px; }}
-QToolButton#chip:hover {{ background: #202025; border-color: {HAIRLINE_STRONG}; color: {TEXT}; }}
+QToolButton#chip:hover {{ background: {TILE_HOVER}; border-color: {ACCENT_LINE}; color: {TEXT}; }}
 QToolButton#chip:checked {{ background: {SELECTED_BG}; border: 1px solid {ACCENT}; color: {TEXT}; font-weight: 600; }}
 QToolButton#chip:disabled {{ color: {DISABLED}; border-color: {HAIRLINE}; background: {SURFACE}; }}
 QToolButton#seg {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE_STRONG}; padding: 0; min-height: 34px;
@@ -145,6 +245,8 @@ QToolButton#seg[pos="first"] {{ border-top-left-radius: 10px; border-bottom-left
 QToolButton#seg[pos="last"] {{ border-top-right-radius: 10px; border-bottom-right-radius: 10px; }}
 QToolButton#seg:hover {{ background: {SURFACE_3}; color: {TEXT}; }}
 QToolButton#seg:checked {{ background: {SELECTED_BG}; border-color: {ACCENT}; color: {ACCENT_HI}; font-weight: 600; }}
+QWidget#modulenav QToolButton#seg {{ padding: 0 14px; font-family: {FONT_DISPLAY}; font-weight: 600; }}
+QWidget#modulenav QToolButton#seg:checked {{ background: {SELECTED_BG}; color: {ACCENT_HI}; }}
 QPushButton#link {{ background: transparent; border: none; color: {ACCENT_HI}; padding: 0; min-height: 22px;
                     text-align: left; font-weight: 500; }}
 QPushButton#link:hover {{ color: {TEXT}; text-decoration: underline; }}
@@ -152,9 +254,10 @@ QLineEdit, QPlainTextEdit {{ background: {SURFACE_2}; border: 1px solid {HAIRLIN
                              padding: 8px 10px; color: {TEXT}; selection-background-color: {ACCENT};
                              selection-color: {ON_ACCENT}; }}
 QLineEdit {{ min-height: 22px; }}
-QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
+QLineEdit:hover, QPlainTextEdit:hover {{ border-color: {ACCENT_LINE}; }}
+QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; background: {rgba(ACCENT, 0.05)}; }}
 QSlider::groove:horizontal {{ height: 4px; background: {TRACK}; border-radius: 2px; }}
-QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {SIGNAL}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {ACCENT_HI}; border: 2px solid {SURFACE}; width: 14px; height: 14px;
                               margin: -7px 0; border-radius: 9px; }}
 QFrame#taskbox {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE}; border-radius: 12px; }}
@@ -164,43 +267,51 @@ QLabel#stepdot {{ color: {MUTED}; font-size: 12px; }}
 /* qualidade */
 QComboBox {{ background: {SURFACE_2}; border: 1px solid {HAIRLINE_STRONG}; border-radius: 10px;
              padding: 0 12px; min-height: 38px; }}
-QComboBox:hover {{ border-color: #4C4C54; }}
+QComboBox:hover {{ border-color: {ACCENT_LINE}; }}
 QComboBox:on {{ border-color: {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 34px; subcontrol-origin: padding; subcontrol-position: center right; }}
 QComboBox::down-arrow {{ image: url({_res("chevron.png")}); width: 12px; height: 8px; }}
-QComboBox QAbstractItemView {{ background: {SURFACE_3}; border: 1px solid {HAIRLINE_STRONG}; padding: 4px;
+QComboBox QAbstractItemView {{ background: {SURFACE_3}; border: 1px solid {ACCENT_LINE}; padding: 4px;
                                selection-background-color: {SELECTED_BG}; selection-color: {TEXT}; }}
 QComboBox QAbstractItemView::item {{ min-height: 32px; padding: 0 10px; border-radius: 6px; }}
 QComboBox QAbstractItemView::item:selected {{ background: {SELECTED_BG}; color: {ACCENT_HI}; }}
 
-/* progresso */
+/* progresso (gradiente "signal" do site) */
 QProgressBar {{ background: {TRACK}; border: none; border-radius: 3px; min-height: 6px; max-height: 6px; }}
 QProgressBar::chunk {{ border-radius: 3px;
-                       background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT_LO}, stop:1 {ACCENT_HI}); }}
+                       background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT_LO}, stop:0.6 {ACCENT},
+                                                   stop:1 {GLOW}); }}
 
 /* caixa de seleção */
 QCheckBox {{ color: {TEXT_2}; spacing: 10px; font-size: 12px; }}
-QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px; border: 1px solid #55555D; background: {SURFACE_2}; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px; border: 1px solid {PENDING_MARK};
+                        background: {SURFACE_2}; }}
 QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url({_res("check.png")}); }}
 
 /* rodapé */
-QStatusBar {{ background: {BG}; color: {MUTED}; border-top: 1px solid {HAIRLINE}; font-size: 12px;
+QStatusBar {{ background: {rgba(BG, 0.92)}; color: {MUTED}; border-top: 1px solid {HAIRLINE}; font-size: 12px;
               min-height: 30px; }}
 QStatusBar::item {{ border: none; }}
-QStatusBar QLabel {{ color: {MUTED}; font-size: 12px; padding-right: 20px; }}
+QStatusBar QLabel {{ color: {MUTED}; font-family: {FONT_MONO}; font-size: 11px; padding-right: 20px; }}
 
 QTextEdit {{ background: {STAGE}; border: 1px solid {HAIRLINE}; border-radius: 10px; padding: 8px;
              font-family: {FONT_MONO}; font-size: 12px; color: {TEXT_2}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px 2px; }}
 QScrollBar::handle:vertical {{ background: {HAIRLINE_STRONG}; border-radius: 3px; min-height: 24px; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+QScrollBar::handle:vertical:hover {{ background: {ACCENT_LINE}; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px 4px; }}
+QScrollBar::handle:horizontal {{ background: {HAIRLINE_STRONG}; border-radius: 3px; min-width: 24px; }}
+QScrollBar::handle:horizontal:hover {{ background: {ACCENT_LINE}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 """
 
 
 # ------------------------------------------------------------------------------------ fontes/paleta
 
+FONT_FILES = ("Exo2-Medium.ttf", "Exo2-SemiBold.ttf", "Exo2-Bold.ttf", "IBMPlexSans-Regular.ttf",
+              "IBMPlexSans-Medium.ttf", "IBMPlexSans-SemiBold.ttf", "JetBrainsMono[wght].ttf")
 _fonts_loaded = False
 
 
@@ -210,21 +321,30 @@ def load_fonts() -> None:
     if _fonts_loaded:
         return
     _fonts_loaded = True
-    for f in sorted((_HERE / "fonts").glob("*.otf")):
+    for f in sorted((_HERE / "fonts").glob("*.ttf")):
         QFontDatabase.addApplicationFont(str(f))
 
 
 def assets_ok() -> bool:
     """Fontes e imagens da interface presentes (o autoteste do .exe falha se o build esquecê-las)."""
     load_fonts()
-    fonts = "Inter" in QFontDatabase.families() and "Inter Display" in QFontDatabase.families()
+    fams = QFontDatabase.families()
+    fonts = all(f in fams for f in (UI_FAMILY, DISPLAY_FAMILY, MONO_FAMILY))
     return fonts and all((_RES / n).is_file() for n in ("chevron.png", "check.png"))
+
+
+def font(px: int, weight=QFont.Normal, family: str | None = None) -> QFont:
+    """Fonte da interface em pixels (IBM Plex Sans por padrão; ``family`` = DISPLAY_FAMILY / MONO_FAMILY)."""
+    f = QFont(family or UI_FAMILY)
+    f.setPixelSize(px); f.setWeight(weight)
+    f.setHintingPreference(QFont.PreferNoHinting)
+    return f
 
 
 def palette() -> QPalette:
     pal = QPalette()
     roles = {
-        QPalette.Window: BG, QPalette.WindowText: TEXT, QPalette.Base: SURFACE_2, QPalette.AlternateBase: SURFACE,
+        QPalette.Window: BG, QPalette.WindowText: TEXT, QPalette.Base: SURFACE_2, QPalette.AlternateBase: TILE,
         QPalette.Text: TEXT, QPalette.Button: SURFACE_2, QPalette.ButtonText: TEXT, QPalette.ToolTipBase: SURFACE_3,
         QPalette.ToolTipText: TEXT, QPalette.Highlight: ACCENT, QPalette.HighlightedText: ON_ACCENT,
         QPalette.PlaceholderText: MUTED, QPalette.Link: ACCENT_HI, QPalette.BrightText: "#FFFFFF",
@@ -246,10 +366,7 @@ def apply(app) -> None:
         pass
     app.setStyle("Fusion")
     app.setPalette(palette())
-    f = QFont("Inter")
-    f.setPixelSize(13)
-    f.setHintingPreference(QFont.PreferNoHinting)
-    app.setFont(f)
+    app.setFont(font(13))
     app.setStyleSheet(QSS)
     app.setWindowIcon(window_icon())
 
@@ -260,6 +377,47 @@ def tracked(label, spacing: float = 1.4):
     f.setLetterSpacing(QFont.AbsoluteSpacing, spacing)
     label.setFont(f)
     return label
+
+
+# ------------------------------------------------------------------------------------------ fundo
+
+GRID = 40          # px, como a grade do "hud-backdrop" do site
+
+
+def paint_backdrop(p: QPainter, rect: QRectF) -> None:
+    """Fundo HUD do site (``.hud-backdrop``): cor de fundo, halo violeta no alto à direita, halo magenta/azul
+    discreto embaixo e grade de 40 px em violeta a 6 %. Pintado uma vez num QPixmap (``Backdrop``)."""
+    p.fillRect(rect, QColor(BG))
+    w, h = rect.width(), rect.height()
+    for (cx, cy, r, color, alpha) in ((0.88, 0.02, 0.62, ACCENT, 0.20), (0.36, 1.08, 0.50, oklch(0.6, 0.25, 330), 0.10),
+                                     (0.0, 1.0, 0.42, INFO, 0.06)):
+        g = QRadialGradient(QPointF(rect.left() + w * cx, rect.top() + h * cy), max(w, h) * r)
+        c0 = QColor(color); c0.setAlphaF(alpha)
+        c1 = QColor(color); c1.setAlphaF(0.0)
+        g.setColorAt(0.0, c0); g.setColorAt(1.0, c1)
+        p.fillRect(rect, QBrush(g))
+    line = QColor(ACCENT); line.setAlphaF(0.06)
+    p.setPen(QPen(line, 1))
+    x = rect.left() + 0.5
+    while x < rect.right():
+        p.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom())); x += GRID
+    y = rect.top() + 0.5
+    while y < rect.bottom():
+        p.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y)); y += GRID
+    # a grade some suavemente para baixo (o conteúdo fica limpo)
+    fade = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+    c = QColor(BG); c.setAlphaF(0.0); fade.setColorAt(0.0, c)
+    c = QColor(BG); c.setAlphaF(0.55); fade.setColorAt(1.0, c)
+    p.fillRect(rect, QBrush(fade))
+
+
+def backdrop_pixmap(w: int, h: int, dpr: float = 1.0) -> QPixmap:
+    pm = QPixmap(max(1, round(w * dpr)), max(1, round(h * dpr)))
+    pm.setDevicePixelRatio(dpr)
+    p = QPainter(pm)
+    paint_backdrop(p, QRectF(0, 0, w, h))
+    p.end()
+    return pm
 
 
 # ------------------------------------------------------------------------------------------- ícones
@@ -434,7 +592,7 @@ def function_icon(kind: str, size: int = 40, color: str = TEXT_2, on_color: str 
 
 
 def room_icon(kind: str, size: int = 40, color: str = TEXT_2, on_color: str = ACCENT_HI) -> QIcon:
-    """Ícone de linha do ambiente: marfim apagado; latão quando o ladrilho está marcado."""
+    """Ícone de linha do ambiente: claro apagado; violeta quando o ladrilho está marcado."""
     icon = QIcon()
     off = room_pixmap(kind, size, color)
     on = room_pixmap(kind, size, on_color)
@@ -600,7 +758,7 @@ def empty_state_art(width: int = 168, height: int = 120) -> QPixmap:
 # -------------------------------------------------------------------------------------------- marca
 
 def app_icon(size: int = 256, dpr: float = 1.0) -> QPixmap:
-    """Ícone 7xAi (placa grafite com "7xAi"; "7x" abaixo de 32 px). Ver ``brand``."""
+    """Ícone 7xAi: o emblema hexagonal 7x (identidade 7x Intelligence). Ver ``brand``."""
     return brand.app_icon_pixmap(size, dpr)
 
 

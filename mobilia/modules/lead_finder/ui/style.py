@@ -56,7 +56,7 @@ QLabel#lfDanger {{ color: {theme.DANGER}; font-size: 12px; }}
 QLabel#lfOk {{ color: {theme.OK}; font-size: 12px; }}
 
 QTableView#lfTable {{
-  background: {theme.SURFACE}; alternate-background-color: #18181B; border: 1px solid {theme.HAIRLINE};
+  background: {theme.SURFACE}; alternate-background-color: {theme.TILE}; border: 1px solid {theme.HAIRLINE};
   border-radius: 12px; gridline-color: transparent; selection-background-color: {theme.SELECTED_BG};
   selection-color: {theme.TEXT}; }}
 QTableView#lfTable::item {{ padding: 0 8px; border-bottom: 1px solid {theme.HAIRLINE}; }}

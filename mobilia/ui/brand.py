@@ -1,20 +1,18 @@
-"""Marca 7xAi: letras desenhadas em vetor (sem depender de fonte) e o ícone do aplicativo.
+"""Marca 7xAi na identidade 7x Intelligence: o emblema hexagonal "7x" e o logotipo "7xAi".
 
-Fonte única do logotipo: a janela desenha a marca com estas formas, e o ícone do executável
-(``packaging/assets/icon.ico``) e os SVGs da marca são gerados a partir delas
-(``python -m mobilia.ui.brand <pasta>``).
+Fonte única da marca: a janela desenha o emblema e o logotipo com estas formas, e o ícone do executável
+(``packaging/assets/icon.ico``), os SVGs da marca e a marca d'água do vídeo (``mobilia/video/res``) são gerados a
+partir delas (``python scripts/make_icon.py``).
 
-Construção (unidades de desenho, y para baixo, linha de base em y = CAP):
-  * altura das maiúsculas CAP = 100, altura-x XH = 70;
-  * hastes retas, terminais cortados a prumo (traço de desenho de arquitetura);
-  * o "x" é o acento da marca, em latão/champanhe ("7×": sete vezes). Nos tamanhos grandes
-    o traço "/" do x passa por baixo do "\\" (uma fresta fina, como uma junta de marcenaria).
+Emblema ("Monogram" do site 7x Intelligence, arte do próprio dono): hexágono facetado em grade de 48, contorno em
+gradiente violeta (#C084FC -> #7C3AED -> #4C1D95), miolo #120B22, marcas de mira nos quatro lados, o "7" claro e o
+"x" violeta. Tamanhos ópticos do ícone (cada um desenhado para a sua grade, não só reduzido):
+  * L  (>= 40 px): emblema completo (marcas de mira e faceta interna);
+  * S  (< 40 px):  sem as marcas de mira e com traços mais grossos, para o "7x" continuar legível em 16-32 px.
 
-Tamanhos ópticos do ícone (cada um desenhado para a sua grade, não só reduzido):
-  * L  (>= 64 px): "7xAi" com a fresta no x;
-  * M  (40-63 px): "7xAi" mais encorpado, ocupando mais o quadro (48 px = ícone da Área de Trabalho);
-  * S  (< 40 px):  monograma "7x" alinhado à grade de 16 px ("7xAi" inteiro não fica legível em 32 px);
-    em 16 px ele é desenhado pixel a pixel.
+Logotipo "7xAi" (unidades de desenho, y para baixo, linha de base em y = CAP): letras desenhadas em vetor (sem
+depender de fonte), CAP = 100 e XH = 70, hastes retas; "7x" em gradiente violeta (violet-200 -> purple-500, como o
+"7x" do site) e "Ai" no branco do tema.
 """
 from __future__ import annotations
 
@@ -23,20 +21,27 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-                           QPolygonF, QRadialGradient, QTransform)
+from PySide6.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+                           QRadialGradient)
 
 CAP = 100.0
 XH = 70.0
 
-# Cores da marca (o tema reaproveita as mesmas).
-IVORY = "#F4EFE7"
-BRASS_HI = "#EAD5A8"
-BRASS = "#CDAE76"
-BRASS_LO = "#A8854F"
-TILE_TOP = "#323238"   # um pouco mais claro: a borda da placa se destaca em papéis de parede escuros
-TILE_BOTTOM = "#111113"
+# Cores da marca (as do emblema do site 7x Intelligence; o tema usa os tokens oklch equivalentes).
+INK = "#ECEFF2"           # foreground do site, oklch(0.95 0.005 260)
+MONO_HI = "#C084FC"       # gradiente do contorno (purple-400 -> violet-600 -> violet-900)
+MONO_MID = "#7C3AED"
+MONO_LO = "#4C1D95"
+MONO_FILL = "#120B22"     # miolo do hexágono
+MONO_TICK = "#C4B5FD"     # marcas de mira (violet-300)
+MONO_SEVEN = "#F5F3FF"    # o "7" (violet-50)
+MONO_X = "#C084FC"        # o "x"
+GLOW = "#8B5CF6"          # brilho em volta do emblema (drop-shadow 0 0 8px #8b5cf6 no site)
+WORD_FROM = "#DDD6FE"     # "7x" do logotipo: from-violet-200 ...
+WORD_TO = "#A855F7"       # ... to-purple-500
 
+
+# ------------------------------------------------------------------------------------------ letras
 
 # ------------------------------------------------------------------------------------------ letras
 
@@ -108,7 +113,9 @@ def glyph_i(w: float, x0: float) -> QPainterPath:
 
 def wordmark_parts(weight: float = 18.0, cut: float = 0.0, track: float = 0.0
                    ) -> tuple[QPainterPath, QPainterPath, QRectF]:
-    """(tinta "7 A i", acento "x", caixa) em unidades de desenho. ``weight``: espessura das hastes."""
+    """(tinta "A i", acento "7x", caixa) em unidades de desenho. ``weight``: espessura das hastes.
+
+    Como no site 7x Intelligence, o "7x" leva o gradiente violeta da marca e o resto fica claro."""
     w = weight
     p7 = glyph_7(w, 0.0)
     x = 63.0 + track
@@ -117,60 +124,118 @@ def wordmark_parts(weight: float = 18.0, cut: float = 0.0, track: float = 0.0
     pA = glyph_A(w, x, width=72.0 + (w - 18) * 0.8)
     x = pA.boundingRect().right() + 9.0 + (w - 18) * 0.2 + track
     pi = glyph_i(w, x)
-    ink = _merge(p7, pA, pi)
-    return ink, px, ink.boundingRect().united(px.boundingRect())
+    ink = _merge(pA, pi)
+    acc = _merge(p7, px)
+    return ink, acc, ink.boundingRect().united(acc.boundingRect())
 
 
-# Monograma "7x" da variante pequena (20-31 px), numa grade de 16 x 16.
-SMALL_7 = [(2.5, 4), (8.5, 4), (6.1, 12), (4.0, 12), (6.15, 6), (2.5, 6)]
-SMALL_X_A = [(8.5, 6), (10.4, 6), (13.6, 12), (11.7, 12)]
-SMALL_X_B = [(11.7, 6), (13.6, 6), (10.4, 12), (8.5, 12)]
 
-# 16 px: desenhado pixel a pixel (sem meio-tom nas hastes). "#" = pixel aceso; colunas 0-15.
-PIXELS_16_7 = ["..#####.........",   # linha 4
-               "..#####.........",
-               ".....##.........",
-               "....##..........",
-               "....##..........",
-               "...##...........",
-               "...##...........",
-               "...##..........."]   # linha 11
-PIXELS_16_X = ["........##..##..",   # linha 6 (x de traço duplo: lê como "x" e não como "H")
-               ".........####...",
-               "..........##....",
-               "..........##....",
-               ".........####...",
-               "........##..##.."]   # linha 11
-
-
-def _pixel_path(rows: list[str], top: int) -> QPainterPath:
-    path = QPainterPath()
-    for j, row in enumerate(rows):
-        i = 0
-        while i < len(row):
-            if row[i] == "#":
-                k = i
-                while k < len(row) and row[k] == "#":
-                    k += 1
-                path.addRect(QRectF(i, top + j, k - i, 1))
-                i = k
-            else:
-                i += 1
-    return path.simplified()
-
-# Estilos da marca. HEADER: cabeçalho da janela (mesmo peso encorpado do ícone, com a junta no x).
+# Estilo do logotipo no cabeçalho (peso encorpado, com a junta no x).
 HEADER = dict(weight=20.0, cut=4.0, track=3.0)
 
 
-# ----------------------------------------------------------------------------------------- pintura
+# ---------------------------------------------------------------------------------------- emblema
 
-def brass_gradient(y0: float, y1: float, bright: bool = False) -> QLinearGradient:
-    """Latão escovado. ``bright``: sem o tom escuro no pé (tamanhos pequenos, onde ele apagaria o x)."""
-    g = QLinearGradient(QPointF(0, y0), QPointF(0, y1))
-    g.setColorAt(0.0, QColor(BRASS_HI))
-    g.setColorAt(0.55 if not bright else 1.0, QColor(BRASS))
-    if not bright:
-        g.setColorAt(1.0, QColor(BRASS_LO))
+HEX = [(24, 2), (43, 13), (43, 35), (24, 46), (5, 35), (5, 13)]
+HEX_IN = [(24, 8), (38, 16), (38, 32), (24, 40), (10, 32), (10, 16)]
+TICKS = [((24, 3), (24, 8)), ((24, 40), (24, 45)), ((5.5, 24), (10, 24)), ((38, 24), (42.5, 24))]
+SEVEN = [(14, 16), (25, 16), (18, 33)]
+EX = [((26, 23), (34, 32)), ((34, 23), (26, 32))]
+# tamanho óptico pequeno: o mesmo desenho, sem mira nem faceta, "7x" maior e mais grosso
+SEVEN_S = [(12.5, 14.5), (26, 14.5), (17.5, 34.5)]
+EX_S = [((25.5, 22), (35.5, 34)), ((35.5, 22), (25.5, 34))]
+
+
+def mono_optical(size: float) -> str:
+    return "L" if size >= 40 else "S"
+
+
+def _mono_spec(optical: str) -> dict:
+    if optical == "S":
+        return dict(edge=3.4, seven=SEVEN_S, seven_w=5.2, ex=EX_S, ex_w=4.8, ticks=False, inner=False)
+    return dict(edge=2.5, seven=SEVEN, seven_w=3.6, ex=EX, ex_w=3.2, ticks=True, inner=True)
+
+
+def _grad(x0, y0, x1, y1) -> QLinearGradient:
+    g = QLinearGradient(QPointF(x0, y0), QPointF(x1, y1))
+    g.setColorAt(0.0, QColor(MONO_HI)); g.setColorAt(0.55, QColor(MONO_MID)); g.setColorAt(1.0, QColor(MONO_LO))
+    return g
+
+
+def _round_pen(brush, w: float) -> QPen:
+    pen = QPen(brush, w)
+    pen.setCapStyle(Qt.RoundCap); pen.setJoinStyle(Qt.RoundJoin)
+    return pen
+
+
+def paint_monogram(p: QPainter, x: float, y: float, size: float, optical: str | None = None) -> None:
+    """Emblema 7x na caixa (x, y, size, size). ``optical``: "L" ou "S" (padrão: pelo tamanho)."""
+    sp = _mono_spec(optical or mono_optical(size))
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    p.translate(x, y)
+    p.scale(size / 48.0, size / 48.0)
+    hexp = QPolygonF([QPointF(a, b) for a, b in HEX])
+    p.setPen(QPen(QBrush(_grad(5, 2, 43, 46)), sp["edge"], Qt.SolidLine, Qt.FlatCap, Qt.MiterJoin))
+    p.setBrush(QColor(MONO_FILL))
+    p.drawPolygon(hexp)
+    if sp["inner"]:
+        p.setPen(Qt.NoPen)
+        p.setOpacity(0.18)
+        p.setBrush(QBrush(_grad(10, 8, 38, 40)))
+        p.drawPolygon(QPolygonF([QPointF(a, b) for a, b in HEX_IN]))
+        p.setOpacity(1.0)
+    if sp["ticks"]:
+        p.setPen(_round_pen(QColor(MONO_TICK), 1.6))
+        for (a, b), (c, d) in TICKS:
+            p.drawLine(QPointF(a, b), QPointF(c, d))
+    seven = QPainterPath(QPointF(*sp["seven"][0]))
+    for pt in sp["seven"][1:]:
+        seven.lineTo(QPointF(*pt))
+    p.setBrush(Qt.NoBrush)
+    p.setPen(_round_pen(QColor(MONO_SEVEN), sp["seven_w"]))
+    p.drawPath(seven)
+    p.setPen(_round_pen(QColor(MONO_X), sp["ex_w"]))
+    for (a, b), (c, d) in sp["ex"]:
+        p.drawLine(QPointF(a, b), QPointF(c, d))
+    p.restore()
+
+
+def paint_glow(p: QPainter, cx: float, cy: float, radius: float, alpha: float = 0.42) -> None:
+    """Brilho violeta suave (o drop-shadow do emblema no site), barato: um gradiente radial."""
+    g = QRadialGradient(QPointF(cx, cy), radius)
+    c0 = QColor(GLOW); c0.setAlphaF(alpha)
+    c1 = QColor(GLOW); c1.setAlphaF(0.0)
+    g.setColorAt(0.0, c0); g.setColorAt(0.55, QColor(c0.red(), c0.green(), c0.blue(), int(255 * alpha * 0.35)))
+    g.setColorAt(1.0, c1)
+    p.save(); p.setPen(Qt.NoPen); p.setBrush(QBrush(g))
+    p.drawEllipse(QPointF(cx, cy), radius, radius)
+    p.restore()
+
+
+def monogram_pixmap(size: int, dpr: float = 2.0, glow: bool = False) -> QPixmap:
+    """Emblema em ``size`` px lógicos; ``glow`` acrescenta o brilho violeta (margem de 25 % em volta)."""
+    pad = round(size * 0.25) if glow else 0
+    full = size + 2 * pad
+    pm = QPixmap(round(full * dpr), round(full * dpr))
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.scale(dpr, dpr)
+    p.setRenderHint(QPainter.Antialiasing)
+    if glow:
+        paint_glow(p, full / 2, full / 2, full / 2)
+    paint_monogram(p, pad, pad, size)
+    p.end()
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
+# --------------------------------------------------------------------------------------- logotipo
+
+def word_gradient(x0: float, x1: float) -> QLinearGradient:
+    """Gradiente horizontal do "7x" (violet-200 -> purple-500)."""
+    g = QLinearGradient(QPointF(x0, 0), QPointF(x1, 0))
+    g.setColorAt(0.0, QColor(WORD_FROM)); g.setColorAt(1.0, QColor(WORD_TO))
     return g
 
 
@@ -178,7 +243,7 @@ def wordmark_width(height: float, weight: float, cut: float = 0.0, track: float 
     return wordmark_parts(weight, cut, track)[2].width() * height / CAP
 
 
-def paint_wordmark(p: QPainter, left: float, top: float, height: float, ink: str = IVORY,
+def paint_wordmark(p: QPainter, left: float, top: float, height: float, ink: str = INK,
                    weight: float = 14.0, cut: float = 0.0, track: float = 0.0) -> float:
     """Desenha "7xAi" com altura de maiúsculas ``height`` a partir de (left, top). Devolve a largura."""
     main, acc, box = wordmark_parts(weight, cut, track)
@@ -190,7 +255,8 @@ def paint_wordmark(p: QPainter, left: float, top: float, height: float, ink: str
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(ink))
     p.drawPath(main)
-    p.setBrush(QBrush(brass_gradient(CAP - XH, CAP)))
+    ab = acc.boundingRect()
+    p.setBrush(QBrush(word_gradient(ab.left(), ab.right())))
     p.drawPath(acc)
     p.restore()
     return box.width() * k
@@ -208,83 +274,39 @@ def wordmark_pixmap(height: int, dpr: float = 2.0, **style) -> QPixmap:
     return pm
 
 
+def lockup_pixmap(height: int, dpr: float = 2.0, glow: bool = True) -> QPixmap:
+    """Emblema + logotipo lado a lado (cabeçalho). ``height``: altura do emblema; o logotipo tem 0,56 dela.
+    O brilho violeta (``glow``) se espalha para os lados; em cima e embaixo ele já se apagou na borda do desenho,
+    então o cabeçalho só cresce 2 px de cada lado."""
+    cap = round(height * 0.56)
+    gap = round(height * 0.34)
+    pad_x = round(height * 0.2) if glow else 0
+    pad_y = 2 if glow else 0
+    ww = int(math.ceil(wordmark_width(cap, HEADER["weight"], HEADER["cut"], HEADER["track"]))) + 2
+    w, h = pad_x + height + gap + ww + 2, height + 2 * pad_y
+    pm = QPixmap(round(w * dpr), round(h * dpr))
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.scale(dpr, dpr)
+    p.setRenderHint(QPainter.Antialiasing)
+    if glow:
+        paint_glow(p, pad_x + height / 2, h / 2, height * 0.62, 0.45)
+    paint_monogram(p, pad_x, pad_y, height, "L")
+    paint_wordmark(p, pad_x + height + gap, pad_y + (height - cap) / 2, cap, **HEADER)
+    p.end()
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
+# ------------------------------------------------------------------------------------------- ícone
+
 def optical_class(size: float) -> str:
-    return "L" if size >= 64 else ("M" if size >= 40 else "S")
-
-
-def _icon_layout(size: float):
-    """(tinta, acento, transformação desenho->pixels) do ícone grande/médio."""
-    big = size >= 64
-    main, acc, box = wordmark_parts(19.0 if big else 22.0, cut=5.0 if size >= 64 else 0.0)
-    k = size * (0.70 if big else 0.80) / box.width()
-    ox = (size - box.width() * k) / 2 - box.left() * k
-    oy = (size - CAP * k) / 2
-    return main, acc, QTransform(k, 0, 0, k, ox, oy)
-
-
-def _tile(p: QPainter, size: float, radius: float, hairline: float = 0.0) -> None:
-    """Placa grafite. ``hairline``: espessura do filete de latão (0 = sem filete)."""
-    r = QRectF(0, 0, size, size)
-    g = QLinearGradient(r.topLeft(), r.bottomLeft())
-    g.setColorAt(0.0, QColor(TILE_TOP))
-    g.setColorAt(1.0, QColor(TILE_BOTTOM))
-    p.setPen(Qt.NoPen)
-    p.setBrush(QBrush(g))
-    p.drawRoundedRect(r, radius, radius)
-    # brilho difuso no alto (luz de estúdio)
-    sheen = QRadialGradient(QPointF(size * 0.30, -size * 0.10), size * 0.95)
-    c0 = QColor(BRASS_HI); c0.setAlphaF(0.10)
-    c1 = QColor(BRASS_HI); c1.setAlphaF(0.0)
-    sheen.setColorAt(0.0, c0); sheen.setColorAt(1.0, c1)
-    p.setBrush(QBrush(sheen))
-    p.drawRoundedRect(r, radius, radius)
-    if hairline > 0:
-        lw = hairline
-        edge = QLinearGradient(r.topLeft(), r.bottomLeft())
-        e0 = QColor(BRASS_HI); e0.setAlphaF(0.80)
-        e1 = QColor(BRASS); e1.setAlphaF(0.34)
-        edge.setColorAt(0.0, e0); edge.setColorAt(1.0, e1)
-        p.setPen(QPen(QBrush(edge), lw)); p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(r.adjusted(lw / 2, lw / 2, -lw / 2, -lw / 2), radius - lw / 2, radius - lw / 2)
+    return mono_optical(size)
 
 
 def paint_icon(p: QPainter, size: float) -> None:
-    """Ícone do app em ``size`` px, escolhendo o tamanho óptico."""
-    p.save()
-    p.setRenderHint(QPainter.Antialiasing)
-    if optical_class(size) == "S":
-        k = size / 16.0
-        p.scale(k, k)
-        _tile(p, 16, 3.6, hairline=_small_hairline(size))
-        seven, ex = small_parts(size)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(IVORY))
-        p.drawPath(seven)
-        p.setBrush(QColor(BRASS_HI))        # sólido e claro: o x não some contra a placa em 16-32 px
-        p.drawPath(ex)
-        p.restore()
-        return
-    _tile(p, size, size * 0.225, hairline=max(1.0, size / 128))
-    main, acc, tf = _icon_layout(size)
-    p.setTransform(tf, True)
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor(IVORY))
-    p.drawPath(main)
-    p.setBrush(QBrush(brass_gradient(CAP - XH, CAP, bright=size < 64)))
-    p.drawPath(acc)
-    p.restore()
-
-
-def _small_hairline(size: float) -> float:
-    """Filete de ~1 px real (em unidades da grade de 16)."""
-    return 16.0 / size
-
-
-def small_parts(size: float) -> tuple[QPainterPath, QPainterPath]:
-    """(7, x) do monograma pequeno, na grade de 16: pixel a pixel até 19 px, vetorial acima."""
-    if size < 20:
-        return _pixel_path(PIXELS_16_7, 4), _pixel_path(PIXELS_16_X, 6)
-    return _poly(SMALL_7), _poly(SMALL_X_A).united(_poly(SMALL_X_B))
+    """Ícone do app em ``size`` px: o emblema 7x ocupando o quadro (sem placa de fundo)."""
+    paint_monogram(p, 0, 0, size)
 
 
 def app_icon_pixmap(size: int = 256, dpr: float = 1.0) -> QPixmap:
@@ -301,7 +323,8 @@ def app_icon_pixmap(size: int = 256, dpr: float = 1.0) -> QPixmap:
 
 # --------------------------------------------------------------------------------------------- SVG
 
-def _d(path: QPainterPath, tf: QTransform | None = None) -> str:
+def _d(path: QPainterPath, tf=None) -> str:
+    from PySide6.QtGui import QTransform
     parts = []
     for poly in path.toSubpathPolygons(tf or QTransform()):
         pts = [f"{pt.x():.2f} {pt.y():.2f}" for pt in poly]
@@ -311,76 +334,71 @@ def _d(path: QPainterPath, tf: QTransform | None = None) -> str:
     return "".join(parts)
 
 
-def _svg_tile(size: float, radius: float, hairline: float) -> str:
-    lw = hairline
-    out = [f'<rect width="{size:g}" height="{size:g}" rx="{radius:g}" fill="url(#tile)"/>',
-           f'<rect width="{size:g}" height="{size:g}" rx="{radius:g}" fill="url(#sheen)"/>']
-    if hairline > 0:
-        out.append(f'<rect x="{lw / 2:g}" y="{lw / 2:g}" width="{size - lw:g}" height="{size - lw:g}" '
-                   f'rx="{radius - lw / 2:g}" fill="none" stroke="url(#edge)" stroke-width="{lw:g}"/>')
-    return "\n  ".join(out)
-
-
-def _svg_defs(size: float, brass_y0: float, brass_y1: float, bright: bool = False) -> str:
-    mid = ('<stop offset="1" stop-color="{0}"/>'.format(BRASS) if bright else
-           '<stop offset="0.55" stop-color="{0}"/><stop offset="1" stop-color="{1}"/>'.format(BRASS, BRASS_LO))
-    return f"""<defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="{size:g}" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{TILE_TOP}"/><stop offset="1" stop-color="{TILE_BOTTOM}"/>
-    </linearGradient>
-    <radialGradient id="sheen" cx="{size * 0.30:g}" cy="{-size * 0.10:g}" r="{size * 0.95:g}" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{BRASS_HI}" stop-opacity="0.10"/><stop offset="1" stop-color="{BRASS_HI}" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="{size:g}" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{BRASS_HI}" stop-opacity="0.80"/><stop offset="1" stop-color="{BRASS}" stop-opacity="0.34"/>
-    </linearGradient>
-    <linearGradient id="brass" x1="0" y1="{brass_y0:.2f}" x2="0" y2="{brass_y1:.2f}" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{BRASS_HI}"/>{mid}
-    </linearGradient>
-  </defs>"""
+def _pts(points) -> str:
+    return " ".join(f"{a:g},{b:g}" for a, b in points)
 
 
 def icon_svg(optical: str = "L") -> str:
-    """SVG do ícone (só caminhos, sem fonte).
+    """SVG do emblema (só formas, sem fonte), na grade de 48. L: completo; S: tamanho pequeno (<= 32 px)."""
+    sp = _mono_spec("S" if optical in ("S", "P") else "L")
+    px = {"L": 256, "M": 48, "S": 24, "P": 16}.get(optical, 256)
+    stop = (f'<stop offset="0" stop-color="{MONO_HI}"/><stop offset="0.55" stop-color="{MONO_MID}"/>'
+            f'<stop offset="1" stop-color="{MONO_LO}"/>')
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="{px}" height="{px}">',
+           "  <title>7xAi</title>",
+           "  <defs>",
+           f'    <linearGradient id="edge" x1="5" y1="2" x2="43" y2="46" gradientUnits="userSpaceOnUse">{stop}'
+           "</linearGradient>",
+           f'    <linearGradient id="facet" x1="10" y1="8" x2="38" y2="40" gradientUnits="userSpaceOnUse">{stop}'
+           "</linearGradient>",
+           "  </defs>",
+           f'  <polygon points="{_pts(HEX)}" fill="{MONO_FILL}" stroke="url(#edge)" stroke-width="{sp["edge"]:g}"/>']
+    if sp["inner"]:
+        out.append(f'  <polygon points="{_pts(HEX_IN)}" fill="url(#facet)" opacity="0.18"/>')
+    if sp["ticks"]:
+        d = "".join(f"M{a:g} {b:g}L{c:g} {d_:g}" for (a, b), (c, d_) in TICKS)
+        out.append(f'  <path d="{d}" stroke="{MONO_TICK}" stroke-width="1.6" stroke-linecap="round"/>')
+    out.append(f'  <polyline points="{_pts(sp["seven"])}" fill="none" stroke="{MONO_SEVEN}" '
+               f'stroke-width="{sp["seven_w"]:g}" stroke-linecap="round" stroke-linejoin="round"/>')
+    d = "".join(f"M{a:g} {b:g}L{c:g} {d_:g}" for (a, b), (c, d_) in sp["ex"])
+    out.append(f'  <path d="{d}" stroke="{MONO_X}" stroke-width="{sp["ex_w"]:g}" stroke-linecap="round"/>')
+    out.append("</svg>")
+    return "\n".join(out) + "\n"
 
-    L: mestre 256 px (>= 64 px); M: 48 px (40-63 px); S: 24 px (20-39 px); P: 16 px (pixel a pixel)."""
-    if optical in ("S", "P"):
-        px = 24 if optical == "S" else 16
-        seven, ex = small_parts(px)
-        body = (f'<path fill="{IVORY}" d="{_d(seven)}"/>\n  '
-                f'<path fill="{BRASS_HI}" d="{_d(ex)}"/>')
-        return _svg_doc(16, _svg_defs(16, 6, 12, bright=True), _svg_tile(16, 3.6, _small_hairline(px)), body,
-                        f"7xAi ({px} px)", px)
-    size = 256 if optical == "L" else 48
-    main, acc, tf = _icon_layout(size)
-    y0 = tf.map(QPointF(0, CAP - XH)).y(); y1 = tf.map(QPointF(0, CAP)).y()
-    body = (f'<path fill="{IVORY}" fill-rule="evenodd" d="{_d(main, tf)}"/>\n  '
-            f'<path fill="url(#brass)" fill-rule="evenodd" d="{_d(acc, tf)}"/>')
-    return _svg_doc(size, _svg_defs(size, y0, y1, bright=size < 64),
-                    _svg_tile(size, size * 0.225, max(1.0, size / 128)), body, "7xAi")
 
-
-def wordmark_svg(height: float = 100.0, ink: str = IVORY, **style) -> str:
+def wordmark_svg(height: float = 100.0, ink: str = INK, **style) -> str:
+    from PySide6.QtGui import QTransform
     st = {**HEADER, **style}
     main, acc, box = wordmark_parts(st["weight"], st["cut"], st["track"])
     k = height / CAP
     tf = QTransform(k, 0, 0, k, -box.left() * k, 0)
     w = box.width() * k
+    ab = tf.mapRect(acc.boundingRect())
     defs = f"""<defs>
-    <linearGradient id="brass" x1="0" y1="{(CAP - XH) * k:.2f}" x2="0" y2="{height:.2f}" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{BRASS_HI}"/><stop offset="0.55" stop-color="{BRASS}"/><stop offset="1" stop-color="{BRASS_LO}"/>
+    <linearGradient id="word" x1="{ab.left():.2f}" y1="0" x2="{ab.right():.2f}" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="{WORD_FROM}"/><stop offset="1" stop-color="{WORD_TO}"/>
     </linearGradient>
   </defs>"""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.2f} {height:g}" '
             f'width="{w:.0f}" height="{height:g}">\n  <title>7xAi</title>\n  {defs}\n  '
             f'<path fill="{ink}" fill-rule="evenodd" d="{_d(main, tf)}"/>\n  '
-            f'<path fill="url(#brass)" fill-rule="evenodd" d="{_d(acc, tf)}"/>\n</svg>\n')
+            f'<path fill="url(#word)" fill-rule="evenodd" d="{_d(acc, tf)}"/>\n</svg>\n')
 
 
-def _svg_doc(size: int, defs: str, tile: str, body: str, title: str, px: int | None = None) -> str:
-    px = px or size
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" width="{px}" '
-            f'height="{px}">\n  <title>{title}</title>\n  {defs}\n  {tile}\n  {body}\n</svg>\n')
+def video_mark_png(path: str | Path, cap: int = 128) -> Path:
+    """Marca d'água do vídeo antes e depois (``mobilia/video/res/marca_7xai.png``): o logotipo com maiúsculas de
+    ``cap`` px e 2 px de margem (o motor do vídeo não depende do Qt e só lê o PNG)."""
+    from PySide6.QtGui import QImage
+    st = dict(HEADER)
+    w = int(math.ceil(wordmark_width(cap, st["weight"], st["cut"], st["track"]))) + 4
+    img = QImage(w, cap + 4, QImage.Format_ARGB32)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    paint_wordmark(p, 2, 2, cap, **st)
+    p.end()
+    path = Path(path)
+    img.save(str(path))
+    return path
 
 
 # --------------------------------------------------------------------------------------------- ICO

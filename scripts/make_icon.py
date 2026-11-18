@@ -4,9 +4,10 @@ Uso (na raiz do repositório):
     python scripts/make_icon.py                # grava em packaging/assets
     python scripts/make_icon.py --check        # só confere se os arquivos versionados estão atualizados
 
-Cada tamanho do .ico é desenhado do vetor no seu próprio tamanho óptico (mobilia/ui/brand.py):
-  >= 64 px "7xAi" com a junta no x; 40-63 px "7xAi" encorpado; 20-39 px monograma "7x";
-  16 px "7x" desenhado pixel a pixel. Nada é reduzido de uma imagem grande.
+Cada tamanho do .ico é desenhado do vetor no seu próprio tamanho óptico (mobilia/ui/brand.py): o emblema
+hexagonal "7x" da identidade 7x Intelligence, completo (marcas de mira e faceta) a partir de 40 px e simplificado,
+com traços mais grossos, abaixo disso. Nada é reduzido de uma imagem grande.
+Também regrava a marca d'água do vídeo antes e depois (mobilia/video/res/marca_7xai.png).
 O resultado é determinístico (mesmos vetores + mesma versão do Qt = mesmos bytes).
 A janela usa a mesma arte em tempo de execução (theme.window_icon -> brand.app_icon_pixmap).
 """
@@ -80,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     for f in brand.export_assets(a.out):
         print(f.relative_to(ROOT) if f.is_relative_to(ROOT) else f)
+    if a.out == ASSETS:
+        f = brand.video_mark_png(ROOT / "mobilia" / "video" / "res" / "marca_7xai.png")
+        print(f.relative_to(ROOT))
     sizes = read_ico(a.out / "icon.ico")
     print("icon.ico:", ", ".join(f"{w}x{h}" for w, h, _ in sizes))
     expected = [(s, s) for s in brand.ICO_SIZES]

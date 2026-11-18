@@ -19,7 +19,7 @@ from win_version import EXE_NAME, build_version_info  # noqa: E402
 from PyInstaller.utils.hooks import collect_submodules  # noqa: E402
 
 datas = [(str(ROOT / "mobilia"), "payload/mobilia"), (str(ROOT / "requirements"), "payload/requirements"),
-         # interface 7xAi: fontes Inter (SIL OFL, com OFL.txt) e imagens da folha de estilo
+         # interface 7xAi: fontes Exo 2, IBM Plex Sans e JetBrains Mono (SIL OFL, com OFL-*.txt) e imagens da folha de estilo
          (str(ROOT / "mobilia" / "ui" / "fonts"), "mobilia/ui/fonts"),
          (str(ROOT / "mobilia" / "ui" / "res"), "mobilia/ui/res")]
 # Bibliotecas do motor nunca entram no .exe (o motor roda no Python embutido instalado no primeiro uso). Num ambiente

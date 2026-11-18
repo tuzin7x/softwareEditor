@@ -709,3 +709,28 @@ def test_engine_notice_shown_on_results(app, win):
     assert win.result_notice.isVisible() and "vazio" in win.result_notice.text()
     assert "Mobiliar" in win.result_info.text() and " px" not in win.result_info.text()
     assert win.statusBar().currentMessage() == ""
+
+
+def test_theme_tokens_come_from_7x_intelligence_oklch_and_are_readable(app):
+    """Identidade 7x Intelligence: tokens oklch convertidos com precisão, contraste >= 4.5:1, fontes e marca."""
+    from mobilia.ui import brand, theme
+    # conversão oklch -> sRGB conferida com valores de referência (corte no gamut sRGB, como o Chrome)
+    assert theme.oklch(0.12, 0.012, 290) == theme.BG == "#06050A"
+    assert theme.oklch(0.68, 0.22, 298) == theme.ACCENT == "#AC70FF"
+    assert theme.oklch(0.76, 0.18, 315) == theme.GLOW == "#DB8AFE"
+    assert theme.oklch(0.28, 0.03, 292) == "#292637"            # --border do site
+    assert theme.oklch(1, 0, 0) == "#FFFFFF" and theme.oklch(0, 0, 0) == "#000000"
+    assert all(v >= 4.5 for v in theme.contrast_table().values()), theme.contrast_table()
+    assert theme.assets_ok()
+    from PySide6.QtGui import QFont, QFontInfo
+    for fam, w in ((theme.UI_FAMILY, QFont.Normal), (theme.DISPLAY_FAMILY, QFont.DemiBold),
+                   (theme.MONO_FAMILY, QFont.Medium)):
+        assert QFontInfo(theme.font(13, w, fam)).family() == fam
+    for f in theme.FONT_FILES:
+        assert (ROOT / "mobilia/ui/fonts" / f).is_file(), f
+    for lic in ("OFL-Exo2.txt", "OFL-IBMPlexSans.txt", "OFL-JetBrainsMono.txt"):
+        assert "SIL Open Font License" in (ROOT / "mobilia/ui/fonts" / lic).read_text(encoding="utf-8")
+    # emblema e cabeçalho: nada em branco
+    for pm in (brand.app_icon_pixmap(16), brand.app_icon_pixmap(256), brand.lockup_pixmap(34)):
+        img = pm.toImage()
+        assert not pm.isNull() and any(img.pixelColor(x, img.height() // 2).alpha() > 200 for x in range(img.width()))
