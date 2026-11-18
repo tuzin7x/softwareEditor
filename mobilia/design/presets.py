@@ -199,26 +199,37 @@ WET: dict[str, str] = {
 }
 
 # ============================================================================================ eventos
+# ``key``: as peças que fazem a decoração ser reconhecida (vão PRIMEIRO no prompt, onde o CLIP pesa mais) — no Natal
+# só "velas e presentes" saíam (sem árvore nem luzes); ``prompt``: o resto da cena
 EVENTS: dict[str, dict] = {
     "aniversario": {"label": "Aniversário",
-                    "prompt": ("decorated for an elegant birthday party, balloon garland arch, a dessert table with a "
-                               "birthday cake, flower arrangements, string lights, festive table setting")},
+                    "key": "a large balloon garland arch, a dessert table with a tiered birthday cake",
+                    "prompt": ("decorated for an elegant birthday party, flower arrangements, string lights, festive "
+                               "table setting, party banner")},
     "casamento": {"label": "Casamento",
-                  "prompt": ("decorated for an elegant wedding reception, white flower arrangements, draped fabric, "
-                             "candles, a long banquet table with fine table setting, warm string lights")},
+                  "key": "lush white flower arrangements, a long banquet table with white linen and fine table setting",
+                  "prompt": ("decorated for an elegant wedding reception, draped white fabric, candles, warm string "
+                             "lights, romantic atmosphere")},
     "natal": {"label": "Natal",
-              "prompt": ("decorated for christmas, a tall decorated christmas tree with warm lights, garlands, wrapped "
-                         "presents, stockings, candles, cozy festive atmosphere")},
+              "key": ("a tall decorated christmas tree with glowing warm fairy lights and red and gold ornaments, "
+                      "wrapped presents under the tree, garland with lights"),
+              "prompt": ("decorated for christmas, christmas wreath, stockings, string lights, poinsettias, "
+                         "candles, cozy festive christmas atmosphere")},
     "festa_infantil": {"label": "Festa infantil",
-                       "prompt": ("decorated for a children's party, colorful balloon arch, a themed dessert table "
-                                  "with cake, paper decorations, playful festive setup")},
+                       "key": "a colorful balloon arch, a themed dessert table with a cake and cupcakes",
+                       "prompt": ("decorated for a children's party, paper decorations, bunting, playful festive "
+                                  "setup")},
     "cha_de_bebe": {"label": "Chá de bebê",
-                    "prompt": ("decorated for a baby shower, pastel balloon garland, a dessert table with cake, soft "
-                               "flower arrangements, delicate festive decor")},
+                    "key": "a pastel balloon garland, a dessert table with a cake",
+                    "prompt": ("decorated for a baby shower, soft flower arrangements, delicate festive decor, "
+                               "pastel colors")},
     "reveillon": {"label": "Réveillon",
-                  "prompt": ("decorated for a new year's eve party, white and gold decor, gold balloons, champagne "
-                             "glasses, candles, elegant festive table, warm lights")},
+                  "key": "white and gold balloons, a festive table with champagne glasses and gold decor",
+                  "prompt": ("decorated for a new year's eve party, candles, warm string lights, sparkling gold "
+                             "accents, elegant festive atmosphere")},
 }
+# a sala igual à foto, sem decoração: o que o evento fraco devolvia
+NEGATIVE_EVENT = "undecorated room, plain room, bare room, no decorations, ordinary day"
 
 # ============================================================================================ funções
 @dataclass(frozen=True)
@@ -293,9 +304,10 @@ FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
                    guidance=2.2, lock=(), needs_mask=True, furnish=False, repair=False),
     FunctionPreset("fachada", "Fachada", strength=0.72, control_scale=0.7, control_end=0.85, guidance=1.8,
                    lock=(), exterior=True, repair=False),
-    # 0,62 não punha nem a árvore de Natal: a decoração precisa de espaço para aparecer
-    FunctionPreset("evento", "Decoração de evento", strength=0.8, control_scale=0.55, control_end=0.6,
-                   guidance=1.8, furnish=False, keep_layout=True, event=True, fixed=APPLIANCES, keep_ceiling=True),
+    # 0,62 não punha nem a árvore de Natal; 0,8 com orientação 1,8 punha só velas e presentes (teste na GPU): a
+    # decoração precisa de espaço (0,86) e de mais peso do texto (2,4); a profundidade guia só o começo (0,5/0,5)
+    FunctionPreset("evento", "Decoração de evento", strength=0.86, control_scale=0.5, control_end=0.5,
+                   guidance=2.4, furnish=False, keep_layout=True, event=True, fixed=APPLIANCES, keep_ceiling=True),
     FunctionPreset("texto", "Texto para ambiente", strength=1.0, control_scale=0.0, control_end=0.0, guidance=2.0,
                    lock=(), needs_photo=False, repair=False),
 )}
@@ -323,6 +335,10 @@ NEGATIVE_CEILING = ("ceiling beams, exposed beams, coffered ceiling, tray ceilin
 NEGATIVE_SCALE = "oversized furniture, giant sofa, huge coffee table, furniture out of scale"
 SCALE_CUE = "realistic proportions, furniture correctly scaled to the room"
 NEGATIVE_EMPTY = "empty room, unfurnished, bare floor, sparse, single vase, lonely object in the middle of the room"
+# "Editar área": uma sala inteira dentro do retângulo (o defeito visto na GPU) e móveis que ninguém pediu
+EDIT_NEGATIVE_ROOM = ("entire room, room interior view, miniature room, room inside a room, collage, picture in "
+                      "picture, frame within frame, new window, wall corner")
+EDIT_OTHER_OBJECTS = ("sofa", "armchair", "bed", "dining table", "floor lamp", "bookshelf", "television", "curtains")
 OPEN_KITCHEN = "open-plan kitchen with its cabinets and appliances kept in place"
 
 
@@ -415,21 +431,30 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
         neg.append("interior, furniture, indoor")
     elif f.event:
         ev = EVENTS[norm_event(evento or (estilo if estilo in EVENTS else "aniversario"))]
-        parts += [f"photo of a {r['en']} {ev['prompt']}", "same room, same walls and windows",
+        parts += [ev["key"], f"photo of a {r['en']} {ev['prompt']}", "same room, same walls and windows",
                   OPEN_KITCHEN if open_kitchen else "", tail]
-        neg.append(NEGATIVE_OPENINGS)
+        neg += [NEGATIVE_OPENINGS, NEGATIVE_EVENT]
     elif f.key == "editar_area":
-        # o objeto pedido abre o prompt e é repetido ancorado no ambiente (sem isso o gerador devolvia só piso e
-        # objetos soltos); escala e sombra de contato ajudam o objeto a "pousar" no piso da foto
+        # o OBJETO pedido abre o prompt e domina: com "foto de revista de uma sala" o gerador pintava uma mini-sala
+        # inteira dentro do retângulo (sofá, cortina, até uma janela nova). Nada de cauda de "foto de revista" com
+        # objeto: só ele, pousado no piso do ambiente que já existe, escala e sombra de contato; o resto do ambiente
+        # (e os móveis que o usuário NÃO pediu) vai para o negativo
         adj = st.prompt.split(",")[0].replace(" interior design", "").strip() if st else ""
         if extra:
             parts[0] = f"a {extra}"
-            parts.append(f"{adj + ' style ' if adj else ''}{extra} in a {r['en']}")
+            parts.append(f"a single {adj + ' style ' if adj else ''}{extra} as the only new object, "
+                         f"placed in the existing {r['en']}")
+            parts.append("realistic scale, natural contact shadows on the floor, lighting and perspective matching "
+                         "the surroundings, photorealistic, sharp focus, high detail")
+            asked = extra.lower()
+            others = [o for o in EDIT_OTHER_OBJECTS if o.split(" ")[-1].rstrip("s") not in asked]
+            neg.append(EDIT_NEGATIVE_ROOM + (", " + ", ".join(others) if others else ""))
         else:
             parts.append(f"{adj} furniture and decor for a {r['en']}, {_style_details(st, rk)}")
-        if st and not extra:
-            parts.append(palette)
-        parts.append(f"realistic scale, natural contact shadows, matching lighting and perspective, {tail}")
+            if st:
+                parts.append(palette)
+            parts.append(f"realistic scale, natural contact shadows, matching lighting and perspective, {tail}")
+            neg.append(EDIT_NEGATIVE_ROOM)
         neg.append("empty floor, bare area, blank space, smudge, blurry patch, seam, visible border, "
                    "mismatched lighting, floating object, oversized")
     else:
@@ -461,6 +486,52 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
         neg.append(st.negative)
     pos = ", ".join(p.strip(", ") for p in parts if p and p.strip())
     return DesignPrompt(pos, ", ".join(neg))
+
+
+# ============================================================================================ texto para ambiente
+_ROOM_WORDS: tuple[tuple[str, str], ...] = (
+    ("sala_jantar", r"sala de jantar|sala jantar|dining room|copa"),
+    ("quarto", r"quartos?|dormitorios?|suites?|bedrooms?|quarto de casal|quarto infantil|closet"),
+    ("cozinha", r"cozinhas?|kitchens?|cozinha americana"),
+    ("banheiro", r"banheiros?|lavabos?|bathrooms?|wc"),
+    ("escritorio", r"escritorios?|home office|office|study"),
+    ("varanda", r"varandas?|sacadas?|terracos?|balcony|terrace|area gourmet|varanda gourmet"),
+    ("sala", r"sala de estar|salas?|living room|living|lounge"),
+)
+
+
+def infer_room(text: str) -> str | None:
+    """Tipo de ambiente citado no texto livre (português ou inglês), ou ``None``. Vale o citado PRIMEIRO
+    ("quarto aconchegante com banheiro" -> quarto). No "Texto para ambiente" ele vence o ``--ambiente``: pedir
+    "quarto aconchegante" com o ambiente padrão (sala) devolvia uma sala."""
+    import re
+
+    from .glossary import _fold
+
+    t = _fold(text or "")
+    best: tuple[int, str] | None = None
+    for key, pat in _ROOM_WORDS:
+        mt = re.search(rf"\b(?:{pat})\b", t)
+        if mt and (best is None or mt.start() < best[0]):
+            best = (mt.start(), key)
+    return best[1] if best else None
+
+
+ASPECTS = {"paisagem": (4, 3), "retrato": (3, 4), "quadrado": (1, 1), "16:9": (16, 9), "9:16": (9, 16),
+           "3:2": (3, 2), "2:3": (2, 3)}
+_ASPECT_ALIASES = {"4:3": "paisagem", "horizontal": "paisagem", "landscape": "paisagem", "3:4": "retrato",
+                   "vertical": "retrato", "portrait": "retrato", "1:1": "quadrado", "square": "quadrado",
+                   "widescreen": "16:9", "youtube": "16:9", "stories": "9:16", "reels": "9:16", "story": "9:16"}
+
+
+def norm_aspect(aspect: str | None) -> str:
+    """Formato da imagem do "Texto para ambiente" (``--formato``): aceita paisagem/retrato/quadrado, "16:9",
+    "16x9", "16/9", "9x16", "stories"... Formato desconhecido é ERRO (antes caía calado em paisagem)."""
+    a = (aspect or "paisagem").strip().lower().replace("x", ":").replace("/", ":").replace(" ", "")
+    a = _ASPECT_ALIASES.get(a, a)
+    if a not in ASPECTS:
+        raise ValueError(f"Formato inválido: {aspect!r} (opções: {', '.join(ASPECTS)})")
+    return a
 
 
 def with_overrides(preset: FunctionPreset, **kw) -> FunctionPreset:
@@ -513,4 +584,4 @@ __all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "WET", "APPLIANCES", "EMPTY
            "NEGATIVE_OPENINGS", "OPEN_KITCHEN", "Style", "FunctionPreset", "DesignPrompt", "QualityProfile",
            "function", "style", "room", "norm_room", "norm_style", "norm_event", "build_prompt", "with_overrides",
            "quality_profile", "work_size", "catalog", "NEGATIVE_BASE", "NEGATIVE_EMPTY", "NEGATIVE_CEILING",
-           "NEGATIVE_SCALE", "SCALE_CUE"]
+           "NEGATIVE_SCALE", "SCALE_CUE", "EDIT_NEGATIVE_ROOM", "EDIT_OTHER_OBJECTS", "NEGATIVE_EVENT", "infer_room", "norm_aspect"]

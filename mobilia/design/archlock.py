@@ -109,6 +109,43 @@ def composite(base: np.ndarray, top: np.ndarray, alpha: np.ndarray) -> np.ndarra
     return out
 
 
+def poisson_blend(base: np.ndarray, top: np.ndarray, mask: np.ndarray, pad: int = 8) -> np.ndarray:
+    """Mistura de Poisson (``cv2.seamlessClone``) de ``top`` em ``base`` dentro de ``mask`` (mesmo tamanho): os
+    gradientes vêm de ``top`` e a borda é a de ``base`` — sem degrau de cor/luz na borda nem "retângulo chapado".
+    As imagens ganham uma margem espelhada (a máscara pode encostar na borda da foto). Fora da máscara = ``base``."""
+    m = np.asarray(mask, bool)
+    if not m.any() or m.all():
+        return top.copy() if m.all() else base.copy()
+    H, W = m.shape
+    b = cv2.copyMakeBorder(base, pad, pad, pad, pad, cv2.BORDER_REFLECT)
+    t = cv2.copyMakeBorder(top, pad, pad, pad, pad, cv2.BORDER_REFLECT)
+    mm = np.zeros((H + 2 * pad, W + 2 * pad), np.uint8)
+    mm[pad:pad + H, pad:pad + W] = m.astype(np.uint8) * 255
+    x, y, w, h = cv2.boundingRect(mm)
+    try:
+        out = cv2.seamlessClone(t, b, mm, (x + w // 2, y + h // 2), cv2.NORMAL_CLONE)
+    except cv2.error:
+        return top.copy()
+    out = out[pad:pad + H, pad:pad + W]
+    res = base.copy()
+    res[m] = out[m]
+    return res
+
+
+def seam_step(img: np.ndarray, mask: np.ndarray, width: int = 2) -> float:
+    """Degrau médio de luz (L, 0–255) logo dentro × logo fora da borda de ``mask``: ~0 = sem contorno visível."""
+    m = np.asarray(mask, bool)
+    if not m.any() or m.all():
+        return 0.0
+    L = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)[..., 0].astype(np.float32)
+    k = _disk(max(1, width))
+    inner = m & ~cv2.erode(m.astype(np.uint8), k).astype(bool)
+    outer = cv2.dilate(m.astype(np.uint8), k).astype(bool) & ~m
+    if inner.sum() < 4 or outer.sum() < 4:
+        return 0.0
+    return float(abs(L[inner].mean() - L[outer].mean()))
+
+
 def lock_openings(generated: np.ndarray, original: np.ndarray, mask: np.ndarray, feather_frac: float = 0.006,
                   color_match: bool = True) -> tuple[np.ndarray, dict]:
     """Compõe as aberturas originais (``mask``, mesma resolução de ``generated``) sobre a imagem gerada.
@@ -362,9 +399,21 @@ def paste_ceiling(generated: np.ndarray, original: np.ndarray, mask: np.ndarray,
     return composite(generated, src, alpha), {"fracao": round(float(m.mean()), 4)}
 
 
+def _soffit_islands(ceil: np.ndarray, gen_wall: np.ndarray, gap: int) -> np.ndarray:
+    """Componentes de ``gen_wall`` dentro do teto da foto que não encostam (a menos de ``gap`` px) na borda do teto
+    que dá para a parede (a borda da imagem não conta): a face de um rebaixo inventado no meio do teto."""
+    cand = (ceil & gen_wall).astype(np.uint8)
+    if not cand.any():
+        return np.zeros(ceil.shape, bool)
+    edge = cv2.dilate((~ceil).astype(np.uint8), _disk(gap + 1)).astype(bool) & ceil
+    n, lab = cv2.connectedComponents(cand, connectivity=8)
+    touching = np.unique(lab[edge & (lab > 0)])
+    return (lab > 0) & ~np.isin(lab, touching)
+
+
 def ceiling_keep_mask(src_groups: np.ndarray, gen_groups: np.ndarray, size: tuple[int, int],
-                      lock: np.ndarray | None = None, edge_frac: float = 0.006, clear_frac: float = 0.03
-                      ) -> np.ndarray:
+                      lock: np.ndarray | None = None, edge_frac: float = 0.006, clear_frac: float = 0.03,
+                      deep_frac: float = 0.03) -> np.ndarray:
     """Onde o teto da foto volta: teto na foto e na imagem gerada (sem a faixa junto da parede), menos onde a
     imagem gerada tem luminária, móvel ou armário (um pendente novo não perde o fio) e menos a trava das
     aberturas."""
@@ -382,7 +431,11 @@ def ceiling_keep_mask(src_groups: np.ndarray, gen_groups: np.ndarray, size: tupl
     # só onde a imagem gerada também tem teto: se a parede gerada sobe um pouco mais, colar o teto por cima dela
     # deixava um degrau na junção (vigas e sancas são segmentadas como teto e saem)
     gen_ceil = cv2.erode((g == GROUP_IDS["ceiling"]).astype(np.uint8), _disk(max(1, int(edge_frac * diag))))
-    out = ceil & ~busy & (gen_ceil > 0)
+    # rebaixo/sanca inventado: a face vertical dele é segmentada como PAREDE dentro do teto da foto. Um pedaço de
+    # "parede" ilhado no teto (sem encostar na junção teto/parede da foto) também recebe o teto original de volta;
+    # a parede gerada que só SOBE a partir da junção fica (colar o teto ali deixava um degrau)
+    soffit = _soffit_islands(ceil, g == GROUP_IDS["wall"], max(1, int(deep_frac * diag)))
+    out = ceil & ~busy & ((gen_ceil > 0) | soffit)
     if lock is not None:
         out &= ~np.asarray(lock, bool)
     return clean_mask(out, min_frac=0.002)
@@ -417,4 +470,4 @@ def anchor_tone(img: np.ndarray, ref: np.ndarray, amount_l: float = 0.35, amount
 __all__ = ["LOCK_GROUPS", "clean_mask", "lock_mask", "feather_alpha", "match_color", "composite", "lock_openings",
            "generation_mask", "user_mask", "mask_bbox", "label_mask", "bright_coverings", "doorway_views",
            "frame_only", "cap_doors", "new_openings", "missing_openings", "paste_ceiling", "ceiling_keep_mask",
-           "anchor_tone"]
+           "anchor_tone", "poisson_blend", "seam_step"]

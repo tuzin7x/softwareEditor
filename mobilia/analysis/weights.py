@@ -311,12 +311,25 @@ def friendly_error(label: str, exc: BaseException) -> WeightsError:
     return WeightsError(f"Modelo de IA '{label}' indisponível: {why}")
 
 
-def _fetch(url: str, dest: Path) -> None:
+def _fetch(url: str, dest: Path, progress: Callable[[int, int], None] | None = None) -> None:
+    """Baixa ``url`` em ``dest`` (via ``.part``). ``progress(baixados, total)`` a cada bloco de 1 MB (total 0 =
+    desconhecido)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": "7xAi-setup"})
     with urllib.request.urlopen(req, timeout=120) as r, open(part, "wb") as f:
-        shutil.copyfileobj(r, f, 1 << 20)
+        if progress is None:
+            shutil.copyfileobj(r, f, 1 << 20)
+        else:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                buf = r.read(1 << 20)
+                if not buf:
+                    break
+                f.write(buf)
+                done += len(buf)
+                progress(done, total)
     os.replace(part, dest)
 
 
@@ -329,12 +342,15 @@ def file_weight_path(w: FileWeight, root: Path | None = None) -> Path:
     return (root or models_dir()) / w.subdir / w.filename
 
 
-def ensure_file_weight(w: FileWeight, root: Path | None = None, fetch=None, offline: bool = False) -> Path:
+def ensure_file_weight(w: FileWeight, root: Path | None = None, fetch=None, offline: bool = False,
+                       progress: Callable[[int, int], None] | None = None) -> Path:
     """Garante ``w`` no disco com o SHA-256 certo e devolve o caminho.
 
     Hash errado → apaga e baixa de novo (cada origem é tentada no máximo duas vezes). Sem
-    nenhuma origem válida → ``WeightsError`` com a explicação em português."""
-    fetch = fetch or _fetch
+    nenhuma origem válida → ``WeightsError`` com a explicação em português. ``progress(baixados, total)``
+    acompanha o download (só com o baixador padrão)."""
+    if fetch is None:
+        fetch = _fetch if progress is None else (lambda u, d: _fetch(u, d, progress=progress))
     dest = file_weight_path(w, root)
     if verified(dest, w.sha256):
         return dest
@@ -524,5 +540,37 @@ ESRGAN_WEIGHT = FileWeight(
 DESIGN_WEIGHTS: tuple = SDXL_WEIGHTS + (ESRGAN_WEIGHT,)
 
 
-def esrgan_path(offline: bool = False) -> Path:
-    return ensure_file_weight(ESRGAN_WEIGHT, offline=offline)
+def offline_mode() -> bool:
+    """O usuário (ou o ambiente) pediu para não usar a rede."""
+    return any(os.environ.get(k, "").strip().lower() in ("1", "true", "yes", "on")
+               for k in ("MOBILIA_OFFLINE", "HF_HUB_OFFLINE"))
+
+
+def esrgan_path(offline: bool | None = None, progress: Callable[[int, int], None] | None = None) -> Path:
+    """Real-ESRGAN no disco (SHA-256 conferido). Faltando, é BAIXADO NA HORA (~64 MB, com ``progress``), a menos
+    que ``offline`` (``None`` = ``offline_mode()``): o "Ampliar 4K" falhava na primeira vez porque a carga era
+    sempre offline. Sem internet de verdade, a mensagem diz isso (``friendly_error``)."""
+    if offline is None:
+        offline = offline_mode()
+    return ensure_file_weight(ESRGAN_WEIGHT, offline=offline, progress=progress)
+
+
+def design_models() -> list[str]:
+    """Tudo o que o redesenho (``mobilia/design``) carrega, como o instalador baixa (``prefetch_models``):
+    MoGe-2 (GPU e CPU), OneFormer + metadados das classes, gerador SDXL, codificadores de texto, VAE, ControlNet de
+    profundidade e o Real-ESRGAN. Um teste confere que cada um está na lista do ``prefetch``."""
+    return model_repos() + [ONEFORMER_METADATA[0]] + [
+        w.repo_id if isinstance(w, HubWeight) else w.filename for w in DESIGN_WEIGHTS]
+
+
+def missing_design_models() -> list[str]:
+    """Os modelos do redesenho que ainda NÃO estão no disco (sem rede; nomes para a mensagem "baixando...")."""
+    out = [r for r in model_repos() if not _cached(r, allow_patterns=PATTERNS)]
+    if not _metadata_cached():
+        out.append(ONEFORMER_METADATA[0])
+    for w in DESIGN_WEIGHTS:
+        try:
+            ensure_weight(w, offline=True)
+        except WeightsError:
+            out.append(w.label)
+    return out

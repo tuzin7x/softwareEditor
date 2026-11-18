@@ -69,7 +69,10 @@ def _build(num_block: int = 23, num_feat: int = 64, num_grow: int = 32):
 class Upscaler:
     scale = 4
 
-    def __init__(self, device: str = "auto", weights: Path | None = None, offline: bool = True):
+    def __init__(self, device: str = "auto", weights: Path | None = None, offline: bool | None = None,
+                 download_progress=None):
+        """``offline`` ``None``: baixa os pesos na hora se faltarem e houver rede (``weights.esrgan_path``);
+        ``download_progress(baixados, total)`` acompanha esse download."""
         import torch
 
         from ..analysis.weights import esrgan_path
@@ -78,7 +81,8 @@ class Upscaler:
         self.device = pick_device(device)
         self.dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
         net = _build()
-        sd = torch.load(weights or esrgan_path(offline=offline), map_location="cpu", weights_only=True)
+        sd = torch.load(weights or esrgan_path(offline=offline, progress=download_progress), map_location="cpu",
+                        weights_only=True)
         sd = sd.get("params_ema", sd.get("params", sd))
         net.load_state_dict(sd, strict=True)
         self.net = net.eval().to(self.device, self.dtype)
@@ -106,14 +110,15 @@ class Upscaler:
 
 
 def upscale(image, out_path=None, long_side: int = 3840, device: str = "auto", upscaler: Upscaler | None = None,
-            progress=None) -> tuple[np.ndarray, dict]:
+            progress=None, download_progress=None) -> tuple[np.ndarray, dict]:
     """Amplia ``image`` (caminho ou RGB uint8) 4x e reduz para ``long_side`` (0 = mantém os 4x). Salva em
-    ``out_path`` (JPEG q95) se dado. Devolve a imagem e um resumo (tamanhos, tempo)."""
+    ``out_path`` (JPEG q95) se dado. Devolve a imagem e um resumo (tamanhos, tempo). Sem os pesos no disco, eles
+    são baixados antes (``download_progress(baixados, total)``)."""
     from PIL import Image
 
     t0 = time.perf_counter()
     rgb = image if isinstance(image, np.ndarray) else np.asarray(Image.open(image).convert("RGB"))
-    up = upscaler or Upscaler(device)
+    up = upscaler or Upscaler(device, download_progress=download_progress)
     big = up(rgb, progress=progress)
     if long_side and max(big.shape[:2]) != long_side:
         k = long_side / max(big.shape[:2])

@@ -419,7 +419,7 @@ def test_edit_area_pixel_identical_outside_mask(room, tmp_path):
         assert np.abs(img[170:200, 60:120].astype(int) - rgb[170:200, 60:120].astype(int)).mean() > 20
     c = eng.calls[0]
     assert "round wooden coffee table" in c["prompt"].positive and c["strength"] >= 0.97
-    assert c["shape"][0] % 64 == 0 and c["shape"][1] % 64 == 0
+    assert c["shape"][0] % 8 == 0 and c["shape"][1] % 8 == 0
     with pytest.raises(ValueError, match="vazia"):
         api.edit_area(rgb, np.zeros(rgb.shape[:2], np.uint8), "x", engine=eng, depth=depth, out_dir=tmp_path)
     with pytest.raises(ValueError, match="Descreva"):
@@ -431,7 +431,7 @@ def test_text_to_design(tmp_path):
     res = api.text_to_design("sala aconchegante com lareira", "japandi", "sala", n=2, seed=9, out_dir=tmp_path,
                              engine=eng, aspect="9:16")
     W, H = res.size
-    assert H > W and W % 64 == 0 and len(res.outputs) == 2
+    assert H > W and W % 8 == 0 and abs(W / H - 9 / 16) < 0.01 and len(res.outputs) == 2
     c = eng.calls[0]
     assert c["strength"] == 1.0 and c["control"] is None and c["mask"].all()
     assert c["prompt"].positive.startswith("cozy living room with fireplace")     # português -> inglês
@@ -975,3 +975,339 @@ def test_kitchen_reforma_keeps_cabinets_in_the_structural_depth(tmp_path):
     H, W = c["shape"][:2]
     yy, xx = int(0.54 * H), int(0.45 * W)
     assert abs(c["control"][yy, xx] - api.depth_control(z_sofa, (W, H))[yy, xx]) < 0.05
+
+
+# ============================================================================ rodada 2 do teste na GPU (notebook 8 GB)
+from mobilia.design import memplan as MP  # noqa: E402
+
+
+def test_memory_plan_8gb_laptop_fits_in_7gb():
+    """RTX 5070 Laptop (8 GB) com ~650 MB de RAM livre: geração a 1024 com CFG, refino a 1280 SEM CFG, OneFormer
+    fora da GPU, codificadores de texto em bf16 — nada passa de ~7 GB (o refino a 1536 com CFG transbordava)."""
+    p = MP.plan("cuda", vram_total_mb=8188, vram_free_mb=7600, ram_free_mb=650)
+    assert p.gen_long_side == 1024 and not p.offload
+    assert p.refine and p.refine_long_side == 1280 and not p.refine_cfg
+    assert p.peak_gen_mb <= 7168 and p.peak_refine_mb <= 7168 and p.budget_mb <= 7168
+    assert p.seg_off_gpu and p.te_dtype == "bfloat16"
+    # o caso que transbordou no teste: 1536 px com CFG passa do orçamento
+    assert MP.peak_mb(1536, 1024, cfg=True) > p.budget_mb
+    big = MP.plan("cuda", 12288, 11800, 16000)
+    assert big.refine_long_side == 1536 and big.refine_cfg and big.te_dtype == "float32"
+    small = MP.plan("cuda", 6144, 5800, 16000)
+    assert small.offload and not small.refine
+    cpu = MP.plan("cpu", None, None, 8000)
+    assert cpu.gen_long_side == 768 and not cpu.refine and not cpu.offload
+    # VRAM já ocupada por outro programa: o orçamento segue a livre
+    busy = MP.plan("cuda", 8188, 6600, 8000)
+    assert busy.budget_mb <= 6344 and (busy.offload or not busy.refine or busy.peak_refine_mb <= busy.budget_mb)
+
+
+def test_refine_spill_detector():
+    assert MP.refine_spilled(1.5, 1024 * 768, 20.0, 1536 * 1024)          # 18–23 s/passo medido no notebook
+    assert not MP.refine_spilled(1.5, 1024 * 768, 1.2, 1280 * 960)         # refino sem CFG, sem transbordar
+
+
+class TimedEngine(FakeEngine):
+    """Gerador falso que registra tamanho e tempo por passo como o real (para o detector de transbordo)."""
+
+    device = "cuda"
+
+    def __init__(self, plan, refine_s=0.5):
+        super().__init__()
+        self.plan = plan
+        self.refine_s = refine_s
+        self.log = []
+
+    def generate(self, image, mask, control, prompt, seed, strength, steps, guidance, control_scale, control_end,
+                 callback=None):
+        out = super().generate(image, mask, control, prompt, seed, strength, steps, guidance, control_scale,
+                               control_end, callback)
+        h, w = image.shape[:2]
+        s = self.refine_s if strength < 0.5 else 1.0
+        self.log.append({"tamanho": [w, h], "s_por_passo": s, "passos_efetivos": 3, "s": 3 * s})
+        return out
+
+
+def test_redesign_uses_memory_plan_on_gpu(tmp_path, monkeypatch):
+    rgb, g, depth, _ = _room(960, 640)
+    plan8 = MP.plan("cuda", 8188, 7600, 650)
+    eng = TimedEngine(plan8, refine_s=0.6)
+    monkeypatch.setattr(api, "_refine_spilled", lambda e: MP.refine_spilled(
+        e.log[-2]["s_por_passo"], np.prod(e.log[-2]["tamanho"]), e.log[-1]["s_por_passo"], np.prod(e.log[-1]["tamanho"])))
+    res = api.redesign(rgb, "mudar_estilo", "moderno", n=2, seed=3, out_dir=tmp_path, engine=eng, depth=depth,
+                       groups=g, candidates=2, repair=False)
+    gen = [c for c in eng.calls if c["strength"] > 0.5]
+    ref = [c for c in eng.calls if c["strength"] < 0.5]
+    assert max(gen[0]["shape"][:2]) == 1024 and gen[0]["guidance"] > 1.0
+    assert len(ref) == 2 and max(ref[0]["shape"][:2]) == 1280 and ref[0]["guidance"] == 1.0    # sem CFG
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["plano_memoria"]["refine_long_side"] == 1280 and not rep["refino_desligado_por_memoria"]
+    assert max(res.size) == 1280
+    # refino lento demais (transbordou para a RAM): a segunda versão sai sem ele, no mesmo tamanho final
+    eng2 = TimedEngine(plan8, refine_s=25.0)
+    monkeypatch.setattr(api, "_refine_spilled", lambda e: MP.refine_spilled(
+        e.log[-2]["s_por_passo"], np.prod(e.log[-2]["tamanho"]), e.log[-1]["s_por_passo"], np.prod(e.log[-1]["tamanho"])))
+    logs = []
+    res2 = api.redesign(rgb, "mudar_estilo", "moderno", n=2, seed=3, out_dir=tmp_path / "b", engine=eng2,
+                        depth=depth, groups=g, candidates=2, repair=False, progress=logs.append)
+    assert len([c for c in eng2.calls if c["strength"] < 0.5]) == 1
+    assert all(im.shape[:2] == (res2.size[1], res2.size[0]) for im in res2.images)
+    assert any(ev.get("event") == "log" and "memória" in ev.get("message", "") for ev in logs)
+    assert json.loads(Path(res2.report).read_text(encoding="utf-8"))["refino_desligado_por_memoria"]
+
+
+def test_refine_spilled_reads_engine_calls():
+    class E:
+        calls = [{"tamanho": [1024, 768], "s_por_passo": 1.5}, {"tamanho": [1536, 1024], "s_por_passo": 20.0}]
+    assert api._refine_spilled(E())
+    E.calls = E.calls[:1]
+    assert not api._refine_spilled(E())
+
+
+def test_repair_has_no_flat_patch_with_hard_border():
+    """Reparo de abertura inventada: mesmo se o gerador devolver um retângulo cinza chapado, a área entra por
+    Poisson + rampa larga — sem degrau de luz na borda (o "retângulo cinza num canto de parede")."""
+    rng = np.random.default_rng(1)
+    H, W = 240, 320
+    wall = np.clip(np.array([205, 192, 175]) + rng.normal(0, 4, (H, W, 3)), 0, 255).astype(np.uint8)
+    wall = (wall.astype(np.float32) * np.linspace(0.85, 1.05, W)[None, :, None]).clip(0, 255).astype(np.uint8)
+    new = np.zeros((H, W), bool)
+    new[40:140, 200:300] = True                                     # janela inventada perto do canto
+
+    class Flat(FakeEngine):
+        def generate(self, image, mask, *a, **k):
+            super().generate(image, mask, *a, **k)
+            out = np.asarray(image).copy()
+            out[np.asarray(mask) > 0.5] = (128, 128, 128)
+            return out
+
+    eng = Flat()
+    lock = np.zeros((H, W), bool)
+    out, info = api._repair_openings(eng, wall, new, lock, None, "sala", 1, 6, True, gen_size=(160, 120))
+    c = eng.calls[0]
+    assert c["shape"][:2] == (120, 160)                     # gera no tamanho da geração, não no do refino
+    assert c["strength"] >= 0.9
+    m = cv2_dilate(new, int(0.02 * np.hypot(H, W)))
+    naive = wall.copy()
+    naive[m] = (128, 128, 128)
+    assert AL.seam_step(naive, m) > 30
+    assert AL.seam_step(out, m) < 3 and info["degrau_borda"] < 3
+
+
+def cv2_dilate(m, r):
+    import cv2
+
+    return cv2.dilate(m.astype(np.uint8), AL._disk(r)).astype(bool)
+
+
+def test_poisson_blend_handles_mask_on_the_image_border():
+    base = np.full((60, 80, 3), 200, np.uint8)
+    top = np.full((60, 80, 3), 90, np.uint8)
+    m = np.zeros((60, 80), bool)
+    m[0:30, 50:80] = True                                            # encosta em duas bordas
+    out = AL.poisson_blend(base, top, m)
+    assert out.shape == base.shape and np.array_equal(out[~m], base[~m])
+    assert np.abs(out[m].astype(int) - 200).mean() < 8              # gradiente nulo: vira a cor da borda
+
+
+def test_ceiling_restore_covers_invented_soffit_island():
+    src = np.full((100, 100), WALL, np.uint8)
+    src[:40] = CEIL
+    gen = src.copy()
+    gen[10:22, 30:70] = WALL                                         # face de um rebaixo no meio do teto
+    m = AL.ceiling_keep_mask(src, gen, (100, 100))
+    assert m[15, 50] and m[5, 50]
+    gen2 = src.copy()
+    gen2[25:40] = WALL                                               # a parede só sobe a partir da junção
+    assert not AL.ceiling_keep_mask(src, gen2, (100, 100))[30, 50]
+
+
+def test_edit_area_keeps_photo_aspect_and_object_prompt(tmp_path):
+    """Notebook: 960×640 (3:2) gerado a 1024×768 (4:3), força 1, sem ControlNet, e uma "mini-sala" no retângulo.
+    Agora: recorte e geração com a proporção da foto, profundidade ligada e prompt só do objeto."""
+    rgb, _, depth, _ = _room(960, 640)
+    mask = np.zeros((640, 960), np.uint8)
+    mask[380:560, 300:620] = 255
+    eng = FakeEngine()
+    eng.device = "cuda"                                              # os padrões da GPU
+    res = api.edit_area(rgb, mask, prompt="mesa de centro redonda de madeira", n=1, seed=2, out_dir=tmp_path,
+                        engine=eng, depth=depth)
+    c = eng.calls[0]
+    h, w = c["shape"][:2]
+    assert max(w, h) == 1024 and abs(w / h - 1.5) < 0.01 and w % 8 == 0 and h % 8 == 0
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    x0, y0, x1, y1 = rep["recorte"]
+    assert abs((x1 - x0) / (y1 - y0) - 1.5) < 0.01
+    assert x0 <= 300 and y0 <= 380 and x1 >= 620 and y1 >= 560
+    fp = P.function("editar_area")
+    assert c["steps"] == fp.steps and c["control"] is not None and c["control_scale"] == fp.control_scale > 0
+    pos, neg = c["prompt"].positive, c["prompt"].negative
+    assert pos.startswith("a round wood coffee table") and "single" in pos and "magazine" not in pos
+    assert "entire room" in neg and "sofa" in neg and "new window" in neg
+    s = P.build_prompt("editar_area", None, "sala", 0, "sofá cinza")
+    assert "sofa" not in s.negative.split("entire room")[1] and s.positive.startswith("a gray sofa")
+
+
+def test_edit_crop_box_aspect_and_bounds():
+    m = np.zeros((640, 960), bool)
+    m[600:640, 900:960] = True                                       # canto da foto
+    x0, y0, x1, y1 = api.edit_crop_box(m, 1.5, min_side=480)
+    assert 0 <= x0 and 0 <= y0 and x1 <= 960 and y1 <= 640 and abs((x1 - x0) / (y1 - y0) - 1.5) < 0.01
+    assert x1 == 960 and y1 == 640 and (x1 - x0) >= 480
+    big = np.ones((640, 960), bool)
+    assert api.edit_crop_box(big, 1.5) == (0, 0, 960, 640)
+    p = np.zeros((900, 600), bool)
+    p[400:500, 200:300] = True                                       # foto retrato
+    x0, y0, x1, y1 = api.edit_crop_box(p, 600 / 900, min_side=450)
+    assert abs((x1 - x0) / (y1 - y0) - 600 / 900) < 0.01 and (y1 - y0) >= 449
+
+
+def test_text_room_comes_from_the_prompt_and_format_is_kept(tmp_path):
+    eng = FakeEngine()
+    res = api.text_to_design("quarto aconchegante", "escandinavo", "sala", n=1, seed=1, out_dir=tmp_path,
+                             engine=eng, aspect="16x9")
+    assert res.ambiente == "quarto"
+    pos = eng.calls[0]["prompt"].positive
+    assert "bedroom" in pos and "living room" not in pos
+    W, H = res.size
+    assert abs(W / H - 16 / 9) < 0.01
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["ambiente_pedido"] == "sala" and rep["ambiente_do_texto"] == "quarto" and rep["formato"] == "16:9"
+    res = api.text_to_design("ambiente aconchegante", "moderno", "cozinha", n=1, seed=1, out_dir=tmp_path / "b",
+                             engine=FakeEngine(), aspect="retrato")
+    assert res.ambiente == "cozinha" and res.size[1] > res.size[0]
+    with pytest.raises(ValueError, match="Formato"):
+        api.text_to_design("sala", "moderno", "sala", n=1, engine=FakeEngine(), out_dir=tmp_path / "c",
+                           aspect="panorama")
+    assert P.infer_room("Sala de jantar com mesa para 8") == "sala_jantar"
+    assert P.infer_room("quarto de casal com banheiro") == "quarto"
+    assert P.infer_room("mesa de madeira") is None
+
+
+def test_event_prompts_lead_with_key_objects():
+    p = P.build_prompt("evento", None, "sala", 0, evento="natal")
+    assert p.positive.startswith("a tall decorated christmas tree") and "fairy lights" in p.positive
+    assert "undecorated" in p.negative
+    for k, ev in P.EVENTS.items():
+        assert ev["key"] and P.build_prompt("evento", None, "sala", 0, evento=k).positive.startswith(ev["key"])
+    f = P.function("evento")
+    assert f.strength >= 0.85 and f.guidance >= 2.2
+
+
+def test_every_design_model_is_prefetched(monkeypatch):
+    from mobilia.analysis import weights as Wt
+    from mobilia.config import GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL, SEGMENTATION_MODEL_ID
+
+    got = []
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda repo, **k: got.append(repo))
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, *a, **k: got.append(repo))
+    monkeypatch.setattr(Wt, "ensure_weight", lambda w, offline=False: got.append(
+        w.repo_id if isinstance(w, Wt.HubWeight) else w.filename))
+    Wt.prefetch_models()
+    for m in Wt.design_models():
+        assert m in got, m
+    for m in (GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL, SEGMENTATION_MODEL_ID, Wt.ESRGAN_WEIGHT.filename,
+              Wt.SDXL_GEN_WEIGHT.repo_id, Wt.SDXL_TEXT_WEIGHT.repo_id, Wt.SDXL_VAE_WEIGHT.repo_id,
+              Wt.SDXL_CN_DEPTH_WEIGHT.repo_id):
+        assert m in Wt.design_models()
+
+
+def test_oneformer_loads_without_safetensors_conversion(monkeypatch):
+    import transformers
+
+    from mobilia.analysis import weights as Wt
+
+    seen = {}
+
+    class FakeModel:
+        config = type("C", (), {"id2label": {0: "wall"}})()
+
+        def eval(self):
+            return self
+
+        def to(self, *a, **k):
+            return self
+
+    def fake_model(repo, **k):
+        seen.update(k)
+        return FakeModel()
+
+    monkeypatch.setattr(transformers.OneFormerForUniversalSegmentation, "from_pretrained", staticmethod(fake_model))
+    monkeypatch.setattr(transformers.OneFormerProcessor, "from_pretrained", staticmethod(lambda repo, **k: object()))
+    monkeypatch.setattr(Wt, "ensure_local", lambda repo: 0.0)
+    monkeypatch.setattr(Q, "Segmenter", Q.Segmenter.__wrapped__ if hasattr(Q.Segmenter, "__wrapped__") else
+                        _REAL_SEGMENTER)
+    s = Q.Segmenter("cpu")
+    assert seen.get("use_safetensors") is False
+    s.park()                                                         # na CPU não faz nada
+    assert not s.parked
+    import os
+
+    assert os.environ.get("DISABLE_SAFETENSORS_CONVERSION") == "1"
+
+
+_REAL_SEGMENTER = Q.Segmenter
+
+
+def test_cli_uses_installed_models_cache(tmp_path):
+    from mobilia import runtime
+
+    hub = tmp_path / "models" / "huggingface" / "hub" / "models--x--y"
+    hub.mkdir(parents=True)
+    env = runtime.use_installed_models({"MOBILIA_HOME": str(tmp_path)})
+    assert env["HF_HOME"] == str(tmp_path / "models" / "huggingface")
+    assert env["DISABLE_SAFETENSORS_CONVERSION"] == "1"
+    keep = runtime.use_installed_models({"MOBILIA_HOME": str(tmp_path), "HF_HOME": "/outro"})
+    assert keep["HF_HOME"] == "/outro"
+    empty = runtime.use_installed_models({"MOBILIA_HOME": str(tmp_path / "nada")})
+    assert "HF_HOME" not in empty
+
+
+def test_upscaler_weights_download_on_demand(monkeypatch, tmp_path):
+    from mobilia.analysis import weights as Wt
+
+    calls = []
+    monkeypatch.setattr(Wt, "ensure_file_weight", lambda w, offline=False, progress=None, **k: calls.append(
+        (offline, progress)) or tmp_path / "x.pth")
+    monkeypatch.delenv("MOBILIA_OFFLINE", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    prog = lambda d, t: None  # noqa: E731
+    Wt.esrgan_path(progress=prog)
+    assert calls[-1] == (False, prog)                                # online: baixa se faltar
+    monkeypatch.setenv("MOBILIA_OFFLINE", "1")
+    Wt.esrgan_path()
+    assert calls[-1][0] is True
+
+
+def test_fetch_reports_progress_and_offline_message(monkeypatch, tmp_path):
+    import io
+    import urllib.request
+
+    from mobilia.analysis import weights as Wt
+
+    data = b"x" * (3 * (1 << 20) + 5)
+
+    class Resp(io.BytesIO):
+        headers = {"Content-Length": str(len(data))}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: Resp(data))
+    seen = []
+    Wt._fetch("https://example.invalid/w.pth", tmp_path / "w.pth", progress=lambda d, t: seen.append((d, t)))
+    assert (tmp_path / "w.pth").read_bytes() == data and seen[-1] == (len(data), len(data)) and len(seen) == 4
+    spec = Wt.FileWeight(key="t", filename="t.pth", subdir="t", sha256="0" * 64, size=1, urls=("https://x",),
+                         label="Teste", licenca="MIT")
+    with pytest.raises(Wt.WeightsError, match="não está instalado"):
+        Wt.ensure_file_weight(spec, root=tmp_path, offline=True)
+
+    def no_net(url, dest):
+        raise urllib.error.URLError("offline")
+    with pytest.raises(Wt.WeightsError, match="sem internet"):
+        Wt.ensure_file_weight(spec, root=tmp_path, fetch=no_net)

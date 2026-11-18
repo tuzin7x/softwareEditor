@@ -14,8 +14,11 @@ Os codificadores de texto ficam fora da GPU: os embeddings são calculados na CP
 (``<dados>/models/sdxl_prompts``). O pipeline carregado fica em cache no processo (``get_engine``): várias
 variações e funções seguidas não recarregam os 6 GB de pesos.
 
-GPU de 8 GB (RTX 5070 Laptop): UNet + ControlNet + VAE em fp16 cabem com folga sem os codificadores de texto
-(~5,7 GB + ativações a 1024 px com SDPA); abaixo de ``OFFLOAD_BELOW_GB`` de VRAM usa ``enable_model_cpu_offload``.
+GPU de 8 GB (RTX 5070 Laptop): UNet + ControlNet + VAE em fp16 cabem sem os codificadores de texto (~5,9 GB +
+ativações a 1024 px com SDPA). Quem decide offload, tamanho da passada de detalhe e a precisão dos codificadores de
+texto é o plano de memória (``memplan.py``, a partir da VRAM e da RAM livres); sem plano, abaixo de
+``OFFLOAD_BELOW_GB`` de VRAM usa ``enable_model_cpu_offload``. Antes de cada geração o cache do alocador CUDA é
+esvaziado (o que a análise e a conferência deixaram para trás não soma ao pico do UNet).
 """
 from __future__ import annotations
 
@@ -64,12 +67,19 @@ def _vram_gb() -> float:
 class DesignEngine:
     """Pipeline SDXL real. Carrega os pesos na primeira geração (``load``) e mantém tudo na memória."""
 
-    def __init__(self, device: str = "auto", offload: bool | str = "auto", offline: bool = True, dtype=None):
+    def __init__(self, device: str = "auto", offload: bool | str = "auto", offline: bool = True, dtype=None,
+                 plan=None):
         self.device = pick_device(device)
         self.offline = offline
         self._dtype = dtype
+        if plan is None and self.device.startswith("cuda"):
+            from .memplan import current_plan
+
+            plan = current_plan(self.device)
+        self.plan = plan
         if offload == "auto":
-            offload = self.device.startswith("cuda") and _vram_gb() < OFFLOAD_BELOW_GB
+            offload = (bool(plan.offload) if plan is not None else
+                       (self.device.startswith("cuda") and _vram_gb() < OFFLOAD_BELOW_GB))
         self.offload = bool(offload and self.device.startswith("cuda"))
         self.pipe = None
         self._embeds: dict[str, dict] = {}
@@ -99,10 +109,11 @@ class DesignEngine:
             controlnet=ctl, scheduler=sch, add_watermarker=False)
         pipe.set_progress_bar_config(disable=True)
         if self.device.startswith("cuda"):
-            try:
-                pipe.enable_vae_tiling()     # o pico da decodificação a 1024 px não soma ao do UNet
-            except Exception:  # noqa: BLE001
-                pass
+            for fn in ("enable_vae_tiling", "enable_vae_slicing"):   # o pico da decodificação não soma ao do UNet
+                try:
+                    getattr(pipe, fn)()
+                except Exception:  # noqa: BLE001
+                    pass
         if self.offload:
             pipe.enable_model_cpu_offload()
         else:
@@ -147,7 +158,8 @@ class DesignEngine:
             if all(m.key() != k for m in missing):
                 missing.append(p)
         if missing:
-            enc = encode_prompts(missing, offline=self.offline)
+            te = getattr(self.plan, "te_dtype", "float32") if self.plan is not None else "float32"
+            enc = encode_prompts(missing, offline=self.offline, dtype=te)
             for p, e in zip(missing, enc):
                 out[p.key()] = e
                 try:
@@ -183,6 +195,7 @@ class DesignEngine:
                 callback(i + 1, n_eff)
             return kw
 
+        free_cuda_cache(self.device)
         t0 = time.perf_counter()
         hard_proc = self.pipe.mask_processor
         if soft:
@@ -210,9 +223,29 @@ class DesignEngine:
             self.pipe.mask_processor = hard_proc
         out = res.images[0]
         dt_s = time.perf_counter() - t0
-        self.calls.append({"tamanho": [w, h], "passos_efetivos": n_eff, "s": round(dt_s, 2),
-                           "s_por_passo": round(dt_s / n_eff, 3)})
+        call = {"tamanho": [w, h], "passos_efetivos": n_eff, "s": round(dt_s, 2),
+                "s_por_passo": round(dt_s / n_eff, 3), "cfg": bool(guidance > 1.0)}
+        if self.device.startswith("cuda"):
+            try:
+                call["pico_vram_mb"] = int(torch.cuda.max_memory_allocated() // 2 ** 20)
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:  # noqa: BLE001
+                pass
+        self.calls.append(call)
         return (np.clip(out, 0, 1) * 255).round().astype(np.uint8)
+
+
+def free_cuda_cache(device: str) -> None:
+    """Devolve ao driver os blocos livres do alocador CUDA (entre etapas: análise -> geração -> conferência)."""
+    if not str(device).startswith("cuda"):
+        return
+    try:
+        import torch
+
+        gc.collect()
+        torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def mask_u8(mask: np.ndarray) -> tuple[np.ndarray, bool]:
@@ -283,18 +316,20 @@ def _encode_text(te1, te2, tk1, tk2, text: str, n_chunks: int | None = None):
     return torch.cat(embs, dim=1), pooled, n
 
 
-def encode_prompts(prompts: list[DesignPrompt], offline: bool = True) -> list[dict]:
-    """Calcula os embeddings (CPU, fp32) de uma lista de prompts com os codificadores de texto do SDXL, carregados
-    uma vez e liberados no fim."""
+def encode_prompts(prompts: list[DesignPrompt], offline: bool = True, dtype: str = "float32") -> list[dict]:
+    """Calcula os embeddings (CPU) de uma lista de prompts com os codificadores de texto do SDXL, carregados uma vez
+    e liberados no fim. ``dtype`` "bfloat16" com pouca RAM livre (fp32 pede ~3,4 GB; ver ``memplan``); os embeddings
+    saem sempre em fp32."""
     import torch
     from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 
     from ..analysis import weights as W
 
     tdir = W.sdxl_text_dir(offline=offline)
-    te1 = CLIPTextModel.from_pretrained(tdir, subfolder="text_encoder", variant="fp16", torch_dtype=torch.float32)
+    tdt = torch.bfloat16 if dtype == "bfloat16" else torch.float32
+    te1 = CLIPTextModel.from_pretrained(tdir, subfolder="text_encoder", variant="fp16", torch_dtype=tdt)
     te2 = CLIPTextModelWithProjection.from_pretrained(tdir, subfolder="text_encoder_2", variant="fp16",
-                                                      torch_dtype=torch.float32)
+                                                      torch_dtype=tdt)
     tk1 = CLIPTokenizer.from_pretrained(tdir, subfolder="tokenizer")
     tk2 = CLIPTokenizer.from_pretrained(tdir, subfolder="tokenizer_2")
     out = []
@@ -335,4 +370,4 @@ def release_engines() -> None:
 
 
 __all__ = ["Generator", "DesignEngine", "get_engine", "release_engines", "encode_prompts", "pick_device",
-           "OFFLOAD_BELOW_GB", "plan_steps", "mask_u8"]
+           "OFFLOAD_BELOW_GB", "plan_steps", "mask_u8", "free_cuda_cache"]

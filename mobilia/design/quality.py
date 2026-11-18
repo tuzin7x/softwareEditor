@@ -83,19 +83,38 @@ class Segmenter:
 
         from ..config import SEGMENTATION_MODEL_ID
 
+        from ..analysis.geometry import _ensure_weights
+        from ..analysis.weights import ensure_local
+
+        _ensure_weights(ensure_local, SEGMENTATION_MODEL_ID)
         self.device, self.long_side = device, long_side
         self.processor = OneFormerProcessor.from_pretrained(SEGMENTATION_MODEL_ID)
-        self.model = OneFormerForUniversalSegmentation.from_pretrained(SEGMENTATION_MODEL_ID).to(device).eval()
+        # .bin do repositório: sem ``use_safetensors=False`` o transformers busca na rede uma conversão .safetensors
+        self.model = OneFormerForUniversalSegmentation.from_pretrained(SEGMENTATION_MODEL_ID,
+                                                                       use_safetensors=False).eval()
         self.fp16 = device.startswith("cuda")
-        if self.fp16:
-            self.model = self.model.half()
+        self.model = self.model.to(device, torch.float16 if self.fp16 else torch.float32)
+        self.parked = False
         self.id2label = {int(k): str(v) for k, v in self.model.config.id2label.items()}
         self._torch = torch
+
+    def park(self) -> None:
+        """Tira o OneFormer da GPU (fica na RAM, fp16) enquanto o SDXL gera: o pico do UNet não soma ao dele."""
+        if self.device.startswith("cuda") and not self.parked:
+            self.model = self.model.to("cpu")
+            self.parked = True
+            self._torch.cuda.empty_cache()
+
+    def _unpark(self) -> None:
+        if self.parked:
+            self.model = self.model.to(self.device)
+            self.parked = False
 
     def groups(self, rgb: np.ndarray) -> np.ndarray:
         from PIL import Image
 
         torch = self._torch
+        self._unpark()
         s = min(1.0, self.long_side / max(rgb.shape[:2]))
         small = cv2.resize(rgb, (int(rgb.shape[1] * s), int(rgb.shape[0] * s)), interpolation=cv2.INTER_AREA)
         inputs = self.processor(images=Image.fromarray(small), task_inputs=["semantic"], return_tensors="pt")

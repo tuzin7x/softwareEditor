@@ -26,10 +26,11 @@ import cv2
 import numpy as np
 
 from . import archlock as AL
+from . import memplan as MP
 from . import presets as P
 from . import structure as S
 from ..analysis.segmentation import GROUP_IDS as GROUP_IDS_
-from .engine import Generator, get_engine, pick_device
+from .engine import Generator, free_cuda_cache, get_engine, pick_device
 
 Progress = Callable[[dict], None]
 
@@ -136,6 +137,25 @@ def _out_dir(out_dir) -> Path:
     from ..config import JOBS_DIR
 
     return JOBS_DIR / f"design_{time.strftime('%Y%m%d_%H%M%S')}"
+
+
+def _announce_downloads(prog: "_Prog", dev: str) -> list[str]:
+    """Avisa (evento ``log``) quais modelos do redesenho faltam no disco e serão baixados agora — o instalador
+    deveria ter baixado todos (``weights.prefetch_models``); a primeira "Mudar estilo" levou 942 s baixando o
+    OneFormer sem dizer nada."""
+    try:
+        from ..analysis.weights import ESRGAN_WEIGHT, missing_design_models
+        from ..config import GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL
+
+        skip = {ESRGAN_WEIGHT.label, GEOMETRY_MODEL_ID_SMALL if dev.startswith("cuda") else GEOMETRY_MODEL_ID}
+        miss = [m for m in missing_design_models() if m not in skip]
+    except Exception:  # noqa: BLE001 - só um aviso
+        return []
+    if miss:
+        prog.emit({"event": "log", "level": "warning",
+                   "message": "Baixando modelos de IA que faltam (só desta vez; o instalador deveria tê-los "
+                              "baixado): " + ", ".join(miss)})
+    return miss
 
 
 # ====================================================================================== análise
@@ -326,11 +346,21 @@ def refine_openings(rgb: np.ndarray, groups: np.ndarray, seg_fn, labels=None, id
     return g, changed
 
 
+REPAIR_STRENGTH = 0.9      # 0,8 deixava o pré-preenchimento (liso, acinzentado) aparecer: um retângulo chapado
+
+
 def _repair_openings(eng, img: np.ndarray, new: np.ndarray, lock: np.ndarray, control, room_key: str, seed: int,
-                     steps: int, has_windows: bool, keep_out: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+                     steps: int, has_windows: bool, keep_out: np.ndarray | None = None,
+                     gen_size: tuple[int, int] | None = None) -> tuple[np.ndarray, dict]:
     """Refaz como parede lisa as janelas/portas/cortinas que o gerador inventou (``new``): pré-preenche a área
     com o entorno (Telea) e gera só ali, com a profundidade da foto inteira guiando o plano da parede.
-    ``keep_out`` (o teto da foto): fica fora do reparo — "parede lisa" pintada no teto deixava uma faixa escura."""
+    ``keep_out`` (o teto da foto): fica fora do reparo — "parede lisa" pintada no teto deixava uma faixa escura.
+
+    Sem retângulo chapado de borda dura (visto num canto de parede): a máscara vai SUAVE para os latentes, a força é
+    0,9 (o gerador refaz a textura e a luz da parede), e a área refeita entra por mistura de Poisson
+    (``archlock.poisson_blend``: a borda dela é exatamente a da foto, cor e luz casadas por construção) com uma
+    rampa larga por dentro. ``gen_size``: tamanho da geração (o refino pode ter deixado ``img`` maior; o reparo
+    gera no tamanho da geração e é ampliado — numa GPU de 8 GB, gerar a 1280 com CFG transbordaria a VRAM)."""
     H, W = new.shape
     diag = float(np.hypot(H, W))
     m = cv2.dilate(new.astype(np.uint8), AL._disk(int(0.02 * diag))).astype(bool) & ~lock
@@ -338,27 +368,54 @@ def _repair_openings(eng, img: np.ndarray, new: np.ndarray, lock: np.ndarray, co
         m &= ~np.asarray(keep_out, bool)
     if not m.any():
         return img, {}
-    pre = cv2.inpaint(img, m.astype(np.uint8) * 255, max(3, int(0.01 * diag)), cv2.INPAINT_TELEA)
+    gw, gh = gen_size or (W, H)
+    if (gw, gh) != (W, H):
+        img_s = _resize(img, (gw, gh))
+        m_s = cv2.resize(m.astype(np.uint8), (gw, gh), interpolation=cv2.INTER_NEAREST).astype(bool)
+        ctl_s = None if control is None else cv2.resize(np.asarray(control, np.float32), (gw, gh),
+                                                        interpolation=cv2.INTER_LINEAR)
+    else:
+        img_s, m_s, ctl_s = img, m, control
+    dg = float(np.hypot(gw, gh))
+    pre = cv2.inpaint(img_s, m_s.astype(np.uint8) * 255, max(3, int(0.01 * dg)), cv2.INPAINT_TELEA)
+    weight = AL.feather_alpha(m_s, max(4.0, 0.03 * dg), inside=0.5)
+    weight[m_s & (cv2.erode(m_s.astype(np.uint8), AL._disk(2)) > 0)] = 1.0
     r = P.ROOMS[room_key]
     tail = P.PHOTO_TAIL.format(light=P.LIGHT_WINDOWS if has_windows else P.LIGHT_NONE)
-    pr = P.DesignPrompt(f"plain painted wall, same color and texture as the surrounding wall, seamless, inside a "
-                        f"{r['en']}, {tail}",
-                        "window, door, doorway, opening, glass, curtains, blinds, view, sky, trees, frame, "
-                        + P.NEGATIVE_BASE)
-    g = _resize(eng.generate(pre, m, control, pr, int(seed) + 101, 0.8, steps, 1.8, 0.8, 1.0, None), (W, H))
-    alpha = AL.feather_alpha(m, max(2.0, 0.006 * diag), inside=1.0)
+    pr = P.DesignPrompt(f"plain painted wall, same color and texture as the surrounding wall, seamless, soft natural "
+                        f"shading, inside a {r['en']}, {tail}",
+                        "window, door, doorway, opening, glass, curtains, blinds, view, sky, trees, frame, flat grey "
+                        "patch, rectangle, panel, seam, visible border, " + P.NEGATIVE_BASE)
+    g = eng.generate(pre, weight, ctl_s, pr, int(seed) + 101, REPAIR_STRENGTH, steps, 1.8, 0.8, 1.0, None)
+    g = _resize(_resize(g, (gw, gh)), (W, H))
+    g = AL.poisson_blend(img, g, m)
+    alpha = AL.feather_alpha(m, max(3.0, 0.015 * diag), inside=1.0)
     n_comp = cv2.connectedComponents(new.astype(np.uint8))[0] - 1
-    return AL.composite(img, g, alpha), {"fracao": round(float(m.mean()), 4), "componentes": int(n_comp)}
+    out = AL.composite(img, g, alpha)
+    return out, {"fracao": round(float(m.mean()), 4), "componentes": int(n_comp),
+                 "degrau_borda": round(AL.seam_step(out, m), 2)}
 
 
 def _refine(eng, img: np.ndarray, size2: tuple[int, int], depth, prompt, seed: int,
             guidance: float) -> np.ndarray:
-    """Passada de detalhe: amplia 1,5× (Lanczos) e refaz com força baixa (0,3) e a profundidade a meio peso — o
-    SDXL inventa a textura fina que a ampliação não tem (tecido, madeira, folhas)."""
+    """Passada de detalhe: amplia (Lanczos) para o tamanho do plano de memória (``memplan``: 1280 px numa GPU de
+    8 GB, 1536 nas folgadas) e refaz com força baixa (0,3) e a profundidade a meio peso — o SDXL inventa a textura
+    fina que a ampliação não tem (tecido, madeira, folhas). ``guidance`` 1 = sem CFG (lote 1, metade da memória)."""
     up = _resize(img, size2)
     ctrl = depth_control(depth, size2) if depth is not None else None
     full = np.ones((size2[1], size2[0]), bool)
     return _resize(eng.generate(up, full, ctrl, prompt, int(seed), 0.3, 8, guidance, 0.5, 1.0, None), size2)
+
+
+def _refine_spilled(eng) -> bool:
+    """A última chamada (refino) contra a penúltima (geração): passo por pixel muito mais lento = a VRAM
+    transbordou para a memória do sistema (``memplan.refine_spilled``)."""
+    calls = getattr(eng, "calls", None) or []
+    if len(calls) < 2 or "s_por_passo" not in calls[-1] or "s_por_passo" not in calls[-2]:
+        return False
+    g, r = calls[-2], calls[-1]
+    return MP.refine_spilled(g["s_por_passo"], g["tamanho"][0] * g["tamanho"][1], r["s_por_passo"],
+                             r["tamanho"][0] * r["tamanho"][1])
 
 
 def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno", ambiente: str = "sala",
@@ -406,7 +463,10 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     eng = engine or get_engine(device)
     dev = getattr(eng, "device", pick_device(device))
     gpu = dev.startswith("cuda")
+    if engine is None:
+        _announce_downloads(prog, dev)
     qp = P.quality_profile(quality, dev)
+    mplan = getattr(eng, "plan", None) or MP.current_plan(dev)
     W, H = P.work_size(rgb.shape[1], rgb.shape[0], long_side or qp.long_side)
     base = _resize(rgb, (W, H))
 
@@ -474,9 +534,11 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     if qp.key == "rapido":
         steps = min(steps, qp.steps)
     do_repair = bool(fp.repair if repair is None else repair) and gr is not None and fp.needs_photo
-    do_refine = bool((gpu and qp.key == "final") if refine is None else refine)
+    do_refine = bool((gpu and qp.key == "final" and mplan.refine) if refine is None else refine)
     if do_refine:
-        Wf, Hf = P.work_size(rgb.shape[1], rgb.shape[0], min(1536, int(round(max(W, H) * 1.5))))
+        # lado da passada de detalhe pelo plano de memória (nunca acima de 1,5× a geração; numa GPU de 8 GB, 1280)
+        ref_side = min(int(round(max(W, H) * 1.5)), mplan.refine_long_side or 1536)
+        Wf, Hf = P.work_size(rgb.shape[1], rgb.shape[0], max(ref_side, max(W, H)))
     else:
         Wf, Hf = W, H
     base_f = _resize(rgb, (Wf, Hf)) if do_refine else base
@@ -500,6 +562,12 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
         prog("geracao", 0.0, "Preparando o texto do estilo")
         eng.embeddings(prompts)
     tag = f"{fp.key}_{st_key or evento}"
+    # o OneFormer da análise (janelas atrás de vidro) não fica na GPU enquanto o SDXL gera
+    if seg is not None and mplan.seg_off_gpu and hasattr(seg, "park"):
+        seg.park()
+    free_cuda_cache(dev)
+    ref_guidance = fp.guidance if mplan.refine_cfg else 1.0
+    spilled = False
     do_ceiling = fp.keep_ceiling and gr is not None
     ceil_f = AL.lock_mask(gr, ("ceiling",), (Wf, Hf)) if do_ceiling else None
     checks = m > n or do_repair or do_ceiling
@@ -516,11 +584,18 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
         img = eng.generate(gen_base, gen_mask, control, pr, sd, fp.strength, steps, fp.guidance,
                            fp.control_scale, fp.control_end, cb)
         img = _resize(img, (W, H))
-        if do_refine:
+        if do_refine and not spilled:
             prog("geracao", (i + 1) / m * span, f"Refinando os detalhes da versão {i + 1}")
             # na Reforma o refino não usa profundidade: a da foto traria os móveis antigos de volta e a da sala vazia
             # achataria os novos
-            img = _refine(eng, img, (Wf, Hf), depth if struct_depth is None else None, pr, sd, fp.guidance)
+            img = _refine(eng, img, (Wf, Hf), depth if struct_depth is None else None, pr, sd, ref_guidance)
+            spilled = _refine_spilled(eng)
+            if spilled:
+                prog.emit({"event": "log", "level": "warning",
+                           "message": "A placa de vídeo ficou sem memória na passada de detalhe: as próximas versões "
+                                      "saem sem ela (mais rápido)."})
+        elif do_refine:
+            img = _resize(img, (Wf, Hf))
         if tone:
             img = AL.anchor_tone(img, base_f, amount_ab=fp.tone_ab,
                                  chroma_cap=1.15 if fp.tone_ab >= 0.3 else 1.5)
@@ -562,8 +637,10 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
                 new = AL.new_openings(groups_of(k), open_f | lock_f, (Wf, Hf), source_groups=gr)
                 if new.any():
                     prog("geracao", 0.88 + 0.06 * (j + 0.5) / len(order), "Corrigindo uma janela inventada")
+                    if seg is not None and mplan.seg_off_gpu and hasattr(seg, "park"):
+                        seg.park()
                     fixed, info = _repair_openings(eng, images[k], new, lock_f, control_f, room_key, seeds[k],
-                                                   steps, an.windows, keep_out=ceil_f)
+                                                   steps, an.windows, keep_out=ceil_f, gen_size=(W, H))
                     if info:
                         # a versão antes do reparo fica em candidatos/ (conferência), com a área refeita
                         info["antes_do_reparo"] = _save(images[k], out / "candidatos" / f"{tag}_{k + 1}_sem_reparo.jpg")
@@ -607,7 +684,8 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     rep = {"funcao": fp.key, "funcao_pedida": requested, "aviso": aviso, "mobiliado_na_foto": coverage,
            "estilo": st_key, "evento": evento, "ambiente": room_key, "tamanho": [Wf, Hf],
            "tamanho_geracao": [W, H], "qualidade": qp.key, "dispositivo": dev, "sementes": sel_seeds,
-           "passos": steps, "refino": do_refine, "tom": tone, "preset": asdict(fp),
+           "passos": steps, "refino": do_refine, "refino_desligado_por_memoria": spilled, "tom": tone,
+           "plano_memoria": mplan.to_dict(), "preset": asdict(fp),
            "prompts": [asdict(prompts[k]) for k in order],
            "trava": {"grupos": list(fp.lock), "mantidos": list(fp.keep), "fixos": list(fp.fixed),
                      "cozinha_integrada": an.open_kitchen, "janelas": an.windows, "teto_original": do_ceiling,
@@ -646,6 +724,45 @@ EDIT_CONTEXT = 0.6        # margem de contexto do recorte (× o lado da área): 
 EDIT_MIN_CROP = 0.5       # o recorte cobre pelo menos esta fração do lado maior da foto
 
 
+def edit_gen_size(width: int, height: int, long_side: int) -> tuple[int, int]:
+    """Tamanho da geração da "Editar área" com a proporção da FOTO (múltiplos de 8): numa foto 3:2 (960×640) o
+    recorte saía 4:3 e era gerado a 1024×768 — a área esticada/achatada na volta. Proporção fiel em até ~1%."""
+    s = long_side / max(width, height)
+    w = max(64, int(round(width * s / 8)) * 8)
+    h = max(64, int(round(height * s / 8)) * 8)
+    return w, h
+
+
+def edit_crop_box(mask: np.ndarray, aspect: float, margin_frac: float = EDIT_CONTEXT, min_side: int = 0
+                  ) -> tuple[int, int, int, int]:
+    """Recorte da "Editar área": a área pintada + contexto (``margin_frac`` × o lado dela, no mínimo ``min_side``
+    no lado maior), com a proporção ``aspect`` (largura/altura) da geração e dentro da foto. A área pintada fica
+    sempre inteira dentro do recorte (se não couber na proporção, o recorte é a foto toda)."""
+    H, W = mask.shape
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return 0, 0, W, H
+    bx0, bx1, by0, by1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+    cw = (bx1 - bx0) * (1 + 2 * margin_frac)
+    ch = (by1 - by0) * (1 + 2 * margin_frac)
+    cw = max(cw, ch * aspect)
+    ch = cw / aspect
+    if 0 < max(cw, ch) < min_side:
+        k = min_side / max(cw, ch)
+        cw, ch = cw * k, ch * k
+    if cw > W or ch > H:                              # não cabe: o maior recorte com a proporção da foto
+        k = min(W / cw, H / ch)
+        cw, ch = cw * k, ch * k
+    cw, ch = int(round(min(W, cw))), int(round(min(H, ch)))
+    cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    X0 = int(np.clip(round(cx - cw / 2), 0, W - cw))
+    Y0 = int(np.clip(round(cy - ch / 2), 0, H - ch))
+    X1, Y1 = X0 + cw, Y0 + ch
+    if bx0 < X0 or by0 < Y0 or bx1 > X1 or by1 > Y1:   # a área não coube: a foto inteira
+        return 0, 0, W, H
+    return X0, Y0, X1, Y1
+
+
 def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente: str = "sala", n: int = 4,
               seed: int | None = None, out_dir=None, quality: str = "final", engine: Generator | None = None,
               depth: np.ndarray | None = None, progress: Progress | None = None, device: str = "auto",
@@ -658,9 +775,14 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     volta e põe o objeto novo na mesma perspectiva e luz), gerada na resolução do SDXL e colada de volta na foto
     ORIGINAL (resolução cheia). A geração usa uma máscara SUAVE nos latentes (peso 1 no miolo, rampa na borda):
     a cada passo a borda mistura a foto com o que está sendo gerado, então o tapete/piso continua pela área nova
-    em vez de terminar num "remendo oval". A área é pré-preenchida com o entorno (o objeto antigo não semeia) e a
-    força fica um pouco abaixo de 1 (a luz e a cor do entorno entram no ponto de partida). A colagem final usa uma
-    rampa por dentro da máscara crescida ``grow_frac`` da diagonal: todo pixel fora dela fica idêntico à foto."""
+    em vez de terminar num "remendo oval". A área é pré-preenchida com o entorno (o objeto antigo não semeia). A
+    colagem final usa uma rampa por dentro da máscara crescida ``grow_frac`` da diagonal: todo pixel fora dela fica
+    idêntico à foto.
+
+    Travas do teste na GPU (uma "mini-sala" inteira com sofá, cortina e janela dentro do retângulo, gerada a
+    1024×768 para uma foto 3:2): o recorte e a geração têm a proporção da FOTO (``edit_crop_box``/``edit_gen_size``,
+    nada esticado na volta), a profundidade do entorno guia (``control_scale`` do preset, igual na GPU e na CPU) e
+    o prompt é só do objeto pedido, com "sala inteira"/móveis não pedidos no negativo (``presets.build_prompt``)."""
     t_all = time.perf_counter()
     fp = P.with_overrides(P.function("editar_area"), **(overrides or {}))
     room_key = P.norm_room(ambiente)
@@ -685,9 +807,9 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     # diagonal) para o "fantasma" dele não sobrar em volta; fora da área crescida tudo fica idêntico à foto
     grow = int(round(grow_frac * np.hypot(Wf, Hf)))
     ue = cv2.dilate(um.astype(np.uint8), AL._disk(grow)).astype(bool) if grow > 0 else um
-    x0, y0, x1, y1 = AL.mask_bbox(ue, EDIT_CONTEXT, min_side=int(EDIT_MIN_CROP * max(Wf, Hf)))
+    W, H = edit_gen_size(Wf, Hf, qp.long_side)
+    x0, y0, x1, y1 = edit_crop_box(ue, W / H, EDIT_CONTEXT, min_side=int(EDIT_MIN_CROP * max(Wf, Hf)))
     crop, cm = rgb[y0:y1, x0:x1], ue[y0:y1, x0:x1]
-    W, H = P.work_size(x1 - x0, y1 - y0, qp.long_side)
     crop_ref = _resize(crop, (W, H))
     mw = cv2.resize(cm.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
     dw = float(np.hypot(W, H))
@@ -744,6 +866,8 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     before = _save(rgb, out / "antes.jpg")
     timings["total_s"] = round(time.perf_counter() - t_all, 2)
     rep = {"funcao": "editar_area", "estilo": st_key, "ambiente": room_key, "recorte": [x0, y0, x1, y1],
+           "proporcao": {"foto": round(Wf / Hf, 4), "recorte": round((x1 - x0) / (y1 - y0), 4),
+                         "geracao": round(W / H, 4)},
            "margem_px": grow,
            "tamanho_geracao": [W, H], "tamanho": [Wf, Hf], "sementes": seeds, "passos": steps,
            "preset": asdict(fp), "prompts": [asdict(p) for p in prompts], "saidas": outputs, "tempos": timings}
@@ -754,7 +878,7 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
 
 
 # ====================================================================================== texto para ambiente
-ASPECTS = {"paisagem": (4, 3), "retrato": (3, 4), "quadrado": (1, 1), "16:9": (16, 9), "9:16": (9, 16)}
+ASPECTS = P.ASPECTS
 
 
 def text_to_design(prompt: str = "", estilo: str | None = "moderno", ambiente: str = "sala", n: int = 4,
@@ -765,6 +889,12 @@ def text_to_design(prompt: str = "", estilo: str | None = "moderno", ambiente: s
     t_all = time.perf_counter()
     fp = P.with_overrides(P.function("texto"), **(overrides or {}))
     room_key = P.norm_room(ambiente)
+    # o ambiente citado no texto vence o escolhido na lista ("quarto aconchegante" com --ambiente sala = quarto)
+    room_said = P.infer_room(prompt)
+    room_asked = room_key
+    if room_said and room_said != room_key:
+        room_key = room_said
+    aspect = P.norm_aspect(aspect)
     st_key = P.norm_style(estilo) if estilo else None
     prog = _Prog(progress, (("preparo", "Preparando", 0.03), ("geracao", "Criando o ambiente", 0.92),
                             ("final", "Finalizando", 0.05)))
@@ -773,8 +903,8 @@ def text_to_design(prompt: str = "", estilo: str | None = "moderno", ambiente: s
     eng = engine or get_engine(device)
     dev = getattr(eng, "device", pick_device(device))
     qp = P.quality_profile(quality, dev)
-    aw, ah = ASPECTS.get(aspect, ASPECTS["paisagem"])
-    W, H = P.work_size(aw * 1000, ah * 1000, qp.long_side)
+    aw, ah = ASPECTS[aspect]
+    W, H = edit_gen_size(aw * 1000, ah * 1000, qp.long_side)        # proporção exata do formato (múltiplos de 8)
     steps = int((overrides or {}).get("steps") or (fp.steps if dev.startswith("cuda") else min(fp.steps, qp.steps)))
     blank = np.full((H, W, 3), 127, np.uint8)
     full = np.ones((H, W), bool)
@@ -798,7 +928,8 @@ def text_to_design(prompt: str = "", estilo: str | None = "moderno", ambiente: s
     timings["por_imagem_s"] = round(timings["geracao_s"] / len(seeds), 2)
     timings["total_s"] = round(time.perf_counter() - t_all, 2)
     prog("final")
-    rep = {"funcao": "texto", "estilo": st_key, "ambiente": room_key, "tamanho": [W, H], "sementes": seeds,
+    rep = {"funcao": "texto", "estilo": st_key, "ambiente": room_key, "ambiente_pedido": room_asked,
+           "ambiente_do_texto": room_said, "formato": aspect, "tamanho": [W, H], "sementes": seeds,
            "passos": steps, "preset": asdict(fp), "prompts": [asdict(p) for p in prompts], "saidas": outputs,
            "tempos": timings}
     report = out / "design.json"

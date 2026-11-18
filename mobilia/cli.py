@@ -249,7 +249,12 @@ def _cmd_upscale(a) -> int:
         if not os.path.isfile(a.image):
             raise FileNotFoundError(f"Imagem não encontrada: {a.image}")
         emit({"event": "progress", "stage": "ampliar", "fraction": 0.0, "message": "Carregando o modelo de ampliação"})
-        _, info = upscale(a.image, a.out, long_side=a.lado, device=a.device,
+        def dl(done, total):
+            mb = f"{done / 2 ** 20:.0f} de {total / 2 ** 20:.0f} MB" if total else f"{done / 2 ** 20:.0f} MB"
+            emit({"event": "progress", "stage": "baixar", "fraction": round(min(1.0, done / total), 3) if total else 0.0,
+                  "message": f"Baixando o modelo de ampliação (só na primeira vez): {mb}"})
+
+        _, info = upscale(a.image, a.out, long_side=a.lado, device=a.device, download_progress=dl,
                           progress=lambda f: emit({"event": "progress", "stage": "ampliar", "fraction": round(f, 3),
                                                    "message": "Ampliando para 4K"}))
         emit({"event": "done", "output": a.out, "size": info["para"], "s": info["s"]})
@@ -405,9 +410,10 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     # caches de kernels da NVIDIA grandes também quando a CLI é chamada direto (desenvolvimento);
     # precisa vir antes do primeiro import do PyTorch e vale para o Blender (processo filho)
-    from .runtime import apply_gpu_cache_env
+    from .runtime import apply_gpu_cache_env, use_installed_models
 
     apply_gpu_cache_env(os.environ)
+    use_installed_models(os.environ)
     return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch,
             "prefetch": _cmd_prefetch, "aquecer": _cmd_warmup, "recompor": _cmd_recompose,
             "design": _cmd_design, "ampliar": _cmd_upscale, "upscale": _cmd_upscale,

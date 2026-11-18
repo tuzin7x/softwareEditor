@@ -88,7 +88,7 @@ def segment(rgb8: np.ndarray, model_id: str = "shi-labs/oneformer_ade20k_swin_la
     from transformers import OneFormerForUniversalSegmentation, OneFormerProcessor
 
     processor = OneFormerProcessor.from_pretrained(model_id)
-    model = OneFormerForUniversalSegmentation.from_pretrained(model_id).to(device).eval()
+    model = OneFormerForUniversalSegmentation.from_pretrained(model_id, use_safetensors=False).to(device).eval()
     if use_fp16 and device != "cpu":
         model = model.half()
     if timings is not None:

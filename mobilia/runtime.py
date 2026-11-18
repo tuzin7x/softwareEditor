@@ -208,6 +208,19 @@ def worker_environment(base: Mapping[str, str] | None = None, frozen: bool | Non
     return env
 
 
+def use_installed_models(env: dict, paths: RuntimePaths | None = None) -> dict:
+    """CLI chamada direto (sem o ambiente do worker): usa os modelos que o instalador já baixou (``HF_HOME`` da
+    pasta de dados, se existir) e não deixa o transformers buscar a conversão .safetensors do OneFormer. Sem isso
+    a primeira "Mudar estilo" pela linha de comando baixava o OneFormer de novo para o cache padrão (~15 min)."""
+    env.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
+    if not env.get("HF_HOME"):
+        paths = paths or runtime_paths(app_home(env))
+        hub = paths.hf_home / "hub"
+        if hub.is_dir() and any(hub.glob("models--*")):
+            env["HF_HOME"] = str(paths.hf_home)
+    return env
+
+
 def apply_gpu_cache_env(env: dict) -> dict:
     """Define o tamanho dos caches de kernels da NVIDIA (``GPU_CACHE_ENV``) sem sobrescrever um
     valor já escolhido pelo usuário."""
