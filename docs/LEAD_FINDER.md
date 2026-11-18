@@ -191,7 +191,7 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_u
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 ```
 
-185 testes no módulo (96 originais + 89 de regressão das 3 revisões do Codex), rodando também no GitHub Actions, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
+189 testes no módulo (96 originais + 93 de regressão das 4 revisões do Codex), rodando também no GitHub Actions, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
 `tests/lead_finder/fixtures/`): telefones e `wa.me`, IBGE, palavras-chave, mensagens, IA (formato da
 requisição), HTTP (novas tentativas, cancelamento imediato, limite por host, logs sem chaves), OSM, Google
 (máscara de campos, limite de custo), BrasilAPI (minimização), importador da Receita com ZIP sintético
