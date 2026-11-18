@@ -673,3 +673,60 @@ def test_municipality_list_follows_selected_uf(page, qapp, transport):
     assert view.muni_model.stringList() == []                            # antes: continuava a lista de SP
     view.muni_input.setText("Rio de Janeiro"); view.add_municipality()
     assert [view.muni_list.item(i).text() for i in range(view.muni_list.count())] == ["Rio de Janeiro - RJ"]
+
+
+# #################################################################################### rodada 4 da revisão
+
+# ============================================== 17. confirmação manual não sobrevive ao prazo do Google
+
+def test_confirmed_google_only_number_is_removed_on_expiry(store):
+    store.ingest([L("google_places", "ChIJONLY000001", "Só Google", phone="+55 21 99999-0002", city="Rio", uf="RJ")])
+    lid = store.page()[0][0]["id"]
+    store.set_whatsapp(lid, "confirmado")
+    assert store.get(lid)["wa_number"] == "+5521999990002"
+    store.con.execute("UPDATE lead_sources SET expires_at='2000-01-01T00:00:00+00:00'"); store.con.commit()
+    store.purge_expired()
+    d = store.get(lid)
+    assert d["wa_number"] == "" and d["wa_status"] != "confirmado" and d["wa_user_number"] == ""   # antes: mantido
+    assert "99999-0002" not in str(d["events"])
+
+
+def test_confirmation_kept_when_another_source_supports_number(store):
+    store.ingest([L(phone="19 99900-0001"),
+                  L("google_places", "ChIJX0000000001", "Alfa", phone="+55 19 99900-0001")])
+    lid = store.page()[0][0]["id"]
+    store.set_whatsapp(lid, "confirmado")
+    store.con.execute("UPDATE lead_sources SET expires_at='2000-01-01T00:00:00+00:00' WHERE source='google_places'")
+    store.con.commit()
+    store.purge_expired()
+    d = store.get(lid)
+    assert (d["wa_number"], d["wa_status"]) == ("+5519999000001", "confirmado")
+
+
+# ============================================== 18. nova análise de site sem WhatsApp limpa a evidência antiga
+
+def _site(store, lid, numbers):
+    store.save_site_check(lid, {"url": "https://alfa-exemplo.com.br/", "ok": True, "summary": "ok",
+                                "totals": {}, "terms": {}, "whatsapp_numbers": numbers, "whatsapp_match": ""})
+
+
+def test_site_without_whatsapp_clears_previous_site_evidence(store):
+    store.ingest([L(phone="19 3200-0001", website="https://alfa-exemplo.com.br")])
+    lid = store.page()[0][0]["id"]
+    _site(store, lid, ["+5519999000001"])
+    assert store.get(lid)["wa_status"] == "confirmado"
+    _site(store, lid, [])
+    d = store.get(lid)
+    assert d["wa_number"] != "+5519999000001" and d["wa_status"] != "confirmado"   # antes: mantido
+    assert "site" not in d["sources"]
+
+
+def test_failed_site_check_keeps_previous_evidence_and_manual_confirmation(store):
+    store.ingest([L(phone="19 3200-0001", website="https://alfa-exemplo.com.br")])
+    lid = store.page()[0][0]["id"]
+    _site(store, lid, ["+5519999000001"])
+    store.save_site_check(lid, {"url": "x", "ok": False, "summary": "Site inacessível"})
+    assert store.get(lid)["wa_number"] == "+5519999000001"
+    store.set_whatsapp(lid, "confirmado", "19 3200-0001")
+    _site(store, lid, [])
+    assert store.get(lid)["wa_number"] == "+551932000001"               # confirmação manual preservada

@@ -617,6 +617,11 @@ class Store:
                     "(?,?,?,?,?,?) ON CONFLICT(source, source_ref) DO UPDATE SET payload=excluded.payload, "
                     "fetched_at=excluded.fetched_at",
                     (lead_id, "site", ref, now_iso(), result.get("url", ""), _j({"whatsapp": wa})))
+            elif result.get("ok"):
+                # análise bem-sucedida sem WhatsApp: a evidência anterior do site deixa de valer
+                # (confirmações manuais ficam em wa_user/wa_user_number e não são afetadas)
+                self.con.execute("DELETE FROM lead_sources WHERE lead_id=? AND source='site' AND source_ref=?",
+                                 (lead_id, f"site:{lead_id}"))
             self._recompute(lead_id)
             self._event(lead_id, "site_analisado", result.get("summary", ""))
 
@@ -733,8 +738,27 @@ class Store:
                                  "WHERE lead_id=? AND kind='criado' AND json_extract(payload, '$.fonte')=?",
                                  (r["lead_id"], r["source"]))
             for lead_id in {r["lead_id"] for r in rows}:
+                self._drop_unsupported_confirmation(lead_id)
                 self._recompute(lead_id)
         return len(rows)
+
+    def _drop_unsupported_confirmation(self, lead_id: int) -> None:
+        """Um número confirmado manualmente cuja única origem era uma fonte expirada (Google) não pode sobreviver
+        ao prazo: a confirmação e a cópia do número no histórico são apagadas se nenhuma fonte restante o sustenta."""
+        row = self.con.execute("SELECT wa_user, wa_user_number FROM leads WHERE id=?", (lead_id,)).fetchone()
+        if not row or not row["wa_user_number"]:
+            return
+        supported = set()
+        for (payload,) in self.con.execute("SELECT payload FROM lead_sources WHERE lead_id=? AND purged=0",
+                                           (lead_id,)):
+            data = json.loads(payload or "{}")
+            supported |= {ph.normalize(data.get(k, "")).e164 for k in ("phone", "phone2", "whatsapp")}
+        if row["wa_user_number"] in supported:
+            return
+        national = ph.normalize(row["wa_user_number"]).national
+        self.con.execute("UPDATE leads SET wa_user='', wa_user_number='' WHERE id=?", (lead_id,))
+        self.con.execute("UPDATE events SET detail='WhatsApp confirmado (número apagado pelo prazo de guarda)' "
+                         "WHERE lead_id=? AND kind='editado' AND instr(detail, ?) > 0", (lead_id, national))
 
     def google_refs(self, lead_id: int) -> list[str]:
         return [r[0] for r in self.con.execute(
