@@ -415,6 +415,17 @@ def app():
     yield a
 
 
+def wait_until(cond, timeout_s: float = 5.0) -> bool:
+    """Processa eventos até ``cond()`` (os timers do Qt atrasam quando a máquina está ocupada)."""
+    import time
+
+    from PySide6.QtTest import QTest
+    end = time.monotonic() + timeout_s
+    while not cond() and time.monotonic() < end:
+        QTest.qWait(20)
+    return bool(cond())
+
+
 class Harness:
     """Controller com tudo dublado; ``spawn`` síncrono (a thread vira chamada direta)."""
 
@@ -468,7 +479,6 @@ def test_dialog_renders_notes_without_html(app):
 
 
 def test_flow_installed_update_now(app, tmp_path):
-    from PySide6.QtTest import QTest
     h = Harness(tmp_path)
     assert h.ctl.start_auto_check(now=10 ** 9)
     d = h.ctl.dialog
@@ -478,8 +488,7 @@ def test_flow_installed_update_now(app, tmp_path):
     assert h.downloads == ["setup"]
     assert d.state == "installing" and "fechar e abrir de novo" in d.status.text()
     assert h.launched == [tmp_path / "dl" / "7xAI-Setup-v9.9.1.exe"]
-    QTest.qWait(600)
-    assert h.quits == 1
+    assert wait_until(lambda: h.quits == 1)
     d.close()
 
 
@@ -577,7 +586,6 @@ def test_flow_busy_job_asks_first(app, tmp_path):
 
 
 def test_flow_portable_download_then_open(app, tmp_path):
-    from PySide6.QtTest import QTest
     h = Harness(tmp_path, kind="portable")
     h.ctl.check_now()
     d = h.ctl.dialog
@@ -588,8 +596,7 @@ def test_flow_portable_download_then_open(app, tmp_path):
     assert "7xAI-Portable-v9.9.1.exe" in d.status.text() and d.btn_folder.isVisible()
     d.btn_update.click()
     assert h.opened == [tmp_path / "dl" / "7xAI-Portable-v9.9.1.exe"]
-    QTest.qWait(600)
-    assert h.quits == 1
+    assert wait_until(lambda: h.quits == 1)
     d.close()
 
 
