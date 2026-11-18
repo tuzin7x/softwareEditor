@@ -62,7 +62,7 @@ Nada do motor de redesenho ou de vídeo foi tocado; `api.py` não importa nada d
 ## 5. Como testar
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 189 testes
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 194 testes
 QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_ui.py
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 python -m pytest --collect-only -q
@@ -73,8 +73,8 @@ Resultado nesta branch (`ce0c00c`, depois do merge com `eaee226` e das correçõ
 
 | Onde | Resultado |
 |---|---|
-| `tests/lead_finder` (local, `04ac23b`) | **189 passaram**: 96 originais + 93 de regressão das 4 revisões do Codex |
-| `tests/test_modules.py` + `tests/test_ui.py` + `tests/lead_finder` (local) | **232 passaram** |
+| `tests/lead_finder` (local, `1a03ba9`) | **194 passaram**: 96 originais + 98 de regressão das 5 revisões do Codex |
+| `tests/test_modules.py` + `tests/test_ui.py` + `tests/lead_finder` (local) | **237 passaram** |
 | Suíte rápida inteira (local, instalação completa do `tests.yml`) | **882 passaram, 257 pulados, 4 falharam** (em `799dc54`): as mesmas 4 falhas da base (`ModuleNotFoundError` de `torch`/`huggingface_hub`), que **falham igualmente em `claude/sweet-bohr-4uzml2` sem o Lead Finder** |
 | GitHub Actions, "Testes (CPU)" | **298 passaram** em `07c8371` (123 da lista original + 175 do Lead Finder). Antes de `ce0c00c` o CI rodava só os 123 e nenhum teste do módulo |
 | GitHub Actions, "Build Windows" (manual, `publicar=false`, run 44202166745) | **sucesso**: PyInstaller, autoteste do `.exe`, Inno Setup; "Publicar em Releases" **pulado** |
@@ -199,6 +199,13 @@ os testes, e marcados como resolvidos.
 |---|---|---|
 | 17 | Número confirmado manualmente, só vindo do Google, sobrevivia ao prazo de guarda | a confirmação e a cópia no histórico são apagadas se nenhuma fonte restante sustenta o número |
 | 18 | Nova análise de site sem WhatsApp mantinha o número da análise anterior | análise bem-sucedida sem WhatsApp remove a evidência anterior do site |
+
+**Rodada 5** (`04ac23b` → corrigida em `1a03ba9`; 5 testes, 4 falham no código anterior):
+
+| # | Problema | Correção |
+|---|---|---|
+| 19 | Variação por IA gerada para Alfa caía no rascunho de Beta se o destinatário mudasse durante a geração | resposta vinculada ao destinatário e ao rascunho de origem; descartada se mudaram |
+| 20 | Bloquear uma empresa não bloqueava o mesmo celular em outra empresa já cadastrada | as empresas que compartilham o número são recalculadas na hora; verificação final antes de abrir o WhatsApp |
 
 Migrações do banco nesta branch: v1 (estrutura), v2 (vínculos AI Studio), v3 (`wa_user_number`), v4
 (`phone2_e164`). Todas atômicas; bancos de versões anteriores são atualizados ao abrir.

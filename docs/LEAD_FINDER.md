@@ -118,7 +118,8 @@ copiar, enviar, receber resposta e enviar demonstração), notas, lembretes com 
 "acompanhamento" e aparece no painel), prioridade manual, confirmação manual de WhatsApp, edição manual de
 dados e vínculo com projetos e vídeos do AI Studio.
 
-**Não contatar:** bloqueia WhatsApp, mensagens e lembretes, conclui os lembretes abertos e grava telefone, CNPJ
+**Não contatar:** bloqueia WhatsApp, mensagens e lembretes (também em outras empresas que compartilham o mesmo
+telefone), conclui os lembretes abertos e grava telefone, CNPJ
 e domínio numa lista de supressão: novas pesquisas não trazem a empresa de volta. Para liberar, é preciso
 confirmar que a empresa autorizou. **Excluir dados** apaga a empresa e todo o histórico (opcionalmente
 mantendo a supressão).
@@ -191,7 +192,7 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_u
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 ```
 
-189 testes no módulo (96 originais + 93 de regressão das 4 revisões do Codex), rodando também no GitHub Actions, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
+194 testes no módulo (96 originais + 98 de regressão das 5 revisões do Codex), rodando também no GitHub Actions, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
 `tests/lead_finder/fixtures/`): telefones e `wa.me`, IBGE, palavras-chave, mensagens, IA (formato da
 requisição), HTTP (novas tentativas, cancelamento imediato, limite por host, logs sem chaves), OSM, Google
 (máscara de campos, limite de custo), BrasilAPI (minimização), importador da Receita com ZIP sintético
