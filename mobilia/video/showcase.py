@@ -12,8 +12,10 @@ Como todas as versões são a MESMA sala vista da mesma câmera, a câmera é um
 tempo): no *crossfade* e na revelação as duas imagens recebem exatamente o mesmo enquadramento, então paredes,
 janelas e portas ficam paradas e só os móveis e materiais se transformam, sem "imagem dupla".
 
-Formatos: ``16x9`` (1920×1080) e ``9x16`` (1080×1920). No vertical o recorte fica em volta do centro da imagem,
-puxado para onde o redesenho mais mudou a foto (os móveis), e a panorâmica percorre a sala (sensação de passeio).
+Formatos: ``16x9`` (1920×1080) e ``9x16`` (1080×1920). O quadro é sempre preenchido pela foto, sem barras: a fonte
+é recortada para a proporção de saída (no vertical, em volta do centro da imagem puxado para onde o redesenho mais
+mudou a foto, e a panorâmica percorre a sala; numa foto 4:3 no 16x9, a panorâmica vertical percorre a altura que o
+recorte deixou de fora).
 
 Rótulos opcionais na identidade 7xAi (marfim e latão, fonte Inter): "ANTES / Foto original" embaixo à esquerda,
 "DEPOIS / <estilo>" embaixo à direita (acompanham a imagem a que pertencem, então a revelação também "vira" o
@@ -170,37 +172,6 @@ def _cover(img: np.ndarray, w: int, h: int) -> np.ndarray:
     return np.ascontiguousarray(img)
 
 
-PAD_BELOW_ASPECT = 1.45     # fonte mais "alta" que isto (4:3, 5:4) no 16x9 ganha laterais desfocadas
-PAD_TO_ASPECT = 1.6         # ...até esta proporção: o recorte para 16:9 perde ~10% da altura, não 25%
-
-
-def _pad_fill(img: np.ndarray, aspect: float) -> tuple[np.ndarray, int]:
-    """Alarga a imagem até ``aspect`` com laterais feitas da própria foto (ampliada, bem desfocada e escurecida) e
-    uma emenda suave — no 16x9 uma foto 4:3 perdia teto e piso no recorte. Devolve a imagem e a margem (px)."""
-    H, W = img.shape[:2]
-    Wn = int(round(H * aspect))
-    if Wn <= W:
-        return img, 0
-    pad = (Wn - W) // 2
-    Wn = W + 2 * pad
-    bg = cv2.resize(img, (Wn, int(round(H * Wn / W))), interpolation=cv2.INTER_AREA)
-    y0 = (bg.shape[0] - H) // 2
-    bg = bg[y0:y0 + H]
-    bg = cv2.GaussianBlur(bg, (0, 0), 0.04 * Wn)
-    bg = (bg.astype(np.float32) * 0.55).astype(np.uint8)
-    out = bg.copy()
-    out[:, pad:pad + W] = img
-    feather = max(2, int(0.012 * W))
-    ramp = np.ones(Wn, np.float32)
-    ramp[:pad] = 0
-    ramp[pad + W:] = 0
-    ramp[pad:pad + feather] = smoothstep(np.linspace(0, 1, feather, dtype=np.float32))
-    ramp[pad + W - feather:pad + W] = smoothstep(np.linspace(1, 0, feather, dtype=np.float32))
-    a = ramp[None, :, None]
-    out = out.astype(np.float32) * a + bg.astype(np.float32) * (1 - a)
-    return np.clip(out + 0.5, 0, 255).astype(np.uint8), pad
-
-
 def unique_labels(names: list[str]) -> list[str]:
     """Rótulos repetidos (duas versões do mesmo estilo) ganham "· versão 2", "· versão 3"..."""
     seen: dict[str, int] = {}
@@ -279,11 +250,17 @@ def _camera(tl: Timeline, src_w: int, src_h: int, out_w: int, out_h: int, center
     cy = src_h * (0.5 + 0.35 * (center[1] - 0.5))
     pan_x = 0.10 * src_w if vertical else 0.035 * src_w
     pan_y = 0.03 * src_h
+    slack_y = max(0.0, src_h - out_h) / 2          # fonte mais alta que a saída (4:3 no 16x9): folga vertical
+    if slack_y > pan_y:
+        # a panorâmica vertical mostra parte do teto e do piso que o recorte deixou de fora (sem barras)
+        pan_y = min(slack_y, max(pan_y, 0.55 * slack_y))
     if vertical:   # deixa margem dos dois lados para a panorâmica simétrica
         cx = float(np.clip(cx, out_w / 2 + pan_x, src_w - out_w / 2 - pan_x)) if src_w > out_w + 2 * pan_x \
             else src_w / 2
     cx = float(np.clip(cx, out_w / 2, src_w - out_w / 2))
     cy = float(np.clip(cy, out_h / 2, src_h - out_h / 2))
+    if slack_y > 0.03 * src_h:                      # centra o recorte para a panorâmica ter os dois lados
+        cy = float(np.clip(cy, out_h / 2 + 0.5 * pan_y, src_h - out_h / 2 - 0.5 * pan_y))
     mid = (1.0 + zoom) / 2
     ts, zs = [0.0], [1.0]
     n = len(tl.shots)
@@ -298,6 +275,8 @@ def _camera(tl: Timeline, src_w: int, src_h: int, out_w: int, out_h: int, center
     m = len(ts)
     pxs = [float(v) for v in np.linspace(-0.85, 0.85, m)]
     pys = [0.0] + [(-0.4 if i % 2 == 0 else 0.25) for i in range(m - 1)]
+    if slack_y > 0.03 * src_h:      # 4:3 no 16x9: desce devagar do teto para o piso ao longo do vídeo
+        pys = [float(v) for v in np.linspace(-0.8, 0.8, m)]
     return Camera(src_w, src_h, out_w, out_h, cx, cy, ts, zs, pxs, pys, (pan_x, pan_y), zoom)
 
 
@@ -548,12 +527,8 @@ class Showcase:
         imgs = [_cover(a, w0, h0) for a in imgs]
         bef = _cover(_load_rgb(before), w0, h0)
         center = _change_center(bef, imgs)
-        if self.fmt == "16x9" and w0 / h0 < PAD_BELOW_ASPECT:
-            padded = [_pad_fill(x, PAD_TO_ASPECT) for x in [bef] + imgs]
-            pad = padded[0][1]
-            bef, imgs = padded[0][0], [p for p, _ in padded[1:]]
-            center = ((pad + center[0] * w0) / (w0 + 2 * pad), center[1])
-            w0 = bef.shape[1]
+        # o quadro é SEMPRE preenchido pela foto (nada de laterais escuras/desfocadas): numa fonte mais "alta" que
+        # a saída (4:3 no 16x9) o recorte perde altura, e a câmera percorre essa folga devagar (ver ``_camera``)
         # escala da fonte: o maior recorte com a proporção de saída cabe exatamente no quadro de saída (≈1:1)
         k = max(self.W / w0, self.H / h0)
         sw, sh = int(math.ceil(w0 * k)), int(math.ceil(h0 * k))

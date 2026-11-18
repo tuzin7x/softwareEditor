@@ -264,8 +264,25 @@ def test_duplicate_labels_get_version_suffix():
         "Contemporâneo", "Contemporâneo · versão 2", "Luxo", ""]
 
 
-def test_4x3_source_is_padded_not_cropped_hard():
-    before = _stripes()
-    before = cv2.resize(before, (640, 480))
-    sc = S.Showcase(before, [_flat(COLORS[0], 640, 480)], "16x9", show_labels=False, brand=False)
-    assert sc.cam.src_w / sc.cam.src_h == pytest.approx(S.PAD_TO_ASPECT, rel=0.01)
+def test_4x3_source_fills_16x9_frame_without_bars():
+    """Foto 4:3 no 16x9: nada de laterais escuras/desfocadas; o quadro inteiro é foto, e a câmera percorre na
+    vertical a altura que o recorte deixou de fora."""
+    before = cv2.resize(_stripes(), (640, 480))
+    after = np.clip(before.astype(int) + 25, 0, 255).astype(np.uint8)
+    sc = S.Showcase(before, [after], "16x9", show_labels=False, brand=False)
+    assert sc.cam.src_w / sc.cam.src_h == pytest.approx(640 / 480, rel=0.01)       # nenhuma margem inventada
+    for i in (0, sc.n_frames // 2, sc.n_frames - 1):
+        f = sc.frame(i).astype(np.float32)
+        for cols in (f[:, :40], f[:, -40:]):                  # bordas laterais com a mesma luz e textura da foto
+            assert cols.mean() > 0.8 * f.mean() and cols.std() > 0.5 * f[:, 940:980].std()
+    ys = [sc.cam.rect(t)[1] for t in np.linspace(0, sc.tl.total, 40)]
+    assert max(ys) - min(ys) > 0.15 * (sc.cam.src_h - sc.cam.src_w * 1080 / 1920)   # percorre a folga vertical
+    assert np.abs(np.diff(ys)).max() < 0.03 * sc.cam.src_h
+
+
+def test_vertical_from_landscape_fills_frame():
+    before = np.random.default_rng(2).integers(90, 255, (480, 640, 3), dtype=np.uint8)
+    sc = S.Showcase(before, [before], "9x16", show_labels=False, brand=False)
+    f = sc.frame(0).astype(np.float32)
+    assert f.shape == (1920, 1080, 3)
+    assert f[:60].mean() > 0.8 * f.mean() and f[-60:].mean() > 0.8 * f.mean()
