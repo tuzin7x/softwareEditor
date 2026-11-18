@@ -5,6 +5,7 @@ import threading
 import traceback
 
 from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
                                QTextEdit, QVBoxLayout)
 
@@ -28,7 +29,7 @@ def intro_text(state: dict) -> tuple[str, str]:
 
 
 def _chip(icon: str, text: str) -> QFrame:
-    """Etiqueta grafite com filete latão: um fato da instalação, fácil de ler de relance."""
+    """Etiqueta escura com filete violeta: um fato da instalação, fácil de ler de relance."""
     f = QFrame(); f.setObjectName("chip")
     row = QHBoxLayout(f); row.setContentsMargins(12, 6, 14, 6); row.setSpacing(8)
     ic = QLabel(); ic.setPixmap(theme.line_icon(icon, 14, theme.ACCENT_HI).pixmap(14, 14))
@@ -56,11 +57,9 @@ class SetupDialog(QDialog):
                                             bootstrap.payload_fingerprints(runtime.payload_root()))
         title, text = intro_text(state)
         head = QHBoxLayout(); head.setSpacing(0)
-        icon = QLabel(); icon.setPixmap(brand.app_icon_pixmap(40, self.devicePixelRatioF() or 2.0))
-        mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(24)); mark.setAccessibleName(APP_NAME)
+        mark = QLabel(); mark.setPixmap(brand.lockup_pixmap(34)); mark.setAccessibleName(APP_NAME)
         rule = QFrame(); rule.setObjectName("vrule"); rule.setFixedSize(1, 18)
         cap = QLabel("INSTALAÇÃO DO MOTOR"); cap.setObjectName("section"); theme.tracked(cap)
-        head.addWidget(icon, 0, Qt.AlignVCenter); head.addSpacing(14)
         head.addWidget(mark, 0, Qt.AlignVCenter); head.addSpacing(18); head.addWidget(rule, 0, Qt.AlignVCenter)
         head.addSpacing(18); head.addWidget(cap, 0, Qt.AlignVCenter); head.addStretch(1)
         t = QLabel(title)
@@ -94,6 +93,8 @@ class SetupDialog(QDialog):
         lay.addLayout(chips); lay.addSpacing(22)
         lay.addWidget(card); lay.addSpacing(24)
         lay.addLayout(row)
+        # textos com quebra de linha: o QDialog calcula a altura mínima sem eles e espremia o cartão do progresso
+        self.resize(self.minimumWidth(), lay.totalHeightForWidth(self.minimumWidth()))
         self.bridge = _Bridge()
         self.bridge.progress.connect(self._on_progress)
         self.bridge.done.connect(self._on_done)
@@ -102,6 +103,14 @@ class SetupDialog(QDialog):
     def showEvent(self, e):  # noqa: N802
         super().showEvent(e)
         theme.dark_title_bar(self)
+
+    def paintEvent(self, e):  # noqa: N802
+        """Fundo HUD (halo violeta + grade), como a janela principal."""
+        dpr = self.devicePixelRatioF() or 1.0
+        cache = getattr(self, "_backdrop", None)
+        if cache is None or cache.deviceIndependentSize().toSize() != self.size():
+            cache = self._backdrop = theme.backdrop_pixmap(self.width(), self.height(), dpr)
+        p = QPainter(self); p.drawPixmap(0, 0, cache); p.end()
 
     def start(self) -> None:
         self.btn.setEnabled(False); self.btn.setText("Instalando…")

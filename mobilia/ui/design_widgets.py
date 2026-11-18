@@ -65,9 +65,7 @@ STYLE_HINTS: dict[str, str] = {
 
 
 def _font(px: int, weight=QFont.Normal, family: str | None = None) -> QFont:
-    f = QFont(family or "Inter")
-    f.setPixelSize(px); f.setWeight(weight)
-    return f
+    return theme.font(px, weight, family)
 
 
 def fit_rect(src: QSize, box: QRectF) -> QRectF:
@@ -98,7 +96,7 @@ def cover_pixmap(pm: QPixmap, w: int, h: int, radius: float = 8.0, dpr: float = 
 # ---------------------------------------------------------------------------------------- botões
 
 class CardButton(QAbstractButton):
-    """Cartão clicável e marcável, pintado à mão (fundo, filete, latão quando marcado)."""
+    """Cartão clicável e marcável, pintado à mão (fundo, filete, violeta quando marcado)."""
 
     RADIUS = 12
 
@@ -118,12 +116,19 @@ class CardButton(QAbstractButton):
     def _paint_frame(self, p: QPainter) -> QRectF:
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         on = self.isChecked()
-        bg = QColor(theme.SELECTED_BG if on else ("#202025" if self._hover else theme.TILE))
-        border = QColor(theme.ACCENT if on else (theme.HAIRLINE_STRONG if self._hover else theme.HAIRLINE))
+        bg = QColor(theme.SELECTED_BG if on else (theme.TILE_HOVER if self._hover else theme.TILE))
+        border = QColor(theme.ACCENT if on else (theme.ACCENT_LINE if self._hover else theme.HAIRLINE))
         if not self.isEnabled():
             bg, border = QColor(theme.SURFACE), QColor(theme.HAIRLINE)
         p.setPen(QPen(border, 1.0)); p.setBrush(bg)
         p.drawRoundedRect(r, self.RADIUS, self.RADIUS)
+        if on and self.isEnabled():   # "bg-hud" do site: brilho violeta no canto superior esquerdo
+            g = QLinearGradient(r.topLeft(), r.bottomRight())
+            c0 = QColor(theme.ACCENT); c0.setAlphaF(0.20)
+            c1 = QColor(theme.ACCENT); c1.setAlphaF(0.0)
+            g.setColorAt(0.0, c0); g.setColorAt(0.55, c1)
+            p.setPen(Qt.NoPen); p.setBrush(g)
+            p.drawRoundedRect(r, self.RADIUS, self.RADIUS)
         if self.hasFocus() and not on:
             c = QColor(theme.ACCENT); c.setAlphaF(0.5)
             p.setPen(QPen(c, 1.0)); p.setBrush(Qt.NoBrush)
@@ -154,7 +159,7 @@ class FunctionCard(CardButton):
         pad = 14
         state = "dis" if not self.isEnabled() else ("on" if self.isChecked() else "off")
         p.drawPixmap(QPointF(r.left() + pad, r.top() + pad - 2), self._pix[state])
-        p.setFont(_font(13, QFont.DemiBold))
+        p.setFont(_font(14, QFont.DemiBold, theme.DISPLAY_FAMILY))
         p.setPen(QColor(theme.TEXT if self.isEnabled() else theme.DISABLED))
         title_y = r.top() + pad + 34
         p.drawText(QRectF(r.left() + pad, title_y, r.width() - 2 * pad, 18), Qt.AlignLeft | Qt.AlignVCenter,

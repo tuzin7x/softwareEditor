@@ -81,7 +81,7 @@ mobilia/__main__.py, packaging/launcher.py
 | `mobilia/ui/modules.py` | Registro de módulos: `ModuleSpec`, `register()`, `ModuleHost`. **Não editar** (ver seção 9). |
 | `mobilia/modules/__init__.py` | Descobre e importa os subpacotes de módulos. Um módulo quebrado é ignorado. |
 | `mobilia/ui/runner.py` | `CliTask`: roda o motor (`python -m mobilia.cli <cmd> --json`) num subprocesso e lê eventos JSON. |
-| `mobilia/ui/theme.py`, `brand.py` | Cores (tokens), folha de estilo global (QSS), fontes Inter, ícones de linha. |
+| `mobilia/ui/theme.py`, `brand.py` | Cores (tokens), folha de estilo global (QSS), fontes Exo 2 / IBM Plex Sans / JetBrains Mono, ícones de linha. |
 | `mobilia/ui/widgets.py` | `on_click`, `StepHeader`, `rule`, `tracked_label`, `ImageView`, `DropZone`, `StatusBar`. |
 | `mobilia/ui/design_widgets.py` | `Segmented`, `chip`, `CardButton`, comparador antes/depois, editor de máscara. |
 | `mobilia/ui/legacy.py` | Janela do modo legado (vídeo de montagem). |

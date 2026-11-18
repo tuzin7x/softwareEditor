@@ -31,8 +31,8 @@ from .design_widgets import (FUNCTION_INFO, FUNCTION_ORDER, STYLE_HINTS, BeforeA
 from .legacy import StageList
 from .modules import ModuleHost
 from .runner import CliResult, CliTask, HardwareProbe
-from .widgets import (PHOTO_FILTER, DropZone, ImageView, StatusBar, StepHeader, human_size, on_click, paint_chip,
-                      rule, tracked_label)
+from .widgets import (PHOTO_FILTER, Backdrop, DropZone, ImageView, StatusBar, StepHeader, human_size, on_click,
+                      paint_chip, rule, tracked_label)
 
 __all__ = ["MainWindow", "DesignRequest", "DesignOutcome", "CATALOG", "main", "upscale_args", "showcase_args",
            # reexportados (código antigo importava daqui)
@@ -200,8 +200,8 @@ class Stepper(QWidget):
 
     def paintEvent(self, e):  # noqa: N802
         p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
-        f = QFont("Inter"); f.setPixelSize(12); f.setWeight(QFont.Medium)
-        fn = QFont("Inter Display"); fn.setPixelSize(11); fn.setWeight(QFont.DemiBold)
+        f = theme.font(12, QFont.Medium)
+        fn = theme.font(11, QFont.DemiBold, theme.MONO_FAMILY)
         fm = QFontMetrics(f)
         n = len(self.LABELS)
         widths = [26 + 8 + fm.horizontalAdvance(t) for t in self.LABELS]
@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self); self.timer.timeout.connect(self._tick)
 
         self.modules = ModuleHost(self)                # módulos opcionais (mobilia/modules); sem eles, nada muda
-        root = QWidget(); root.setObjectName("root"); self.setCentralWidget(root)
+        root = Backdrop(); self.setCentralWidget(root)
         outer = QVBoxLayout(root); self.outer = outer
         outer.setContentsMargins(32, 18, 32, 18); outer.setSpacing(14)
         outer.addLayout(self._build_header())
@@ -368,7 +368,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------------------------------ montagem
     def _build_header(self) -> QHBoxLayout:
         head = QHBoxLayout(); head.setSpacing(0); head.setContentsMargins(2, 4, 0, 0)
-        mark = QLabel(); mark.setPixmap(brand.wordmark_pixmap(30)); mark.setToolTip(APP_NAME)
+        mark = QLabel(); mark.setPixmap(brand.lockup_pixmap(34)); mark.setToolTip(APP_NAME)
         mark.setAccessibleName(APP_NAME)
         vr = QFrame(); vr.setObjectName("vrule"); vr.setFixedSize(1, 22)
         tag = QLabel(TAGLINE); tag.setObjectName("tagline")

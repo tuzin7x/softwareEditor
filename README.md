@@ -255,7 +255,9 @@ precisam do PyTorch e de outras bibliotecas pesadas são pulados ali.
 - Modelos de IA: só licenças comerciais ([`docs/LICENCAS_V3.md`](docs/LICENCAS_V3.md)), baixados no primeiro uso e
   nunca guardados no repositório.
 - Assets 3D do modo legado: Poly Haven (CC0) e assets procedurais próprios. Blender/bpy (GPL) roda num processo
-  separado. FFmpeg: GPL, build com x264. Fontes Inter: SIL OFL (`mobilia/ui/fonts/OFL.txt`).
+  separado. FFmpeg: GPL, build com x264. Fontes Exo 2, IBM Plex Sans e JetBrains Mono: SIL OFL 1.1
+  (`mobilia/ui/fonts/OFL-*.txt`), arquivos do repositório google/fonts. Identidade visual (cores, emblema 7x)
+  compartilhada com o site 7x Intelligence, do mesmo dono.
 - As fotos de `tests/fixtures/photos` são CC BY-SA (ver
   [`tests/fixtures/photos/ATRIBUICOES.md`](tests/fixtures/photos/ATRIBUICOES.md)) e servem só para testes e
   exemplos. As capturas de tela em `docs/img/` foram geradas do programa real, com dados fictícios.

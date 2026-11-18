@@ -61,7 +61,7 @@ mobilia/modules/lead_finder/
 - **Nenhuma rede nem banco na thread da interface.** O banco tem uma thread dedicada (`DbService`); pesquisas,
   importação, análise de sites, IBGE, BrasilAPI, Google e IA rodam em `Task` (thread + cancelamento). Os
   resultados voltam para a interface por um `Signal` (conexão enfileirada), como o `CliTask` do 7xAi.
-- Visual: tokens de `mobilia/ui/theme.py` (cores, fontes Inter, QSS global) e `Segmented` de `design_widgets`.
+- Visual: tokens de `mobilia/ui/theme.py` (cores, fontes Exo 2 / IBM Plex Sans / JetBrains Mono, QSS global) e `Segmented` de `design_widgets`.
   A folha de estilo do módulo (`ui/style.py`) só complementa o que o QSS global não cobre (tabela, cabeçalho,
   listas, campos de data) e é aplicada apenas à página. Cartões "vidro" com gradiente translúcido e brilho
   suave; transição de opacidade entre abas; números animados no painel.

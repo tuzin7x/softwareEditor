@@ -206,7 +206,7 @@ class DropZone(QFrame):
 
 
 class StepHeader(QWidget):
-    """Cabeçalho de passo: número em latão, título espaçado e um visto quando concluído."""
+    """Cabeçalho de passo: número em violeta, título espaçado e um visto quando concluído."""
 
     def __init__(self, num: str, title: str):
         super().__init__()
@@ -234,7 +234,7 @@ class StatusBar(QStatusBar):
 
     def __init__(self):
         super().__init__()
-        self.dot = theme.MUTED          # estado da GPU: sálvia pronta, latão modo CPU, vermelho erro
+        self.dot = theme.MUTED          # estado da GPU: verde pronta, violeta modo CPU, vermelho erro
         self.dot_tip = ""
 
     def set_dot(self, color: str, tip: str = "") -> None:
@@ -261,6 +261,31 @@ class StatusBar(QStatusBar):
             p.setPen(self.palette().windowText().color())
             text = self.fontMetrics().elidedText(msg, Qt.ElideMiddle, max(0, right - left))
             p.drawText(left, 0, right - left, self.height(), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.end()
+
+
+class Backdrop(QWidget):
+    """Fundo da janela na identidade 7x Intelligence: halo violeta e grade técnica (``theme.paint_backdrop``).
+
+    O desenho é feito uma única vez num QPixmap por tamanho de janela; cada repintura só copia o recorte."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("root")
+        self._cache: QPixmap | None = None
+
+    def resizeEvent(self, e):  # noqa: N802
+        self._cache = None
+        super().resizeEvent(e)
+
+    def paintEvent(self, e):  # noqa: N802
+        dpr = self.devicePixelRatioF() or 1.0
+        if self._cache is None or self._cache.deviceIndependentSize().toSize() != self.size() \
+                or self._cache.devicePixelRatio() != dpr:
+            self._cache = theme.backdrop_pixmap(self.width(), self.height(), dpr)
+        p = QPainter(self)
+        r = e.rect()
+        p.drawPixmap(r, self._cache, QRectF(r.x() * dpr, r.y() * dpr, r.width() * dpr, r.height() * dpr).toRect())
         p.end()
 
 
