@@ -1,6 +1,7 @@
 [project]
 name = "mobilia-studio"
-version = "0.1.0"
+# A versão vem de mobilia/__init__.py (__version__): é a fonte única (ver docs/RELEASES.md).
+dynamic = ["version"]
 description = "Decoração virtual cinematográfica em vídeo a partir de uma única foto, 100% local (GPU NVIDIA)."
 requires-python = ">=3.13"
 readme = "README.md"
@@ -10,6 +11,9 @@ mobilia = "mobilia.cli:main"
 
 [project.gui-scripts]
 mobilia-studio = "mobilia.ui.app:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "mobilia.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["mobilia*"]

@@ -50,7 +50,8 @@ git push -u origin feature/lead-finder
 
 Se a sessão recusar o push de `feature/lead-finder` (algumas sessões só podem enviar branches `claude/...`), use
 `claude/lead-finder` no lugar; o Pull Request e as regras são os mesmos. Observação: push em `claude/**` também
-dispara o `build-windows.yml`, que gera o `.exe` mas não publica nada sem `[release]`.
+dispara o `build-windows.yml`, que gera o `.exe` só como artefato (builds de desenvolvimento nunca publicam
+Release; ver `docs/RELEASES.md`).
 
 Confira se a base está certa: `git log -1 --oneline` deve mostrar `435a87b`, e `mobilia/ui/modules.py` e
 `tests/test_modules.py` devem existir.
@@ -324,11 +325,11 @@ Nunca use `git push --force`, `git reset --hard` em branch publicada nem reescri
   `packaging/build_windows.ps1`, que usa o PyInstaller com `packaging/7xai.spec`. O resultado é
   `dist\7xAi\7xAi.exe`, já instalado em `%LOCALAPPDATA%\Programs\7xAi`, com atalho na Área de Trabalho. Com o
   Inno Setup 6 instalado, também sai `dist\7xAi-Setup-<versão>.exe`.
-- **GitHub Actions:** `build-windows.yml` gera o `.exe` e o instalador a cada push em `claude/**` e em `main`, e
-  manualmente por "Run workflow" em qualquer branch.
-  - Uma prerelease é publicada só com `[release]` na mensagem do commit ou com "publicar" marcado no disparo
-    manual.
-  - **A segunda conta não deve usar `[release]` nem "publicar"**: publicar é decisão da sessão principal.
+- **GitHub Actions:** `build-windows.yml` gera o `.exe` e o instalador a cada push em `claude/**`, `feature/**` e
+  `main`, e manualmente por "Run workflow", **só como artefatos** da execução. Ele nunca publica Release.
+  - Versões oficiais saem só do `release.yml`, disparado à mão pelo dono a partir da `main`, com a versão de
+    `mobilia/__init__.py` e a seção do `CHANGELOG.md` (passo a passo em `docs/RELEASES.md`).
+  - **Nenhuma das sessões publica Release:** publicar é decisão do dono.
 - O `.exe` contém só a interface. O motor de IA (vários GB) é instalado no primeiro uso. Um módulo puramente de
   interface, como o Lead Finder, entra no `.exe` automaticamente pelo `collect_submodules`.
 

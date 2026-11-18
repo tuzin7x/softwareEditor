@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller (onedir, janela): gera dist\7xAi\7xAi.exe. O .exe contém SÓ a interface (PySide6, ~150 MB).
+# PyInstaller (janela). Padrão onedir: gera dist\7xAi\7xAi.exe (é o que o instalador empacota).
+# Com a variável SEVENXAI_ONEFILE=1 gera o PORTÁTIL de arquivo único dist\7xAi.exe (mesmo conteúdo, extraído numa
+# pasta temporária a cada abertura); use outra --distpath/--workpath para não misturar com o onedir.
+# O .exe contém SÓ a interface (PySide6, ~150 MB).
 # O motor pesado (PyTorch CUDA, Blender bpy, modelos) é instalado no primeiro uso a partir do
 # "payload" abaixo (código-fonte do pacote mobilia + requirements). Gerar com:
 #   pyinstaller --noconfirm packaging/7xai.spec
 # Obs.: o pacote Python continua "mobilia" e os dados continuam em %LOCALAPPDATA%\MobiliaStudio
 # (o motor de vários GB já instalado é reaproveitado); só o nome visível e o .exe viraram 7xAi.
+import os
 import sys
 from pathlib import Path
 
@@ -30,6 +34,12 @@ a = Analysis([str(ROOT / "packaging" / "launcher.py")], pathex=[str(ROOT)], data
                             "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"],
              excludes=excludes, noarchive=False)
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=EXE_NAME, console=False,
-          icon=str(ROOT / "packaging" / "assets" / "icon.ico"), version=build_version_info(ROOT), upx=False)
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=EXE_NAME)
+ICON = str(ROOT / "packaging" / "assets" / "icon.ico")
+if os.environ.get("SEVENXAI_ONEFILE") == "1":
+    # portátil: um único .exe com tudo dentro (binários e dados entram no próprio EXE, sem COLLECT)
+    exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name=EXE_NAME, console=False, icon=ICON,
+              version=build_version_info(ROOT), upx=False, strip=False, runtime_tmpdir=None)
+else:
+    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=EXE_NAME, console=False, icon=ICON,
+              version=build_version_info(ROOT), upx=False)
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=EXE_NAME)

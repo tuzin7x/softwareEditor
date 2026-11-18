@@ -45,3 +45,7 @@ def build_version_info(root: Path):
                           subtype=0x0, date=(0, 0)),
         kids=[StringFileInfo([StringTable("041604B0", strings)]),     # 0x0416 = português (Brasil)
               VarFileInfo([VarStruct("Translation", [0x0416, 1200])])])
+
+
+if __name__ == "__main__":  # usado pelos workflows: imprime a versão do código (fonte única)
+    print(app_version(Path(__file__).resolve().parents[1]))
