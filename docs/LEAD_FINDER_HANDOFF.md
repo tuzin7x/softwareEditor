@@ -77,8 +77,8 @@ Resultado nesta branch (`ce0c00c`, depois do merge com `eaee226` e das correçõ
 | `tests/test_modules.py` + `tests/test_ui.py` + `tests/lead_finder` (local) | **237 passaram** |
 | Suíte rápida inteira (local, instalação completa do `tests.yml`) | **882 passaram, 257 pulados, 4 falharam** (em `799dc54`): as mesmas 4 falhas da base (`ModuleNotFoundError` de `torch`/`huggingface_hub`), que **falham igualmente em `claude/sweet-bohr-4uzml2` sem o Lead Finder** |
 | GitHub Actions, "Testes (CPU)" | **298 passaram** em `07c8371` (123 da lista original + 175 do Lead Finder). Antes de `ce0c00c` o CI rodava só os 123 e nenhum teste do módulo |
-| GitHub Actions, "Build Windows" (manual, `publicar=false`, run 44202166745) | **sucesso**: PyInstaller, autoteste do `.exe`, Inno Setup; "Publicar em Releases" **pulado** |
-| Conteúdo do `.exe` (artefato `7xAi-onedir` baixado, SHA-256 conferido) | os 39 módulos do Lead Finder estão no `PYZ` do `7xAi.exe`, com o código corrigido; `sqlite3`, `ssl` (`_ssl.pyd`, `_sqlite3.pyd`), `urllib.robotparser`, `html.parser`, `zipfile` e `csv` presentes; nenhuma biblioteca do motor |
+| GitHub Actions, "Build Windows" (manual, `publicar=false`) | **sucesso** nos runs 44202166745 (`ce0c00c`), 44207455036 (`b2e3e65`) e no **final 44209048501 (`1781557`, todas as correções)**: PyInstaller, autoteste do `.exe`, Inno Setup; "Publicar em Releases" **pulado** em todos |
+| Conteúdo do `.exe` final (artefato `7xAi-onedir` do run 44209048501, SHA-256 `3ef32047…` conferido) | os 39 módulos do Lead Finder estão no `PYZ` do `7xAi.exe` com as correções das 5 rodadas (conferido no bytecode); `sqlite3`, `ssl` (`_ssl.pyd`, `_sqlite3.pyd`), `urllib.robotparser`, `html.parser`, `zipfile` e `csv` presentes; nenhuma biblioteca do motor |
 
 ## 6. Pendências e testes reais que ainda faltam
 
@@ -97,7 +97,7 @@ O que **não** dá para afirmar sem testar com contas, chaves e um PC Windows de
 
 ### Roteiro dos testes reais (no Windows, com o `.exe` de teste)
 
-Baixe o artefato `7xAi-onedir` (ou `7xAi-Setup`) do run 44202166745 em Actions › Build Windows. Use uma pasta de
+Baixe o artefato `7xAi-onedir` (ou `7xAi-Setup`) do run **44209048501** em Actions › Build Windows. Use uma pasta de
 dados limpa, se quiser isolar: defina `MOBILIA_HOME` antes de abrir.
 
 **A. Abrir o módulo no executável**
@@ -206,6 +206,9 @@ os testes, e marcados como resolvidos.
 |---|---|---|
 | 19 | Variação por IA gerada para Alfa caía no rascunho de Beta se o destinatário mudasse durante a geração | resposta vinculada ao destinatário e ao rascunho de origem; descartada se mudaram |
 | 20 | Bloquear uma empresa não bloqueava o mesmo celular em outra empresa já cadastrada | as empresas que compartilham o número são recalculadas na hora; verificação final antes de abrir o WhatsApp |
+
+**Rodada 6** (`1a03ba9`): **nenhum problema encontrado** ("Didn't find any major issues"). Total: 20 problemas P2
+apontados em 5 rodadas, todos corrigidos, com testes de regressão e threads resolvidos.
 
 Migrações do banco nesta branch: v1 (estrutura), v2 (vínculos AI Studio), v3 (`wa_user_number`), v4
 (`phone2_e164`). Todas atômicas; bancos de versões anteriores são atualizados ao abrir.
