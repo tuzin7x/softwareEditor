@@ -1,7 +1,11 @@
 # Desenvolvimento paralelo no 7xAi
 
-Este guia é para uma **segunda sessão de desenvolvimento** (outra conta do Claude ou outra pessoa) que vai criar um
-módulo novo do 7xAi, o **7xAi Lead Finder**, sem atrapalhar o trabalho principal no motor de redesenho e de vídeo.
+Este guia é para uma **segunda sessão de desenvolvimento** (outra conta ou outra pessoa) que vai criar um módulo
+novo do 7xAi sem atrapalhar o trabalho principal no motor de redesenho e de vídeo.
+
+> **Atualização (18/11/2026):** o primeiro módulo feito por este processo, o **7xAi Lead Finder**, já foi
+> **integrado** na branch de integração (PR #1, merge `264dd9f`). As regras abaixo continuam valendo para os
+> próximos módulos; onde o texto fala do Lead Finder no futuro, leia como o exemplo que já passou pelo processo.
 
 Leia nesta ordem: este arquivo, depois o [`README.md`](../README.md), o [`RESUME.md`](../RESUME.md) e as seções 11 e
 12 de [`docs/ARQUITETURA.md`](ARQUITETURA.md).
@@ -26,15 +30,17 @@ Leia nesta ordem: este arquivo, depois o [`README.md`](../README.md), o [`RESUME
   - `tests.yml` roda os testes rápidos.
   - `build-windows.yml` gera o `.exe` e o instalador.
 - **Ponto de extensão para abas novas:** o registro de módulos (`mobilia/ui/modules.py` e o pacote
-  `mobilia/modules/`) já existe e está testado (`tests/test_modules.py`). **Nenhum módulo está incluído.** Sem
-  módulos, a janela é exatamente a de antes.
+  `mobilia/modules/`) existe e está testado (`tests/test_modules.py`). **Módulo incluído: `lead_finder`**
+  (`docs/LEAD_FINDER.md`). Sem módulos, a janela seria exatamente a de antes. Um módulo que usa a internet
+  declara `local=False` no `ModuleSpec` para o cabeçalho esconder o selo "Processado no seu computador".
 
 ## 2. Branch e commit de base
 
 | Item | Valor |
 |---|---|
 | Branch de integração (desenvolvimento) | `claude/sweet-bohr-4uzml2` |
-| Commit de base para o Lead Finder | **`435a87bdfb0c2a75a3d334db24f889027049deb8`** (curto: `435a87b`) |
+| Commit de base para o Lead Finder (histórico; já integrado) | **`435a87bdfb0c2a75a3d334db24f889027049deb8`** (curto: `435a87b`); a branch foi criada de `54a55ab` |
+| Base para um **módulo novo** | a ponta atual de `claude/sweet-bohr-4uzml2` (ou da `main`, depois da promoção) |
 | Branch do novo módulo | `feature/lead-finder` (criada a partir do commit de base) |
 | `main` | **não usar**: está desatualizada de propósito (ver seção 13) |
 
@@ -174,12 +180,13 @@ Comportamento garantido pelo registro (os três primeiros itens são testados em
 - `docs/LEAD_FINDER*.md`: documentação do módulo.
 - **Dependências:** prefira a biblioteca padrão (`urllib`, `json`, `csv`, `sqlite3`) e o PySide6 (inclusive
   `QtNetwork`). Não existe arquivo de requisitos próprio do módulo: o `.exe` e o CI só instalam
-  `requirements/ui.txt` e a linha `pip install` do `tests.yml`. Uma dependência nova e **inevitável** precisa
-  entrar nesses dois lugares, senão o módulo cai em `failed` no `.exe` sem aviso e o CI falha. **Não edite esses
+  `packaging/ci/requirements-build.txt` e `packaging/ci/requirements-tests.txt` (versões fixas). Uma dependência
+  nova e **inevitável** precisa entrar nesses dois lugares, senão o módulo cai em `failed` no `.exe` sem aviso e o CI falha. **Não edite esses
   arquivos:** peça a inclusão à sessão principal no PR, com a justificativa (pacote pip novo muda o `.exe`).
 - Fora disso, **só linhas acrescentadas** e quando não houver alternativa, sempre explicadas no PR. Exemplos:
   - uma entrada em `datas` ou `hiddenimports` de `packaging/7xai.spec`;
-  - o caminho `tests/lead_finder` a mais na lista de `.github/workflows/tests.yml`.
+  - (não é mais preciso mexer no `tests.yml`: desde a integração do Lead Finder o CI roda a suíte rápida de
+    todo o `tests/`, inclusive subpastas como `tests/<módulo>/`).
 
 ## 6. Arquivos e componentes que a segunda conta NÃO DEVE modificar
 
@@ -195,7 +202,7 @@ principal:
 - `mobilia/cli.py`: um subcomando novo só por combinação prévia com a sessão principal e só por acréscimo.
 - `mobilia/ui/app.py`, `legacy.py`, `runner.py`, `theme.py`, `brand.py`, `widgets.py`, `design_widgets.py`,
   `setup_dialog.py` e `modules.py`: a integração acontece **só pelo registro**.
-- `packaging/*` (exceto linhas acrescentadas, ver seção 5), `GERAR_EXE.bat`, `.github/workflows/build-windows.yml`.
+- `packaging/*` (exceto linhas acrescentadas, ver seção 5), `GERAR_EXE.bat`, `.github/workflows/*.yml`.
 - `requirements/**` (inclusive `ui.txt` e `dev.txt`; ver "Dependências" na seção 5), `pyproject.toml`.
 - `mobilia/__init__.py` (versão), `mobilia/__main__.py`, `mobilia/modules/__init__.py` (descoberta),
   `mobilia/photo.py`, `mobilia/diagnostics.py`, `mobilia/telemetry.py`.
@@ -294,11 +301,11 @@ anônimas.
    - a lista de arquivos fora de `mobilia/modules/lead_finder/` que foram tocados, com o motivo;
    - as dependências novas, se houver;
    - como testar.
-5. O `tests.yml` roda uma lista fixa de arquivos de teste rápidos (inclusive `tests/test_ui.py` e
-   `tests/test_modules.py`) a cada push em `claude/**`, `feature/**` e `main`, e em PRs para `claude/**` e `main`.
-   Peça no PR a inclusão de `tests/lead_finder` nessa lista (seção 5). Para gerar um `.exe` de teste da
-   branch, use **Actions › Build Windows › Run workflow**, escolhendo `feature/lead-finder` e deixando "publicar"
-   desmarcado.
+5. O `tests.yml` roda a suíte rápida de todo o `tests/` (`-m "not slow and not models and not gpu"`) a cada push
+   em `claude/**`, `feature/**` e `main`, e em PRs para `claude/**` e `main`; os testes do módulo em
+   `tests/<módulo>/` entram sozinhos. Para gerar um `.exe` de teste da branch, use **Actions › Build Windows ›
+   Run workflow** escolhendo a sua branch (o workflow só gera artefatos; não publica nada). O build confere com
+   `scripts/check_bundle.py` que todos os arquivos de `mobilia/modules/` estão no executável.
 6. A sessão principal revisa, integra na branch de desenvolvimento e atualiza README, RESUME e ARQUITETURA.
 
 ## 9. Conflitos: como evitar e como resolver
@@ -371,9 +378,10 @@ Use `mobilia.runtime.app_home() / "lead_finder"` para os arquivos do módulo, co
 configurações. Essa função respeita `MOBILIA_HOME` nos testes. Importar só `mobilia.runtime` é permitido: ele não
 traz bibliotecas do motor.
 
-## 12. Escopo do Lead Finder (planejado, para referência)
+## 12. Escopo do Lead Finder (integrado)
 
-O módulo vai incluir:
+Planejado e entregue (detalhes e o que ainda falta testar ao vivo em `docs/LEAD_FINDER.md` §12 e
+`docs/LEAD_FINDER_HANDOFF.md` §6):
 
 - pesquisa de imobiliárias por estado e cidade, com várias palavras-chave;
 - integração com fontes autorizadas de dados empresariais;
@@ -383,19 +391,17 @@ O módulo vai incluir:
 - CRM com histórico de contatos;
 - classificação de oportunidades.
 
-A integração futura com o AI Studio (o fluxo de redesenho) será feita pela sessão principal, por exemplo levando
-um contato até um redesenho. **Nada disso existe ainda.** O repositório tem só o ponto de extensão.
+A ponte com o AI Studio existe só no sentido Lead Finder → AI Studio (vincular um projeto, imagem ou vídeo a uma
+empresa, lendo `jobs/design_*`). O caminho inverso (um botão no AI Studio) pode usar `lead_finder.api` no futuro.
 
-## 13. Por que a `main` não foi atualizada
+## 13. A `main` e as versões oficiais
 
-A `main` tem só o commit inicial. Ela **não foi atualizada de propósito**:
+A `main` ainda tem só o commit inicial: ela **não foi atualizada de propósito** enquanto o dono não aprova uma
+versão. Agora há um caminho definido para isso:
 
-- a reformulação atual (redesenho por IA como fluxo principal) **ainda está em avaliação** e o usuário não aprovou
-  a qualidade;
-- um merge agora apresentaria como estável algo que não é;
-- o trabalho fica **seguro** na branch de desenvolvimento `claude/sweet-bohr-4uzml2` no GitHub (a sessão principal
-  envia os commits sem force-push), e cada push gera `.exe` pelo CI.
+1. Pull Request `claude/sweet-bohr-4uzml2` → `main`, com merge commit (sem force-push), feito pelo dono;
+2. tirar a marca RASCUNHO da seção da versão no `CHANGELOG.md` (a primeira proposta é a `0.9.0`);
+3. **Actions → Release oficial** a partir da `main` (`docs/RELEASES.md`).
 
-Regra: **`claude/sweet-bohr-4uzml2` é a branch de integração.** A `main` só recebe a integração quando o usuário
-aprovar uma versão, o que coincide com uma release publicada. Nenhuma das duas sessões faz merge na `main` por
-conta própria.
+Regra: **`claude/sweet-bohr-4uzml2` é a branch de integração.** Nenhuma sessão faz merge na `main`, cria tag ou
+publica Release por conta própria: isso é decisão do dono.

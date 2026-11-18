@@ -4,6 +4,12 @@ Resumo do que foi entregue na branch `feature/lead-finder`, do que a sessão pri
 na integração e do que ainda não foi verificado. Descrição completa do módulo em
 [`LEAD_FINDER.md`](LEAD_FINDER.md).
 
+> **Integrado (18/11/2026):** PR #1 mesclado em `claude/sweet-bohr-4uzml2` (merge `264dd9f`, a partir de
+> `0ca5d8c`). Na integração: o CI passou a rodar todo o `tests/` (não há mais lista fixa), o build confere com
+> `scripts/check_bundle.py` que todos os arquivos do módulo estão no `.exe`, o autoteste reprova se um módulo não
+> carregar e o módulo se registra com `local=False` (o selo "Processado no seu computador" some na aba). Os
+> pedidos do §3 (README, RESUME, ARQUITETURA) foram atendidos. Os testes reais do §6 continuam pendentes.
+
 ## 1. Base e branch
 
 | Item | Valor |
@@ -154,7 +160,7 @@ Registre no PR o resultado de cada letra (passou / falhou + mensagem exibida).
 - **MEI/empresário individual** fora da busca no CNPJ por padrão (privacidade). A opção para incluir está na aba
   Pesquisar.
 - **Frase de não contato** ativada por padrão nas mensagens.
-- **Modelo de IA padrão:** `claude-opus-5-5` (configurável em Configurações; esforço baixo para mensagens curtas).
+- **Modelo de IA padrão:** definido em `config.py` e configurável em Configurações (esforço baixo para mensagens curtas).
 
 ## 8. Revisão automática do Codex (PR #1)
 

@@ -16,7 +16,7 @@ def intro_text(state: dict) -> tuple[str, str]:
     """Título e texto do assistente: instalação nova ou atualização (só as etapas pendentes)."""
     if not state.get("done"):
         return ("Primeiro uso: vamos instalar o motor de IA e renderização",
-                "Tudo roda no seu computador, na sua GPU NVIDIA. O download (~7 GB) acontece uma única "
+                "Tudo roda no seu computador, na sua GPU NVIDIA. O download (~12 GB) acontece uma única "
                 f"vez; depois o {APP_NAME} funciona sem internet. No fim, a GPU é preparada (kernels de "
                 "render e modelos de IA) para que o primeiro vídeo já saia rápido. Se a conexão cair, é só "
                 "abrir de novo: a instalação continua de onde parou.")
@@ -68,7 +68,7 @@ class SetupDialog(QDialog):
         info = QLabel(text)
         info.setWordWrap(True); info.setObjectName("subtitle")
         chips = QHBoxLayout(); chips.setSpacing(8)
-        for ico, txt in (("export", "~7 GB, uma única vez"), ("wifi-off", "Depois funciona sem internet"),
+        for ico, txt in (("export", "~12 GB, uma única vez"), ("wifi-off", "Depois funciona sem internet"),
                          ("refresh", "Retoma se a conexão cair")):
             chips.addWidget(_chip(ico, txt))
         chips.addStretch(1)

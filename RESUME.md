@@ -1,63 +1,49 @@
-# RESUME — estado atual (17/11/2026)
+# RESUME — estado atual (18/11/2026)
 
 ## Onde está o trabalho
 
 - **Repositório:** `tuzin7x/softwareEditor` (público). O pacote Python se chama `mobilia` e o produto se chama
-  **7xAi**.
-- **Branch de integração (desenvolvimento):** `claude/sweet-bohr-4uzml2`. Todo o trabalho está nela; a sessão principal
-  envia os commits ao GitHub sem force-push.
-- **`main`:** tem só o commit inicial e **não foi atualizada de propósito**. A reformulação ainda está em
-  avaliação; a `main` só recebe a integração quando o usuário aprovar uma versão. Detalhes em
-  `docs/PARALLEL_DEVELOPMENT.md`, seção 13.
-- **`ui-7xai`:** branch local antiga, já contida na branch de integração (worktree local da sessão principal). Não
-  mexer.
-- **`feature/lead-finder`** (planejada): será feita por outra conta, a partir do commit `435a87b` indicado em
-  `docs/PARALLEL_DEVELOPMENT.md`, e volta por Pull Request para `claude/sweet-bohr-4uzml2`.
-
-### Últimos commits relevantes
-
-| Commit | O que fez |
-|---|---|
-| `d2f929b` | Motor de redesenho de ambientes (mesma sala, móveis e estilo novos) |
-| `5b298a6` | Ajuste no "Ampliar 4K" |
-| `bfbe546` | Vídeo antes e depois e comando `upscale` |
-| `42955e6` | Interface nova, com o redesenho por IA como fluxo principal |
-| commits seguintes | Ponto de extensão de módulos (`mobilia/ui/modules.py`, `mobilia/modules/`), `.gitignore` reforçado e documentação do desenvolvimento paralelo |
+  **7xAi**. Versão no código: **0.9.0** (`mobilia/__init__.py`, fonte única), ainda **não publicada**.
+- **Branch de integração (desenvolvimento):** `claude/sweet-bohr-4uzml2`. Contém o AI Studio, o **Lead Finder
+  integrado** (PR #1, `feature/lead-finder`) e o **sistema de releases oficiais** (antiga branch local
+  `release-infra`). Envio sem force-push.
+- **`main`:** ainda só tem o commit inicial. Recebe a integração por Pull Request
+  `claude/sweet-bohr-4uzml2` → `main` quando o dono aprovar; as Releases oficiais saem só dela
+  (`docs/RELEASES.md`).
+- **Branches que já estão contidas na integração:** `feature/lead-finder` (PR #1) e as locais `release-infra`,
+  `ui-7xai` e `lf-validate`. Podem ser apagadas depois da promoção para a `main`, com aprovação do dono.
 
 ## Estado do produto
 
-- **Fluxo principal: redesenho por IA da imagem inteira**, com 8 funções:
-  - mudar estilo, reforma completa, redesign simples e mobiliar vazio;
-  - editar área, fachada, decoração de evento e texto para ambiente.
-
-  Há também **ampliar 4K** e **vídeo antes e depois** em 16:9 e 9:16.
-- **Execução:** é 100% local. Na RTX 5070 Laptop de 8 GB leva cerca de 8 a 11 s por imagem, com os codificadores
-  de texto na CPU para caber em 8 GB.
-- **Qualidade do redesenho:** **em avaliação**, ainda não aprovada pelo usuário.
-- **Legado/avançado:** os modos A (montagem 3D) e B (foto mobiliada → sala vazia → móveis entram → foto exata)
-  continuam disponíveis pelo botão "Avançado".
-- **Interface:** `mobilia/ui/app.py` (janela de redesenho) e `mobilia/ui/legacy.py` (modo legado).
-- **Ponto de extensão:** o registro de módulos permite abas novas sem editar `app.py`. Sem módulos, a janela não
-  muda.
-- **CI:**
-  - `tests.yml` roda uma lista fixa de arquivos de teste rápidos em cada push em `claude/**`, `feature/**` e
-    `main`, e em PRs para `claude/**` e `main`;
-  - `build-windows.yml` gera o `.exe` e o instalador em cada push em `claude/**` e publica uma prerelease com
-    `[release]` ou com o disparo manual "publicar".
-- **Build local:** `GERAR_EXE.bat`, que chama `packaging/build_windows.ps1`.
-
-## Em andamento (sessão principal)
-
-- Ajustes de qualidade do redesenho por IA: `mobilia/design/*`, `mobilia/video/showcase.py` e a interface
-  (`app.py`, `design_widgets.py`, `legacy.py`, `runner.py`), com os testes correspondentes.
+- **Janela principal com módulos** (`mobilia/ui/app.py` + registro `mobilia/ui/modules.py`):
+  - aba **"Ambientes" = AI Studio** (redesenho por IA, 8 funções, ampliar 4K, vídeo antes e depois 16:9/9:16);
+  - aba **"Lead Finder"** (`mobilia/modules/lead_finder/`), descoberta automaticamente; usa a internet, por isso o
+    selo "Processado no seu computador" some nessa aba (`ModuleSpec.local=False`);
+  - modos legados A/B pelo botão "Avançado" (só na aba Ambientes).
+- **AI Studio:** funciona de ponta a ponta, mas a avaliação de qualidade encontrou problemas **ainda não
+  corrigidos**: "Editar área" deixa mancha oval; trava de janelas/portas falha em aberturas pequenas ou cobertas;
+  "Mudar estilo" muda pouco em salas já decoradas; "Reforma" mantém a disposição; "Mobiliar" às vezes cria vigas
+  ou erra a escala; o vídeo coloca faixas laterais em fotos 4:3. Velocidade: ~8–11 s/imagem numa RTX 5070 de
+  8 GB num teste isolado do motor. **O app completo ainda não foi executado num Windows de verdade.**
+- **Lead Finder:** 20 apontamentos da revisão automática corrigidos com testes de regressão; Google Places e IA
+  testados só com respostas gravadas; Overpass, WhatsApp real e importação completa da Receita pendentes de teste
+  no Windows (roteiro em `docs/LEAD_FINDER_HANDOFF.md` §6).
+- **CI/CD:**
+  - `tests.yml`: suíte rápida inteira de `tests/` (`-m "not slow and not models and not gpu"`), dependências
+    fixas (`packaging/ci/requirements-tests.txt`) + `pip check`; reutilizada pelo `release.yml`;
+  - `build-windows.yml`: programa + instalador + portátil como **artefatos** (nunca publica);
+  - `release.yml`: Release oficial manual, só da `main`, com validação de versão/CHANGELOG, testes, build,
+    autotestes, SHA-256, tag no commit testado e "Latest" só para versão estável (entrada opcional
+    `prerelease`).
 
 ## Próximos passos
 
-1. Terminar a avaliação de qualidade do redesenho com o usuário e corrigir o que ele apontar.
-2. **"Esvaziar ambiente"** pelo motor de difusão, para servir de sala vazia ao modo B.
-3. Revisar e integrar o Pull Request do Lead Finder (`feature/lead-finder` → `claude/sweet-bohr-4uzml2`), quando
-   chegar. Depois, atualizar README, RESUME e ARQUITETURA.
-4. Com uma versão aprovada pelo usuário: release (`[release]`) e só então atualizar a `main`.
+1. **Dono:** testes manuais no Windows com o artefato do Build Windows (AI Studio na RTX 5070, instalador e
+   portátil, Lead Finder: Overpass, Google com chave própria, WhatsApp, CNPJ).
+2. Corrigir os problemas de qualidade do AI Studio listados acima.
+3. Com aprovação: PR `claude/sweet-bohr-4uzml2` → `main` (merge commit), tirar o RASCUNHO da seção 0.9.0 do
+   `CHANGELOG.md` e rodar **Actions → Release oficial** com `0.9.0`.
+4. "Esvaziar ambiente" pelo motor de difusão, para servir de sala vazia ao modo B.
 
 ## Como retomar
 
@@ -66,14 +52,13 @@ Numa nova sessão neste repositório, envie:
 > Leia RESUME.md e docs/PARALLEL_DEVELOPMENT.md e continue pelos "Próximos passos".
 
 Testes rápidos: `QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"` (no
-Windows/PowerShell: `$env:QT_QPA_PLATFORM="offscreen"; python -m pytest -q -m "not slow and not models and not gpu"`). Para um
-contêiner novo de desenvolvimento, use `bash scripts/preparar_ambiente_dev.sh`.
+PowerShell: `$env:QT_QPA_PLATFORM="offscreen"; python -m pytest -q -m "not slow and not models and not gpu"`).
 
 ## Regras permanentes
 
 - Fotos do usuário (`usuario_*`) e dados pessoais **nunca** vão para o repositório.
 - Use só modelos com licença comercial (`docs/LICENCAS_V3.md`).
-- Não use force-push nem reescreva o histórico.
+- Não use force-push nem reescreva o histórico. Não atualize a `main`, não crie tags nem Releases sem o dono.
 - Faça commit só dos arquivos alterados, sem `git add -A`.
 
 ---

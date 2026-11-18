@@ -3,10 +3,11 @@
 > Documento vivo. Decisões tomadas e **validadas com testes reais** neste repositório.
 > A pesquisa comparativa de tecnologias está em [`PESQUISA_TECNOLOGIAS.md`](PESQUISA_TECNOLOGIAS.md).
 >
-> **Estado atual (17/11/2026):** o fluxo principal do 7xAi passou a ser o **redesenho de ambientes por IA da
-> imagem inteira** (seção 11), com a interface e o registro de módulos descritos na seção 12. Os modos A e B das
-> seções 1 a 10 continuam no programa como **legado/avançado** ("vídeo de montagem"), e o texto dessas seções
-> continua valendo para eles.
+> **Estado atual (18/11/2026):** a janela do 7xAi tem duas áreas registradas como módulos de primeiro nível: o
+> **AI Studio** ("Ambientes"), cujo motor é o **redesenho de ambientes por IA da imagem inteira** (seção 11), e o
+> **Lead Finder** (seção 13), que entra pelo registro de módulos (seção 12). Releases e CI estão na seção 14. Os
+> modos A e B das seções 1 a 10 continuam no programa como **legado/avançado** ("vídeo de montagem"), e o texto
+> dessas seções continua valendo para eles.
 
 ## 1. Objetivo e regra absoluta
 
@@ -777,8 +778,9 @@ motor, para servir de sala vazia ao modo B (seção 4.1). Licenças dos modelos:
 
 **Janela principal** (`ui/app.py`, `MainWindow`):
 
-- **Cabeçalho:** marca, frase, botão "Avançado (vídeo de montagem, legado)" (abre `ui/legacy.py`) e selo de
-  privacidade.
+- **Cabeçalho:** marca, seletor de módulos ("Ambientes" | "Lead Finder"; sem módulos, a frase de efeito), botão
+  "Avançado (vídeo de montagem, legado)" (abre `ui/legacy.py`) e selo de privacidade "Processado no seu
+  computador" (`MainWindow.privacy_widgets`), escondido em módulos com `ModuleSpec.local=False`.
 - **Stepper:** Foto → Função → Ajustes → Gerar → Resultados.
 - **Corpo:**
   - à esquerda, um "palco" em `QStackedWidget`: soltar foto, texto, progresso, resultado e máscara;
@@ -802,11 +804,12 @@ motor, para servir de sala vazia ao modo B (seção 4.1). Licenças dos modelos:
 - A interface **não importa** numpy, PIL nem torch: o `.exe` (`packaging/7xai.spec`) leva só PySide6. Um teste
   verifica isso por AST.
 
-**Registro de módulos** (`ui/modules.py` + pacote `modules/`), o ponto de extensão para abas novas, como o futuro
-Lead Finder:
+**Registro de módulos** (`ui/modules.py` + pacote `modules/`), o ponto de extensão para abas novas (hoje: o
+Lead Finder, seção 13):
 
-- Cada subpacote de `mobilia/modules/` chama `register(ModuleSpec(id, title, factory, order, tooltip))` ao ser
-  importado.
+- Cada subpacote de `mobilia/modules/` chama `register(ModuleSpec(id, title, factory, order, tooltip, local))` ao
+  ser importado. `local=False` declara que o módulo usa a internet: ao abri-lo, o `ModuleHost` esconde o selo de
+  privacidade do cabeçalho (e o mostra de novo ao voltar para "Ambientes").
 - `mobilia.modules.discover()` importa os subpacotes. Uma falha vai para `modules.failed` e o subpacote é
   ignorado.
 - `ModuleHost` é o único contato com a janela. O gancho em `app.py` é um import e quatro chamadas:
@@ -817,9 +820,51 @@ Lead Finder:
     - o conteúdo vira um `QStackedWidget`, em que a página 0 é o fluxo de redesenho;
     - cada módulo tem sua página, criada na 1ª abertura;
     - `on_show()` e `on_hide()` são opcionais;
-    - o botão "Avançado" só aparece em "Ambientes";
+    - o botão "Avançado" só aparece em "Ambientes"; o selo de privacidade só aparece em módulos locais;
     - um redesenho em andamento continua em segundo plano (por construção; ainda sem teste automático).
 - **Empacotamento:** `collect_submodules("mobilia.modules")` em `hiddenimports`.
 - **Testes:** `tests/test_modules.py`.
 - **Regras para quem cria módulos** (arquivos permitidos e proibidos, dados, LGPD):
   [`PARALLEL_DEVELOPMENT.md`](PARALLEL_DEVELOPMENT.md).
+
+## 13. Lead Finder (módulo `mobilia/modules/lead_finder/`)
+
+Prospecção de imobiliárias em fontes autorizadas, CRM local e contato por WhatsApp com revisão. Descrição completa
+em [`LEAD_FINDER.md`](LEAD_FINDER.md); resumo da arquitetura:
+
+- **Registro:** `__init__.py` registra `ModuleSpec(id="lead_finder", title="Lead Finder", order=10,
+  local=False)` com `factory` preguiçosa: a página (`ui/page.py`) só é importada e criada na primeira abertura da
+  aba. Nenhuma alteração em `app.py` foi necessária além do selo de privacidade.
+- **Camadas:** fontes (`sources/`: OSM/Overpass, base aberta de CNPJ importada para um índice SQLite local,
+  BrasilAPI, Google Places API com chave do usuário) → orquestração e limite de custo (`search.py`) →
+  armazenamento (`storage.py`: SQLite com migrações `PRAGMA user_version`, hoje v4; consolidação, CRM, prazos de
+  guarda, exportação, painel) → interface (`ui/`).
+- **Threads:** o banco tem uma thread dona (`tasks.DbService`); rede, importação e análises rodam em `tasks.Task`
+  (thread + cancelamento). Os resultados voltam pela fila de eventos do Qt (`Dispatcher`, sinal enfileirado), no
+  mesmo padrão do `CliTask`. Testes confirmam que o banco não roda na thread da interface.
+- **Dados:** `runtime.app_home() / "lead_finder"` → no Windows `%LOCALAPPDATA%\MobiliaStudio\lead_finder`
+  (`leads.sqlite3`, `settings.json`, `secrets.json` com as chaves do usuário, `cache/`). Persistem entre execuções
+  (teste com duas janelas consecutivas).
+- **Dependências:** só biblioteca padrão + PySide6 + `mobilia.runtime`/`mobilia.ui`; nada do motor (teste por AST).
+  No `.exe`, `collect_submodules("mobilia.modules")` inclui todos os subpacotes; o módulo não tem `datas`.
+- **Ponte com o AI Studio:** `studio.py` lê `jobs/design_*` (só leitura) e `api.py` oferece `search_leads`,
+  `link_output` e `links_for` (para usar numa thread de trabalho).
+
+## 14. Versões, Releases e CI
+
+- **Versão:** fonte única em `mobilia/__init__.py` (`__version__`), lida pelo `pyproject.toml` (dinâmico), pelo
+  recurso de versão do `.exe` (`packaging/win_version.py`) e pelo instalador (`/DAppVersion`). Histórico em
+  `CHANGELOG.md` (Keep a Changelog); uma seção marcada RASCUNHO bloqueia a publicação.
+- **`tests.yml`** (push em `claude/**`, `feature/**`, `main`; PRs; `workflow_call`): Ubuntu, Python 3.13,
+  dependências fixas de `packaging/ci/requirements-tests.txt` + `pip check`, suíte rápida de todo o `tests/`
+  (`-m "not slow and not models and not gpu"`). Testes que dependem de PyTorch/diffusers/bpy são pulados ali.
+- **`build-windows.yml`** (push e manual): PyInstaller (onedir e portátil de arquivo único), autoteste
+  `--selftest` (inclusive com as bibliotecas pesadas bloqueadas), Inno Setup; resultados só como artefatos.
+- **`release.yml`** (manual, só da `main`): 1) valida versão = código, CHANGELOG sem RASCUNHO, tag/Release
+  inexistentes; 2) chama `tests.yml`; 3) build Windows com dependências fixas, autoteste do programa, do portátil e
+  do instalador (instalação silenciosa), `SHA256SUMS.txt`; 4) único job com `contents: write`: cria a Release como
+  rascunho, anexa `7xAI-Setup-vX.Y.Z.exe`, `7xAI-Portable-vX.Y.Z.exe` e `SHA256SUMS.txt`, publica (a tag nasce no
+  commit testado) e confere a tag; apaga o rascunho se algo falhar. "Latest" só para versão estável; a entrada
+  opcional `prerelease` publica um beta de teste que não vira "Latest". Ações fixadas por hash,
+  `persist-credentials: false`, `concurrency` sem cancelamento. Guia do dono: [`RELEASES.md`](RELEASES.md).
+
