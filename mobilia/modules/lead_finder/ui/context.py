@@ -40,8 +40,12 @@ class AppContext(QObject):
         return self.base / "cache"
 
     def _apply_rate_limits(self) -> None:
-        overpass = urlsplit(self.settings.overpass_url).hostname or "overpass-api.de"
-        self.http.min_interval.update({overpass: 2.0, "brasilapi.com.br": 1.2, "places.googleapis.com": 0.2,
+        from ..sources.osm import OVERPASS_ENDPOINTS
+
+        # todos os servidores Overpass que a busca pode usar (troca automática quando um falha) com o mesmo respeito
+        for url in (self.settings.overpass_url, *OVERPASS_ENDPOINTS):
+            self.http.min_interval[urlsplit(url).hostname or "overpass-api.de"] = 2.0
+        self.http.min_interval.update({"brasilapi.com.br": 1.2, "places.googleapis.com": 0.2,
                                        "api.anthropic.com": 1.0})
 
     def sources(self) -> dict:

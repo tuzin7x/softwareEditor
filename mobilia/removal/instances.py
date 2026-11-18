@@ -728,13 +728,15 @@ def detect_mode(seg, pan: PanopticResult, override: str | None = None) -> ModeDe
 def load_oneformer(device: str = "cpu", model_id: str = SEG_MODEL, use_fp16: bool = False):
     """Carrega o OneFormer uma vez (para processar várias fotos com :func:`oneformer_infer`)."""
     from ..analysis.geometry import _ensure_weights
-    from ..analysis.weights import ensure_local
+    from ..analysis.weights import ensure_local, hub_offline
 
     _ensure_weights(ensure_local, model_id)
     from transformers import OneFormerForUniversalSegmentation, OneFormerProcessor
 
-    proc = OneFormerProcessor.from_pretrained(model_id)
-    model = OneFormerForUniversalSegmentation.from_pretrained(model_id).to(device).eval()
+    with hub_offline(model_id):
+        proc = OneFormerProcessor.from_pretrained(model_id)
+        model = OneFormerForUniversalSegmentation.from_pretrained(model_id, use_safetensors=False)
+    model = model.to(device).eval()
     if use_fp16 and device != "cpu":
         model = model.half()
     return proc, model

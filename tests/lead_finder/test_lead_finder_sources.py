@@ -63,7 +63,7 @@ def test_osm_fetch_parses_and_dedupes(http, transport, tmp_path):
     def reply(req):
         body["ql"] = unquote_plus(req.data.decode().split("data=", 1)[1])
         return 200, fixture_json("overpass_campinas.json")
-    transport.add("POST", r"overpass-api\.de/api/interpreter", reply)
+    transport.add("POST", r"/api/interpreter", reply)
     srcs, _, _ = sources(http, tmp_path)
     osm = srcs["osm"]
     query = q()
@@ -240,7 +240,7 @@ def test_cnpj_source_unavailable_without_index(http, tmp_path):
 # ------------------------------------------------------------------------------------------- pesquisa
 
 def test_run_search_emits_batches_and_skips_unavailable(http, transport, tmp_path):
-    transport.add("POST", r"overpass-api\.de", (200, fixture_json("overpass_campinas.json")))
+    transport.add("POST", r"/api/interpreter", (200, fixture_json("overpass_campinas.json")))
     srcs, _, _ = sources(http, tmp_path)
     ctx = Ctx()
     summary = run_search(ctx, q(srcs=("osm", "google_places", "cnpj_aberto")), srcs)
@@ -257,7 +257,7 @@ def test_run_search_unit_error_does_not_stop_other_units(http, transport, tmp_pa
         calls["n"] += 1
         return (504, {"remark": "timeout"}) if "BR-RJ" in unquote_plus(req.data.decode()) else \
             (200, fixture_json("overpass_campinas.json"))
-    transport.add("POST", r"overpass-api\.de", reply)
+    transport.add("POST", r"/api/interpreter", reply)
     srcs, _, _ = sources(http, tmp_path)
     ctx = Ctx()
     summary = run_search(ctx, q("uf", ufs=["RJ", "SP"]), srcs)
@@ -280,7 +280,7 @@ def test_run_search_google_budget_and_usage(http, transport, tmp_path):
 
 
 def test_run_search_cancel(http, transport, tmp_path):
-    transport.add("POST", r"overpass-api\.de", (200, fixture_json("overpass_campinas.json")))
+    transport.add("POST", r"/api/interpreter", (200, fixture_json("overpass_campinas.json")))
     srcs, _, _ = sources(http, tmp_path)
     ctx = Ctx(); ctx.cancel()
     with pytest.raises(Cancelled):

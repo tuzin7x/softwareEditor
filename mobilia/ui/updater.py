@@ -127,7 +127,10 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 def build_opener() -> urllib.request.OpenerDirector:
     ctx = ssl.create_default_context()      # confere o certificado e o nome do host
-    return urllib.request.build_opener(_SafeRedirect(), urllib.request.HTTPSHandler(context=ctx))
+    # IPv4 primeiro e tempo curto por endereço: num IPv6 lento cada conexão levava ~42 s (``mobilia/netfast``)
+    from ..netfast import build_opener as fast_opener
+
+    return fast_opener(_SafeRedirect(), context=ctx)
 
 
 def _request(url: str, accept: str) -> urllib.request.Request:

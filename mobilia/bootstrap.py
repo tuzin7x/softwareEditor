@@ -286,7 +286,9 @@ def _download(url: str, dest: Path, progress: Progress, step: str) -> None:
     have = part.stat().st_size if part.exists() else 0
     req = urllib.request.Request(url, headers={"User-Agent": "MobiliaStudio-setup",
                                                **({"Range": f"bytes={have}-"} if have else {})})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    from .netfast import urlopen as fast_urlopen   # IPv4 primeiro: IPv6 lento não trava a instalação
+
+    with fast_urlopen(req, timeout=120) as r:
         total = int(r.headers.get("Content-Length", 0)) + have
         mode = "ab" if have and r.status == 206 else "wb"
         if mode == "wb":

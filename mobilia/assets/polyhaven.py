@@ -15,6 +15,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from ..netfast import urlopen as fast_urlopen
+
 API = "https://api.polyhaven.com"
 USER_AGENT = "MobiliaStudio/0.1 (local renderer)"
 
@@ -35,7 +37,7 @@ def _get_json(url: str, retries: int = 4):
         for i in range(retries):
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-                with urllib.request.urlopen(req, timeout=60) as r:
+                with fast_urlopen(req, timeout=60) as r:
                     NET_STATS["consultas"] += 1
                     return json.load(r)
             except Exception as e:  # rede instável: tenta de novo com espera crescente
@@ -57,7 +59,7 @@ def _download(url: str, dest: Path, md5: str | None, retries: int = 4) -> None:
         for i in range(retries):
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-                with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+                with fast_urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
                     while True:
                         chunk = r.read(1 << 20)
                         if not chunk:

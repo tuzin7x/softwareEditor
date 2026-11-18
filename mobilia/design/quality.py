@@ -84,14 +84,15 @@ class Segmenter:
         from ..config import SEGMENTATION_MODEL_ID
 
         from ..analysis.geometry import _ensure_weights
-        from ..analysis.weights import ensure_local
+        from ..analysis.weights import ensure_local, hub_offline
 
         _ensure_weights(ensure_local, SEGMENTATION_MODEL_ID)
         self.device, self.long_side = device, long_side
-        self.processor = OneFormerProcessor.from_pretrained(SEGMENTATION_MODEL_ID)
-        # .bin do repositório: sem ``use_safetensors=False`` o transformers busca na rede uma conversão .safetensors
-        self.model = OneFormerForUniversalSegmentation.from_pretrained(SEGMENTATION_MODEL_ID,
-                                                                       use_safetensors=False).eval()
+        with hub_offline(SEGMENTATION_MODEL_ID):     # já no disco: sem consultar o Hub (IPv6 lento: ~42 s cada)
+            self.processor = OneFormerProcessor.from_pretrained(SEGMENTATION_MODEL_ID)
+            # .bin do repositório: sem ``use_safetensors=False`` o transformers busca na rede uma conversão
+            self.model = OneFormerForUniversalSegmentation.from_pretrained(SEGMENTATION_MODEL_ID,
+                                                                           use_safetensors=False).eval()
         self.fp16 = device.startswith("cuda")
         self.model = self.model.to(device, torch.float16 if self.fp16 else torch.float32)
         self.parked = False

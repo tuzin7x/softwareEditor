@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,6 +57,44 @@ def _metadata_cached() -> bool:
         return isinstance(try_to_load_from_cache(repo, fname, repo_type="dataset"), str)
     except Exception:
         return False
+
+
+def all_local(repo_id: str) -> bool:
+    """``repo_id`` (e, no OneFormer, o arquivo de classes) inteiro no cache, conferido sem rede."""
+    if not _cached(repo_id, allow_patterns=PATTERNS):
+        return False
+    return repo_id != SEGMENTATION_MODEL_ID or _metadata_cached()
+
+
+@contextmanager
+def hub_offline(*repo_ids: str):
+    """Carga SÓ do disco quando os pesos de ``repo_ids`` já estão no cache (``HF_HUB_OFFLINE`` só durante o
+    bloco). Medido no notebook do dono: mesmo com tudo baixado, o ``from_pretrained`` do MoGe e do OneFormer
+    consultava o Hugging Face a cada trabalho e, com a conexão IPv6 lenta, cada consulta levava ~42 s (profundidade
+    83–94 s para 2–3 s de inferência; o mesmo trabalho caiu de 201 s para 88 s com ``HF_HUB_OFFLINE=1``). Faltando
+    algo, o bloco roda online como antes (o download é a exceção, não o caminho de todo trabalho). Devolve se ficou
+    offline."""
+    offline = all(all_local(r) for r in repo_ids)
+    if not offline:
+        yield False
+        return
+    from huggingface_hub import constants
+
+    keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    old_env = {k: os.environ.get(k) for k in keys}
+    old_const = constants.HF_HUB_OFFLINE
+    try:
+        for k in keys:
+            os.environ[k] = "1"
+        constants.HF_HUB_OFFLINE = True
+        yield True
+    finally:
+        constants.HF_HUB_OFFLINE = old_const
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def ensure_local(repo_id: str) -> float:
@@ -317,7 +356,9 @@ def _fetch(url: str, dest: Path, progress: Callable[[int, int], None] | None = N
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": "7xAi-setup"})
-    with urllib.request.urlopen(req, timeout=120) as r, open(part, "wb") as f:
+    from ..netfast import urlopen as fast_urlopen
+
+    with fast_urlopen(req, timeout=120) as r, open(part, "wb") as f:
         if progress is None:
             shutil.copyfileobj(r, f, 1 << 20)
         else:

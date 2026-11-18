@@ -79,7 +79,7 @@ def segment(rgb8: np.ndarray, model_id: str = "shi-labs/oneformer_ade20k_swin_la
     import time
 
     from .geometry import _ensure_weights
-    from .weights import ensure_local
+    from .weights import ensure_local, hub_offline
 
     t0 = time.perf_counter()
     dl = _ensure_weights(ensure_local, model_id)
@@ -87,8 +87,10 @@ def segment(rgb8: np.ndarray, model_id: str = "shi-labs/oneformer_ade20k_swin_la
     from PIL import Image
     from transformers import OneFormerForUniversalSegmentation, OneFormerProcessor
 
-    processor = OneFormerProcessor.from_pretrained(model_id)
-    model = OneFormerForUniversalSegmentation.from_pretrained(model_id, use_safetensors=False).to(device).eval()
+    with hub_offline(model_id):         # já no disco: nenhuma consulta ao Hub no caminho de todo trabalho
+        processor = OneFormerProcessor.from_pretrained(model_id)
+        model = OneFormerForUniversalSegmentation.from_pretrained(model_id, use_safetensors=False)
+    model = model.to(device).eval()
     if use_fp16 and device != "cpu":
         model = model.half()
     if timings is not None:

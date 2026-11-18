@@ -204,7 +204,7 @@ def test_search_runs_in_background_and_consolidates(page, qapp, transport):
     def reply(req):
         threads.append(threading.current_thread().name)
         return 200, fixture_json("overpass_campinas.json")
-    transport.add("POST", r"overpass-api\.de/api/interpreter", reply)
+    transport.add("POST", r"/api/interpreter", reply)
     view = page.views["search"]
     assert view.uf_buttons["SP"].isChecked() and view.kw_buttons["Imobiliária"].isChecked()
     assert wait_until(qapp, lambda: view.source_rows["osm"][0].isChecked())       # disponibilidade em 2º plano
@@ -223,7 +223,7 @@ def test_search_runs_in_background_and_consolidates(page, qapp, transport):
 
 def test_search_cancel(page, qapp, transport):
     gate = threading.Event()
-    transport.add("POST", r"overpass-api\.de", lambda req: (gate.wait(10), (200, {"elements": []}))[1])
+    transport.add("POST", r"/api/interpreter", lambda req: (gate.wait(10), (200, {"elements": []}))[1])
     view = page.views["search"]
     assert wait_until(qapp, lambda: view.source_rows["osm"][0].isChecked())
     view.btn_search.click()

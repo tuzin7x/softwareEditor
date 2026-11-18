@@ -20,9 +20,15 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from ...netfast import urlopen as fast_urlopen
+
 log = logging.getLogger("mobilia.lead_finder.net")
 
-USER_AGENT = "7xAi-LeadFinder/0.1 (aplicativo desktop; consultas iniciadas pelo usuario)"
+# descritivo (alguns servidores públicos, como os da Overpass, recusam com 403 os agentes genéricos); sem dados
+# pessoais
+USER_AGENT = ("7xAi-LeadFinder/0.2 (desktop app; user-initiated queries to public data services such as "
+              "OpenStreetMap Overpass, IBGE and BrasilAPI)")
+_KEY_HEADERS = ("authorization", "x-goog-api-key", "x-api-key", "api-key")
 _SECRET_PARAM = re.compile(r"(?i)((?:key|token|secret|password|apikey|api_key|access_token)=)[^&\s]+")
 _SECRET_HEADER = re.compile(r"(?i)\b(sk-ant-[\w-]{6})[\w-]+|\b(AIza[\w-]{4})[\w-]{10,}")
 
@@ -94,7 +100,8 @@ Transport = Callable[[urllib.request.Request, float, int], Response]
 def urllib_transport(req: urllib.request.Request, timeout: float, max_bytes: int) -> Response:
     ctx = ssl.create_default_context()
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:   # noqa: S310 - URLs fixas https
+        # ``netfast``: IPv4 primeiro (num IPv6 lento cada consulta ao IBGE/BrasilAPI levava ~42 s)
+        with fast_urlopen(req, timeout=timeout, context=ctx) as r:   # noqa: S310 - URLs fixas https
             body = r.read(max_bytes + 1)
             if len(body) > max_bytes:
                 raise NetError("Resposta grande demais; a consulta foi interrompida.")
@@ -163,7 +170,8 @@ class HttpClient:
                 if resp.status in ok:
                     return resp
                 retry = resp.status in (429, 500, 502, 503, 504)
-                err = NetError(_status_message(resp, host), resp.status, retry)
+                keyed = bool(_SECRET_PARAM.search(url)) or any(k.lower() in _KEY_HEADERS for k in hdrs)
+                err = NetError(_status_message(resp, host, keyed), resp.status, retry)
                 wait = _retry_after(resp)
             else:
                 wait = None
@@ -234,7 +242,9 @@ def _network_message(e: Exception) -> str:
     return "Sem conexão com a internet ou o provedor está fora do ar."
 
 
-def _status_message(resp: Response, host: str) -> str:
+def _status_message(resp: Response, host: str, keyed: bool = True) -> str:
+    """``keyed``: o pedido levava uma chave de API. Sem chave (Overpass, IBGE...), 401/403 não é "confira a
+    chave": o servidor recusou ou limitou o pedido."""
     detail = ""
     try:
         data = resp.json()
@@ -247,5 +257,7 @@ def _status_message(resp: Response, host: str) -> str:
             403: "Acesso negado pelo provedor (confira a chave e as permissões)",
             404: "Não encontrado", 429: "Limite de consultas do provedor atingido; tente mais tarde"}.get(
         resp.status, f"O provedor respondeu com erro {resp.status}")
+    if not keyed and resp.status in (401, 403):
+        base = "O servidor recusou ou limitou o pedido (acesso negado; este serviço não usa chave)"
     detail = redact(str(detail))[:200]
     return f"{base} ({host}){': ' + detail if detail else ''}."

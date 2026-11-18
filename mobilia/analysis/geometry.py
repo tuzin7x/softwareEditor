@@ -86,14 +86,16 @@ def estimate_geometry(rgb8: np.ndarray, model_id: str = "Ruicheng/moge-2-vitl-no
     """
     import time
 
-    from .weights import ensure_local
+    from .weights import ensure_local, hub_offline
 
     t0 = time.perf_counter()
     dl = _ensure_weights(ensure_local, model_id)
     import torch
     from moge.model.v2 import MoGeModel
 
-    model = MoGeModel.from_pretrained(model_id).to(device).eval()
+    with hub_offline(model_id):         # já no disco: nenhuma consulta ao Hub (era ~42 s numa rede IPv6 lenta)
+        model = MoGeModel.from_pretrained(model_id)
+    model = model.to(device).eval()
     if timings is not None:
         timings["download"] = dl
         timings["carga"] = time.perf_counter() - t0 - dl
