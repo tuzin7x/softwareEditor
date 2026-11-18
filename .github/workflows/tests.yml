@@ -1,22 +1,40 @@
 name: Testes (CPU)
+# Suíte rápida (sem modelos de IA, sem Blender, sem GPU). Roda a cada push/PR e também é chamada pelo
+# workflow de Release (release.yml) antes de qualquer publicação: se falhar, nada é publicado.
 on:
   push:
     branches: ["claude/**", "feature/**", "main"]
   pull_request:
     branches: ["claude/**", "main"]
   workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
       - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
-      - run: python -m pip install numpy scipy pillow shapely opencv-python-headless imageio-ffmpeg OpenEXR PySide6==6.12.0 pytest
+      - name: Dependências fixas + verificação
+        run: |
+          python -m pip install -r packaging/ci/requirements-tests.txt
+          python -m pip check
       - name: Testes rápidos (sem modelos, sem Blender)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q -m "not slow and not models and not gpu" tests/test_compositor.py tests/test_choreography.py tests/test_room.py tests/test_encoder.py tests/test_sunlight.py tests/test_depth_mesh.py tests/test_scene_spec.py tests/test_bootstrap.py tests/test_ui.py tests/test_modules.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(tests/test_compositor.py tests/test_choreography.py tests/test_room.py tests/test_encoder.py
+                 tests/test_sunlight.py tests/test_depth_mesh.py tests/test_scene_spec.py tests/test_bootstrap.py
+                 tests/test_ui.py tests/test_modules.py tests/test_packaging.py tests/test_release.py)
+          # Lead Finder (PR #1): entra sozinho quando a pasta existir na branch testada
+          if [ -d tests/lead_finder ]; then files+=(tests/lead_finder); fi
+          python -m pytest -q -m "not slow and not models and not gpu" "${files[@]}"

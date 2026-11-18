@@ -1,0 +1,6 @@
+# Dependências fixas para gerar o executável do Windows no CI (build-windows.yml e release.yml).
+# Mesmo conteúdo de requirements/ui.txt, mas com versões exatas: a mesma tag gera o mesmo programa.
+# (Fica fora de requirements/ de propósito: aquela pasta vai dentro do .exe e mudar algo lá reinstala o motor.)
+PySide6==6.12.0
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9

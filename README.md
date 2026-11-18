@@ -1,10 +1,35 @@
 # 7xAi
 
-O **7xAi** é um programa para Windows (`.exe`) de **redesenho de ambientes por IA**. A partir de **uma única foto**
-de um imóvel, ele gera novas versões do mesmo ambiente, com móveis, materiais e estilo novos, e monta um **vídeo
-"antes e depois"** pronto para redes sociais.
+[![Baixar a última versão](https://img.shields.io/github/v/release/tuzin7x/softwareEditor?label=Baixar%20a%20%C3%BAltima%20vers%C3%A3o&style=for-the-badge)](https://github.com/tuzin7x/softwareEditor/releases/latest)
+[![Testes](https://github.com/tuzin7x/softwareEditor/actions/workflows/tests.yml/badge.svg)](https://github.com/tuzin7x/softwareEditor/actions/workflows/tests.yml)
+
+**[⬇ Baixar a última versão do 7xAi para Windows](https://github.com/tuzin7x/softwareEditor/releases/latest)**
+
+O **7xAi** é um programa para Windows de **redesenho de ambientes por inteligência artificial** para o mercado
+imobiliário. A partir de **uma única foto** de um imóvel, ele gera novas versões do mesmo ambiente, com móveis,
+materiais e estilo novos, e monta um **vídeo "antes e depois"** pronto para as redes sociais.
 
 Tudo roda **localmente, na placa de vídeo NVIDIA do usuário**, sem APIs pagas. A foto não sai do computador.
+
+## Instalar (usuário final, sem Python)
+
+1. Abra a [última versão](https://github.com/tuzin7x/softwareEditor/releases/latest) e baixe
+   **`7xAI-Setup-vX.Y.Z.exe`**.
+2. Dê dois cliques no arquivo e siga as telas. Não precisa de administrador; o atalho **7xAi** aparece na Área de
+   Trabalho.
+3. Se o Windows mostrar "O Windows protegeu o computador" (o programa ainda não tem assinatura digital paga),
+   clique em **Mais informações → Executar assim mesmo**.
+4. No primeiro uso, o 7xAi baixa e instala o motor de IA (cerca de 7 GB, uma única vez).
+
+Prefere não instalar? Baixe **`7xAI-Portable-vX.Y.Z.exe`** e abra direto (abre alguns segundos mais devagar). Para
+conferir que o download não foi alterado, compare o SHA-256 com o `SHA256SUMS.txt` da mesma página.
+
+**Requisitos:** Windows 10 ou 11 de 64 bits; placa NVIDIA com 8 GB de memória de vídeo (recomendado); espaço em
+disco para o motor de IA e os modelos (download de cerca de 7 GB no primeiro uso; deixe folga, por exemplo 20 GB
+livres); internet no primeiro uso.
+
+O que mudou em cada versão: [`CHANGELOG.md`](CHANGELOG.md). Como publicar uma versão nova:
+[`docs/RELEASES.md`](docs/RELEASES.md).
 
 > **Estado (17/11/2026):** a reformulação para o redesenho por IA está **em avaliação de qualidade** e ainda não
 > foi aprovada para lançamento. O desenvolvimento acontece na branch `claude/sweet-bohr-4uzml2`. A `main` está
@@ -69,8 +94,10 @@ No primeiro uso, o 7xAi instala o motor de IA (vários GB, uma única vez) em `%
 pasta mantém o nome antigo de propósito, para reaproveitar um motor que já esteja instalado.
 
 **Pelo GitHub Actions**, o workflow `.github/workflows/build-windows.yml` gera o `.exe` e o instalador a cada push
-em `claude/**`. Ele publica uma *prerelease* quando a mensagem do commit tem `[release]` ou quando é disparado
-manualmente com "publicar" marcado.
+em `claude/**`, `feature/**` e `main`, **só como artefatos** da execução (nunca publica Release). As versões
+oficiais saem do workflow `.github/workflows/release.yml`, disparado à mão a partir da `main`: ele testa, gera o
+instalador e o portátil, confere tudo e publica a Release com a tag `vX.Y.Z`. Passo a passo em
+[`docs/RELEASES.md`](docs/RELEASES.md).
 
 O ícone (`packaging/assets/icon.ico`) e os SVGs da marca são gerados com `python scripts/make_icon.py`.
 
@@ -104,7 +131,7 @@ python -m pytest -q -m "not slow and not models and not gpu"
 python -m pytest -q tests/test_ui.py tests/test_modules.py
 ```
 
-A suíte rápida inteira precisa das bibliotecas da linha `pip install` do `tests.yml`; para os testes da interface
+A suíte rápida inteira precisa das bibliotecas de `packaging/ci/requirements-tests.txt`; para os testes da interface
 bastam `numpy pillow PySide6==6.12.0 pytest`.
 
 Os marcadores ficam em `pyproject.toml`:
@@ -115,8 +142,9 @@ Os marcadores ficam em `pyproject.toml`:
 | `models` | pesos dos modelos |
 | `gpu` | placa NVIDIA |
 
-O CI (`.github/workflows/tests.yml`) roda uma lista fixa de arquivos de teste rápidos a cada push em `claude/**`,
-`feature/**` e `main`, e em Pull Requests para `claude/**` e `main`.
+O CI (`.github/workflows/tests.yml`) roda uma lista fixa de arquivos de teste rápidos (com dependências de versão
+fixa em `packaging/ci/requirements-tests.txt` e `pip check`) a cada push em `claude/**`, `feature/**` e `main`, em
+Pull Requests para `claude/**` e `main`, e antes de toda Release oficial.
 
 ## Estrutura
 
@@ -128,7 +156,8 @@ O CI (`.github/workflows/tests.yml`) roda uma lista fixa de arquivos de teste r�
 | `mobilia/modules/` | módulos opcionais da janela (abas novas). Ainda não há nenhum |
 | `mobilia/analysis/`, `layout/`, `render/`, `composite/`, `removal/`, `layers2d/`, `gen/` | modos legados A e B |
 | `mobilia/cli.py`, `runtime.py`, `bootstrap.py` | linha de comando, caminhos e worker, instalação no primeiro uso |
-| `packaging/`, `GERAR_EXE.bat` | geração do `.exe` e do instalador |
+| `packaging/`, `GERAR_EXE.bat` | geração do `.exe` e do instalador (`packaging/ci/`: dependências fixas do CI) |
+| `.github/workflows/`, `scripts/release_notes.py` | testes, builds de desenvolvimento e Release oficial |
 | `docs/` | arquitetura, planos, licenças, limitações, pesquisa e evidências das provas de conceito (`docs/poc/`) |
 
 ## Política de branches e desenvolvimento paralelo
@@ -144,6 +173,8 @@ O guia completo está em [`docs/PARALLEL_DEVELOPMENT.md`](docs/PARALLEL_DEVELOPM
 
 ## Documentação
 
+- [`CHANGELOG.md`](CHANGELOG.md): o que mudou em cada versão.
+- [`docs/RELEASES.md`](docs/RELEASES.md): como publicar uma versão oficial, versionamento e como voltar atrás.
 - [`RESUME.md`](RESUME.md): estado atual e como retomar o trabalho.
 - [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md): arquitetura do redesenho, da interface e dos modos legados.
 - [`docs/PARALLEL_DEVELOPMENT.md`](docs/PARALLEL_DEVELOPMENT.md): regras para desenvolver módulos em paralelo.

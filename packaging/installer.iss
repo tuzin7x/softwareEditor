@@ -1,6 +1,6 @@
 ﻿; Instalador Inno Setup 6 do 7xAi (por usuário, sem UAC). Opcional: serve para instalar em OUTROS PCs.
 ; (No PC onde o GERAR_EXE.bat roda, o build_windows.ps1 já instala o 7xAi e cria o atalho sozinho.)
-; Gerar com: iscc packaging\installer.iss   ->   dist\7xAi-Setup-<versão>.exe
+; Gerar com: iscc /DAppVersion=X.Y.Z packaging\installer.iss   ->   dist\7xAi-Setup-<versão>.exe
 ; Arquivo salvo em UTF-8 com BOM: o Inno Setup só lê os acentos corretamente assim.
 ;
 ; O AppId é o mesmo da época do nome "Mobília Studio": o Windows trata como atualização do mesmo
@@ -8,8 +8,10 @@
 ; %LOCALAPPDATA%\MobiliaStudio de propósito, para não baixar tudo de novo.
 #define AppName "7xAi"
 #define ExeName "7xAi.exe"
+; A versão NÃO fica escrita aqui: vem de mobilia/__init__.py (fonte única). Passe /DAppVersion=X.Y.Z
+; (o build_windows.ps1 e os workflows já fazem isso).
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #error Falta a versao: use iscc /DAppVersion=X.Y.Z packaging\installer.iss
 #endif
 [Setup]
 AppId={{6E1E7C1A-6A0C-4E58-9B7E-4D5F2C0B9A11}

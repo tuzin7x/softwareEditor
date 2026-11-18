@@ -1,0 +1,14 @@
+# Dependências fixas da suíte rápida do CI (Linux, Python 3.13). Usadas por .github/workflows/tests.yml,
+# que também roda dentro do workflow de Release. Versões fixas = o mesmo resultado hoje e daqui a seis meses.
+# Para atualizar: troque as versões aqui num PR e deixe o CI confirmar.
+# (Fica fora de requirements/ de propósito: aquela pasta vai dentro do .exe e mudar algo lá reinstala o motor.)
+numpy==2.5.4
+scipy==1.18.1
+pillow==13.0.0
+shapely==2.2.0
+opencv-python-headless==5.0.0.93
+imageio-ffmpeg==0.8.1
+OpenEXR==3.5.4
+PySide6==6.12.0
+pytest==9.2.0
+PyYAML==6.0.3
