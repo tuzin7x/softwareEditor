@@ -40,6 +40,8 @@ jobs:
           python -m PyInstaller --noconfirm --distpath dist-portable --workpath build-portable packaging/7xai.spec
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller (portátil) falhou" }
       - name: Conteúdo do executável (módulos como o Lead Finder dentro; nada do motor)
+        env:
+          PYTHONIOENCODING: utf-8      # acentos legíveis no log do Windows
         run: python scripts/check_bundle.py build/7xai/PYZ-00.toc build-portable/7xai/PYZ-00.toc
       - name: Autoteste dos executáveis (abre sem tela; reprova se um módulo não carregar)
         shell: pwsh
