@@ -1,0 +1,7 @@
+{"uf": "SP", "cep": "13000000", "qsa": [{"nome_socio": "PESSOA FICTICIA DE TESTE", "qualificacao_socio": "Sócio-Administrador"}],
+ "cnpj": "11222333000181", "email": "contato@exemplo-ficticio.com.br", "porte": "MICRO EMPRESA", "bairro": "CENTRO",
+ "numero": "100", "municipio": "CAMPINAS", "logradouro": "FICTICIA", "cnae_fiscal": 6821801, "complemento": "SALA 1",
+ "razao_social": "ALFA EXEMPLO NEGOCIOS IMOBILIARIOS LTDA", "nome_fantasia": "ALFA EXEMPLO IMOVEIS",
+ "capital_social": 50000, "ddd_telefone_1": "1932000001", "ddd_telefone_2": "", "natureza_juridica": "Sociedade Empresária Limitada",
+ "situacao_cadastral": 2, "descricao_situacao_cadastral": "ATIVA", "descricao_tipo_de_logradouro": "RUA",
+ "cnae_fiscal_descricao": "Corretagem na compra e venda e avaliação de imóveis", "data_inicio_atividade": "2015-03-10"}

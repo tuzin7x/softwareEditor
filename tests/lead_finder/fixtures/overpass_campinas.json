@@ -1,0 +1,18 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API (resposta gravada e anonimizada para testes)",
+  "osm3s": {"copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."},
+  "elements": [
+    {"type": "node", "id": 1000001, "lat": -22.9, "lon": -47.06,
+     "tags": {"office": "estate_agent", "name": "Imobiliária Exemplo Alfa", "addr:street": "Rua Fictícia",
+              "addr:housenumber": "100", "addr:suburb": "Centro", "addr:city": "Campinas", "addr:postcode": "13000-000",
+              "phone": "+55 19 3200-0001", "contact:whatsapp": "+55 19 99900-0001", "website": "https://alfa-exemplo.com.br"}},
+    {"type": "way", "id": 2000002, "center": {"lat": -22.91, "lon": -47.07},
+     "tags": {"office": "estate_agent", "name": "Beta Imóveis de Teste", "phone": "(19) 99900-0002;(19) 3200-0002"}},
+    {"type": "node", "id": 1000003,
+     "tags": {"office": "company", "name": "Construtora Gama Fictícia", "website": "https://www.instagram.com/gama_teste"}},
+    {"type": "node", "id": 1000004, "tags": {"office": "estate_agent"}},
+    {"type": "node", "id": 1000001,
+     "tags": {"office": "estate_agent", "name": "Imobiliária Exemplo Alfa"}}
+  ]
+}
