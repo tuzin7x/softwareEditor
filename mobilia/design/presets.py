@@ -210,11 +210,15 @@ EVENTS: dict[str, dict] = {
                   "key": "lush white flower arrangements, a long banquet table with white linen and fine table setting",
                   "prompt": ("decorated for an elegant wedding reception, draped white fabric, candles, warm string "
                              "lights, romantic atmosphere")},
+    # teste real (rodada 3): festivo, mas NENHUMA das versões com árvore. A árvore ganha lugar (num canto, diante de
+    # uma parede lisa: na frente da janela ela some quando a janela original volta) e é repetida no fim do prompt;
+    # na GPU a escolha entre candidatos confere se há árvore (``quality.tree_score``)
     "natal": {"label": "Natal",
-              "key": ("a tall decorated christmas tree with glowing warm fairy lights and red and gold ornaments, "
-                      "wrapped presents under the tree, garland with lights"),
+              "key": ("a tall green christmas tree standing in the corner in front of a plain wall, decorated with "
+                      "glowing warm fairy lights and red and gold ornaments, wrapped presents under the tree, "
+                      "garland with lights"),
               "prompt": ("decorated for christmas, christmas wreath, stockings, string lights, poinsettias, "
-                         "candles, cozy festive christmas atmosphere")},
+                         "candles, cozy festive christmas atmosphere, the christmas tree is the centerpiece")},
     "festa_infantil": {"label": "Festa infantil",
                        "key": "a colorful balloon arch, a themed dessert table with a cake and cupcakes",
                        "prompt": ("decorated for a children's party, paper decorations, bunting, playful festive "
@@ -480,7 +484,9 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
         if f.needs_photo:
             neg.append(NEGATIVE_OPENINGS)
         if f.key == "mobiliar":     # o volume é da sala vazia: nada de arquitetura nova
-            neg.append("fireplace, radiator, column, new wall, built-in niche")
+            # e nada de móvel cortado pela borda do quadro (um pedaço sem sentido no canto, visto na GPU)
+            neg.append("furniture cut off by the frame edge, cropped furniture fragment, fireplace, radiator, "
+                       "column, new wall, built-in niche")
         if f.keep_ceiling:
             neg.append(NEGATIVE_CEILING)
         if f.furnish:

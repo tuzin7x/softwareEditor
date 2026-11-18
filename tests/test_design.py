@@ -994,8 +994,8 @@ def test_memory_plan_8gb_laptop_fits_in_7gb():
     assert p.refine and p.refine_long_side == 1280 and not p.refine_cfg
     assert p.peak_gen_mb <= 7168 and p.peak_refine_mb <= 7168 and p.budget_mb <= 7168
     assert p.seg_off_gpu and p.te_dtype == "bfloat16"
-    # o caso que transbordou no teste: 1536 px com CFG passa do orçamento
-    assert MP.peak_mb(1536, 1024, cfg=True) > p.budget_mb
+    # o caso que transbordou no teste (1536 px) nunca é escolhido numa placa de 8 GB
+    assert max(MP.REFINE_SIDES_TIGHT) <= 1280
     big = MP.plan("cuda", 12288, 11800, 16000)
     assert big.refine_long_side == 1536 and big.refine_cfg and big.te_dtype == "float32"
     small = MP.plan("cuda", 6144, 5800, 16000)
@@ -1005,6 +1005,22 @@ def test_memory_plan_8gb_laptop_fits_in_7gb():
     # VRAM já ocupada por outro programa: o orçamento segue a livre
     busy = MP.plan("cuda", 8188, 6600, 8000)
     assert busy.budget_mb <= 6344 and (busy.offload or not busy.refine or busy.peak_refine_mb <= busy.budget_mb)
+
+
+def test_memory_plan_calibrated_to_measured_peak():
+    """Teste real no notebook (8 GB): a estimativa antiga (6985 MB contra orçamento 6757) ligava o offload e
+    desligava o refino, mas o pico medido por chamada foi 5813 MB. Calibrado: a geração cabe sem offload e o refino
+    é leve (≤ 1280 px, sem CFG) só se a estimativa couber; senão desligado e anotado."""
+    est = MP.torch_peak_mb(1024, 768, cfg=True)
+    assert abs(est - MP.MEASURED_GEN_PEAK_MB) / MP.MEASURED_GEN_PEAK_MB < 0.05
+    nb = MP.plan("cuda", vram_total_mb=8188, vram_free_mb=7013, ram_free_mb=650)    # números do teste real
+    assert nb.budget_mb == 6757 and not nb.offload and nb.peak_gen_mb <= nb.budget_mb
+    assert nb.refine and nb.refine_long_side <= 1280 and not nb.refine_cfg
+    assert nb.peak_refine_mb <= nb.budget_mb - MP.REFINE_HEADROOM_MB
+    # refino leve sem CFG tem MENOS ativações que a geração com CFG que coube de verdade
+    assert MP.peak_mb(1280, 960, cfg=False) < MP.peak_mb(1024, 768, cfg=True)
+    tight = MP.plan("cuda", 8188, 6600, 8000)
+    assert not tight.offload and not tight.refine and any("sem folga" in x for x in tight.notes)
 
 
 def test_refine_spill_detector():
@@ -1191,7 +1207,8 @@ def test_text_room_comes_from_the_prompt_and_format_is_kept(tmp_path):
 
 def test_event_prompts_lead_with_key_objects():
     p = P.build_prompt("evento", None, "sala", 0, evento="natal")
-    assert p.positive.startswith("a tall decorated christmas tree") and "fairy lights" in p.positive
+    assert p.positive.startswith("a tall green christmas tree") and "fairy lights" in p.positive
+    assert p.positive.count("christmas tree") >= 2 and "plain wall" in p.positive    # árvore reforçada, fora da janela
     assert "undecorated" in p.negative
     for k, ev in P.EVENTS.items():
         assert ev["key"] and P.build_prompt("evento", None, "sala", 0, evento=k).positive.startswith(ev["key"])
@@ -1408,3 +1425,129 @@ def test_split_target_separates_touching_furniture():
     sep[110:130] = False                                              # sem rótulos: separados só se não encostam
     target, protect = api._split_target(sep, area)
     assert target[150, 170] and protect[80, 60]
+
+
+# ------------------------------------------------- teste real na GPU (rodada 3): "Editar área" sem borrão nem mesa translúcida
+def test_object_only_pastes_opaque_object_and_keeps_neighbour_furniture():
+    """A mesa nova entra OPACA (os pixels do gerador, só a borda suavizada; o Poisson no objeto deixava um "tronco"
+    semitransparente) e o braço do sofá que o retângulo pegou fica idêntico à foto, também no modo área inteira."""
+    H, W = 200, 300
+    rng = np.random.default_rng(1)
+    photo = rng.integers(90, 170, (H, W, 3), dtype=np.uint8)            # tapete estampado
+    plate = photo.copy()
+    g = np.full((H, W, 3), 60, np.uint8)                                  # gerador: fundo liso escuro...
+    g[90:150, 120:200] = (180, 40, 30)                                    # ... e uma mesa vermelha
+    area = np.zeros((H, W), bool); area[60:180, 60:260] = True
+    old = np.zeros((H, W), bool); old[100:150, 130:190] = True
+    new = np.zeros((H, W), bool); new[90:150, 120:200] = True
+    sofa = np.zeros((H, W), bool); sofa[60:120, 60:95] = True              # braço do sofá dentro do retângulo
+    out, kp, mode = api._object_only(g, photo, plate, area, old, new, protect=sofa)
+    assert mode == "objeto"
+    assert np.array_equal(out[115:125, 150:170], g[115:125, 150:170])   # miolo da mesa = gerador (opaco)
+    assert kp[115:125, 150:170].max() == 0.0
+    final = AL.composite(out, photo, kp)
+    assert np.abs(final[70:110, 65:90].astype(int) - photo[70:110, 65:90].astype(int)).max() <= 1   # sofá intacto
+    # o objeto antigo sai crescido só um pouco: longe dele (e do novo) a foto continua
+    assert np.array_equal(final[170:178, 230:255], photo[170:178, 230:255])
+    # sem objeto novo reconhecido (modo área): o sofá ainda fica o da foto
+    out2, kp2, mode2 = api._object_only(g, photo, plate, area, old, np.zeros((H, W), bool), protect=sofa)
+    assert mode2 == "area" and kp2 is not None and kp2[80:100, 70:85].min() == 1.0
+
+
+def test_edit_area_removes_only_old_object_not_the_sofa(room, tmp_path):
+    """O removedor roda SÓ no objeto antigo (crescido ~1%), nunca no móvel vizinho, e a geração parte da foto sem
+    ele (nítida), não de um borrão da área inteira."""
+    rgb, _, depth, _ = room
+    H, W = rgb.shape[:2]
+    mask = np.zeros((H, W), np.uint8); mask[130:220, 60:250] = 255
+    holes = []
+
+    def inpainter(img, hole):
+        holes.append(np.asarray(hole, bool).copy())
+        out = img.copy(); out[hole] = (0, 255, 0)
+        return out
+
+    def seg(img):
+        out = np.full(img.shape[:2], FLOOR, np.uint8)
+        h, w = img.shape[:2]
+        out[int(h * .30):int(h * .62), int(w * .02):int(w * .42)] = FURN    # sofá (sai bastante do retângulo)
+        out[int(h * .58):int(h * .75), int(w * .55):int(w * .75)] = FURN    # mesa de centro dentro da área
+        return out
+
+    eng = FakeEngine()
+    res = api.edit_area(rgb, mask, prompt="mesa de centro redonda", n=1, seed=2, out_dir=tmp_path, engine=eng,
+                        depth=depth, seg_fn=seg, inpainter=inpainter)
+    assert len(holes) == 1                                       # nada de pré-preencher a área inteira
+    hole = holes[0]
+    sofa = seg(np.zeros((hole.shape[0], hole.shape[1], 3), np.uint8)) == FURN
+    sofa[:, int(hole.shape[1] * .5):] = False
+    assert not (hole & sofa).any()
+    assert hole.sum() < 0.6 * (eng.calls[0]["mask"].sum())        # só a mesa (+1%), não o retângulo
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["preenchimento"] == "remocao"
+
+
+
+# ------------------------------------------------- teste real na GPU (rodada 3): Natal sem árvore; móvel cortado no canto
+def _xmas(tree: bool, H=240, W=320):
+    import cv2
+
+    img = np.full((240, 320, 3), (205, 195, 185), np.uint8)
+    img[168:] = (150, 110, 80)
+    img[150:200, 40:120] = (180, 30, 40)                                  # presentes e meias vermelhas
+    if tree:
+        pts = np.array([[288, 40], [258, 200], [316, 200]], np.int32)    # pinheiro em pé no canto (fora da janela)
+        cv2.fillPoly(img, [pts], (30, 110, 45))
+        for y, x in ((90, 288), (120, 282), (150, 292), (170, 276), (185, 300)):
+            cv2.circle(img, (x, y), 2, (255, 225, 140), -1)               # pisca-pisca
+    return cv2.resize(img, (W, H), interpolation=cv2.INTER_NEAREST) if (H, W) != (240, 320) else img
+
+
+def test_tree_score_detects_christmas_tree_and_ignores_photo_green():
+    from mobilia.design.quality import tree_score
+
+    yes, no = tree_score(_xmas(True)), tree_score(_xmas(False))
+    assert yes["arvore"] > 0.8 and yes["luzes"] > 0 and no["arvore"] < 0.1
+    rug = _xmas(False); rug[200:235, 20:300] = (30, 110, 45)               # tapete verde deitado: não é árvore
+    assert tree_score(rug)["arvore"] < 0.5
+    ex = np.zeros((240, 320), bool); ex[:, 250:] = True                    # verde que já estava na foto
+    assert tree_score(_xmas(True), exclude=ex)["arvore"] < 0.1
+
+
+def test_christmas_candidates_ranked_by_tree(tmp_path):
+    """Na GPU o Natal gera +2 candidatos e a escolha prefere os que têm árvore (antes nenhuma versão tinha)."""
+    rgb, g, depth, _ = _room(320, 240)
+
+    class XmasEngine(FakeEngine):
+        device = "cuda"
+        plan = MP.plan("cpu")
+
+        def generate(self, image, mask, control, prompt, seed, *a, **kw):
+            super().generate(image, mask, control, prompt, seed, *a, **kw)
+            return _xmas(len(self.calls) == 3, *image.shape[:2])          # só o 3º candidato tem árvore
+
+    eng = XmasEngine()
+    res = api.redesign(rgb, "evento", None, evento="natal", n=1, seed=5, out_dir=tmp_path, engine=eng,
+                       depth=depth, groups=g, rank_fn=lambda im: np.full(im.shape[:2], WALL, np.uint8),
+                       refine=False, tone=False)
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert len(eng.calls) == 3 and rep["candidatos"]["escolhidos"] == [2]
+    assert rep["candidatos"]["notas"][2]["arvore_arvore"] > 0.8
+
+
+def test_score_penalizes_cut_furniture_at_border():
+    from mobilia.design.quality import cut_pieces, score
+
+    g = np.full((240, 320), FLOOR, np.uint8)
+    g[100:200, 80:220] = FURN                                             # sofá inteiro no meio
+    lock = np.zeros_like(g, bool)
+    clean = score(g, lock)
+    cut = g.copy(); cut[200:240, 290:320] = FURN                          # pedaço cortado no canto de baixo
+    bad = score(cut, lock)
+    assert bad["cortados"] > 0 and clean["cortados"] == 0 and bad["nota"] < clean["nota"]
+    src = np.zeros_like(lock); src[200:240, 290:320] = True               # já estava na foto: não pesa
+    assert cut_pieces(cut, src) == 0.0
+    big = g.copy(); big[60:240, 0:200] = FURN                              # móvel grande saindo do quadro: normal
+    assert cut_pieces(big) == 0.0
+    p = P.build_prompt("mobiliar", "moderno", "sala", 0)
+    assert "cut off" in p.negative

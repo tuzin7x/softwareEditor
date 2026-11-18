@@ -21,6 +21,27 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
   reabre o 7xAi. No portátil, baixa o novo `.exe` (conferido) ao lado do atual. Botão **Atualizações** na barra de
   status: procurar agora, ligar/desligar a consulta automática e ver todas as versões.
 
+### Correções
+
+- **Editar área**: só o objeto antigo (segmentado, crescido ~1%) sai, nunca o móvel vizinho que o retângulo pegou
+  (o braço do sofá ficava borrado); a geração parte da foto sem o objeto antigo, não de um borrão da área inteira; o
+  objeto novo entra opaco (sem a "mesa translúcida") e pedacinhos soltos não são colados.
+- **Natal**: a árvore ganhou lugar no prompt (num canto, diante de parede lisa, repetida no fim) e, na GPU, o Natal
+  gera 2 candidatos a mais e escolhe os que têm árvore.
+- **Mobiliar**: pedaço de móvel cortado pela borda da foto perde pontos na escolha entre candidatos (e entrou no
+  negativo).
+- **Lead Finder (OpenStreetMap)**: a consulta da cidade vai em pedaços pequenos e troca sozinha entre os servidores
+  públicos da Overpass quando um falha (502/504/403); a mensagem não manda mais "conferir a chave" (a Overpass não
+  tem chave) e o User-Agent é descritivo.
+
+### Desempenho
+
+- Com os modelos já baixados, o MoGe e o OneFormer carregam só do disco (sem consultar a internet a cada trabalho):
+  numa rede com IPv6 lento cada consulta custava ~42 s (um trabalho caiu de 201 s para 88 s no teste).
+- Conexões HTTPS do app (Lead Finder, atualização, downloads) tentam IPv4 primeiro, com tempo curto por endereço.
+- Plano de memória calibrado com o pico medido numa placa de 8 GB (5,8 GB na geração a 1024 px): sem offload para
+  a RAM; refino leve (até 1280 px, sem CFG) só quando a estimativa cabe.
+
 ### Notas importantes de atualização
 
 - A atualização só usa HTTPS e hosts do GitHub, exige o SHA-256 publicado e nunca toca nos dados do usuário
