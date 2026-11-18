@@ -213,6 +213,27 @@ def test_window_with_dummy_module(app, env, reg):
         w.close()
 
 
+def test_privacy_badge_follows_module_locality(app, env, reg):
+    """O selo "Processado no seu computador" some em módulos que usam a internet (ModuleSpec.local=False)
+    e volta ao retornar ao fluxo de redesenho; módulos locais o mantêm."""
+    reg.register(reg.ModuleSpec("online", "Online", DummyPage, local=False))
+    reg.register(reg.ModuleSpec("offline", "Offline", DummyPage))
+    w = _make_window(app)
+    try:
+        lock, priv = w.privacy_widgets
+        assert priv.text() == "Processado no seu computador"
+        assert lock.isVisible() and priv.isVisible()
+        w.modules.show("online"); app.processEvents()
+        assert not lock.isVisible() and not priv.isVisible()
+        w.modules.show("offline"); app.processEvents()
+        assert lock.isVisible() and priv.isVisible()
+        w.modules.show("online"); app.processEvents()
+        w.modules.show("design"); app.processEvents()
+        assert lock.isVisible() and priv.isVisible()
+    finally:
+        w.close()
+
+
 def test_broken_factory_shows_notice(app, env, reg):
     def factory(window):
         raise RuntimeError("página quebrada")

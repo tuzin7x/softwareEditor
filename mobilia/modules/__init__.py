@@ -4,7 +4,7 @@ Cada subpacote daqui (ex.: ``mobilia/modules/lead_finder/``) registra a si mesmo
 ``mobilia.ui.modules.register(ModuleSpec(...))``. :func:`discover` importa todos os subpacotes; um subpacote que
 falhar ao importar é registrado em ``mobilia.ui.modules.failed`` e ignorado, sem derrubar a janela.
 
-Hoje não há nenhum módulo. Exemplo e regras em ``docs/PARALLEL_DEVELOPMENT.md``.
+Módulo atual: ``lead_finder`` (docs/LEAD_FINDER.md). Exemplo e regras em ``docs/PARALLEL_DEVELOPMENT.md``.
 No executável, o PyInstaller inclui os subpacotes por ``collect_submodules("mobilia.modules")`` (packaging/7xai.spec).
 """
 from __future__ import annotations

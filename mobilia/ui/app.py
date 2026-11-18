@@ -375,6 +375,7 @@ class MainWindow(QMainWindow):
         lock = QLabel(); lock.setPixmap(theme.line_icon("chip", 14, theme.MUTED).pixmap(14, 14))
         priv = QLabel("Processado no seu computador"); priv.setObjectName("privacy")
         priv.setToolTip("A foto e as imagens não saem do seu PC: tudo é gerado aqui, na sua placa de vídeo.")
+        self.privacy_widgets = (lock, priv)     # escondidos em módulos que usam a internet (ModuleSpec.local)
         self.btn_legacy = _button("Avançado (vídeo de montagem, legado)", "settings", "ghost")
         self.btn_legacy.setToolTip("Abre o modo antigo: vídeo em que os móveis 3D entram na foto (modos A/B).")
         on_click(self.btn_legacy, self.open_legacy)

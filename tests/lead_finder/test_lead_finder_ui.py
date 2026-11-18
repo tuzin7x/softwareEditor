@@ -343,8 +343,11 @@ def test_main_window_opens_lead_finder_tab(qapp, home, monkeypatch, tmp_path):
         from mobilia.modules.lead_finder.ui.page import LeadFinderPage
         assert isinstance(page, LeadFinderPage) and not [f for f in m.failed if f[0] == "lead_finder"]
         assert w.height() <= 760                                        # a janela não cresceu além da tela
+        assert m.get("lead_finder").local is False                      # usa a internet
+        assert not any(x.isVisible() for x in w.privacy_widgets)        # sem o selo "Processado no seu computador"
         w.modules.nav.buttons["design"].click(); qapp.processEvents()
         assert w.modules.current == "design" and w.btn_legacy.isVisible()
+        assert all(x.isVisible() for x in w.privacy_widgets)
         page.ctx.shutdown()
     finally:
         w.close()

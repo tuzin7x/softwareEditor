@@ -51,6 +51,8 @@ class ModuleSpec:
     ``factory``: recebe a ``MainWindow`` e devolve o ``QWidget`` da página; chamada uma única vez, na 1ª abertura.
     ``order``: posição no seletor (menor vem antes; empate pelo título).
     ``tooltip``: dica opcional do botão.
+    ``local``: ``True`` se o módulo processa tudo no computador. ``False`` (ex.: usa a internet) esconde o selo
+    "Processado no seu computador" do cabeçalho enquanto o módulo está aberto.
     """
 
     id: str
@@ -58,6 +60,7 @@ class ModuleSpec:
     factory: Callable[[QMainWindow], QWidget]
     order: int = 100
     tooltip: str = ""
+    local: bool = True
 
 
 _REGISTRY: dict[str, ModuleSpec] = {}
@@ -180,6 +183,9 @@ class ModuleHost:
         legacy = getattr(self.window, "btn_legacy", None)
         if legacy is not None:
             legacy.setVisible(module_id == DESIGN_ID)
+        local = spec is None or spec.local
+        for w in getattr(self.window, "privacy_widgets", ()):  # selo "Processado no seu computador"
+            w.setVisible(local)
         if self.nav is not None and self.nav.value() != module_id:
             self.nav.set_value(module_id)
         if hasattr(page, "on_show"):

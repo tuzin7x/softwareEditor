@@ -15,4 +15,5 @@ def _page(window):
 
 
 register(ModuleSpec(id=MODULE_ID, title="Lead Finder", factory=_page, order=10,
-                    tooltip="Encontrar imobiliárias e organizar contatos comerciais"))
+                    tooltip="Encontrar imobiliárias e organizar contatos comerciais (usa a internet)",
+                    local=False))   # consulta fontes on-line: o selo "Processado no seu computador" some nesta aba
