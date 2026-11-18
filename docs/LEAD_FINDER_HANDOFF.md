@@ -62,7 +62,7 @@ Nada do motor de redesenho ou de vídeo foi tocado; `api.py` não importa nada d
 ## 5. Como testar
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 162 testes
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 175 testes
 QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_ui.py
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 python -m pytest --collect-only -q
@@ -158,8 +158,11 @@ Registre no PR o resultado de cada letra (passou / falhou + mensagem exibida).
 
 ## 8. Revisão automática do Codex (PR #1)
 
-A primeira revisão (`b5de8d5`) apontou 6 problemas P2, todos corrigidos em `25d83cf` e respondidos/resolvidos nos
-threads do PR. Testes em `tests/lead_finder/test_lead_finder_review_fixes.py` (66; 31 falham no código anterior):
+Cada problema tem testes de regressão em `tests/lead_finder/test_lead_finder_review_fixes.py`, conferidos contra o
+código anterior à correção (os testes falham lá e passam aqui). Todos os threads foram respondidos com o commit e
+os testes, e marcados como resolvidos.
+
+**Rodada 1** (`b5de8d5` → corrigida em `25d83cf`; 66 testes, 31 falham no código anterior):
 
 | # | Problema | Correção |
 |---|---|---|
@@ -170,4 +173,16 @@ threads do PR. Testes em `tests/lead_finder/test_lead_finder_review_fixes.py` (6
 | 5 | CSV: `=1+1` passava sem proteção | apóstrofo para qualquer valor iniciado por `= + - @ \t \r`; só números puros ficam como estão |
 | 6 | Confirmar WhatsApp trocava o celular pelo fixo | o número confirmado é gravado (migração v3) e o painel pergunta qual número |
 
-O resultado da nova revisão pedida após as correções está registrado no PR.
+**Rodada 2** (`ce0c00c` → corrigida em `799dc54`; 13 testes, 10 falham no código anterior):
+
+| # | Problema | Correção |
+|---|---|---|
+| 7 | Novas tentativas automáticas do HTTP não passavam pelo limite do Google (timeouts → até 4 envios, 1 registrado) | requisições pagas com `retries=0`: cada envio real é contado; a falha aparece para o usuário |
+| 8 | Busca por palavra personalizada não achava razão social acentuada (`lower()` do SQLite) | razão social dobrada com `geo.fold()` ao montar o índice |
+| 9 | Prazo de guarda do Google não apagava o nome copiado no histórico | o histórico não recebe dados de fontes com prazo; a limpeza apaga cópias antigas |
+| 10 | Voltar à aba Mensagens apagava o rascunho | modelos carregados uma vez; recarregar a lista não regenera o texto |
+| 11 | Mesma empresa não era consolidada pelo telefone secundário | coluna `phone2_e164` (migração v4) nas chaves de duplicidade |
+| 12 | Natureza jurídica desconhecida (sem `Empresas*.zip`) passava pelo filtro de MEI | natureza vazia fica fora da busca padrão; aviso na importação e na fonte |
+
+Migrações do banco nesta branch: v1 (estrutura), v2 (vínculos AI Studio), v3 (`wa_user_number`), v4
+(`phone2_e164`). Todas atômicas; bancos de versões anteriores são atualizados ao abrir.

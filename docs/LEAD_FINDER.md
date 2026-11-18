@@ -88,7 +88,7 @@ filtro de nome tolerante a acentos; na base de CNPJ viram códigos CNAE (6821-8/
 6810-2/01, 6810-2/02, 6810-2/03, 4110-7/00, 4120-4/00). Palavras personalizadas filtram pelo nome.
 
 **Consolidação:** a mesma empresa vinda de várias fontes vira um registro só. Ordem das chaves: mesmo registro
-na fonte → CNPJ → telefone → domínio de site próprio → nome sem sufixos societários + cidade + UF. Dois CNPJs
+na fonte → CNPJ → telefone (principal, secundário ou WhatsApp) → domínio de site próprio → nome sem sufixos societários + cidade + UF. Dois CNPJs
 diferentes nunca se juntam; domínios de redes sociais e portais não servem de chave. Para cada campo vence a
 fonte mais confiável (manual > BrasilAPI > CNPJ aberto > site oficial > Google > OSM). A origem de cada campo e
 de cada registro (fonte, data, consulta) aparece no painel da empresa.
@@ -124,7 +124,7 @@ confirmar que a empresa autorizou. **Excluir dados** apaga a empresa e todo o hi
 mantendo a supressão).
 
 Banco: `<dados do 7xAi>/lead_finder/leads.sqlite3` (Windows: `%LOCALAPPDATA%\MobiliaStudio\lead_finder`).
-Migrações numeradas com `PRAGMA user_version` (atômicas); um banco de versão mais nova é recusado com
+Migrações numeradas com `PRAGMA user_version` (atômicas; hoje v4); um banco de versão mais nova é recusado com
 mensagem clara.
 
 ## 6. Qualificação
@@ -151,7 +151,7 @@ WhatsApp de links oficiais (`wa.me`, `api.whatsapp.com`) — não guarda o conte
 | Gerações por IA por dia | 30 | Configurações |
 | Sites analisados por lote | 25 | `settings.json` |
 
-Toda requisição paga é contada no momento em que é enviada, inclusive se a pesquisa for cancelada ou falhar no
+Requisições pagas não têm novas tentativas automáticas (o resultado de um timeout é desconhecido). Toda requisição paga é contada no momento em que é enviada, inclusive se a pesquisa for cancelada ou falhar no
 meio; "Atualizar dados do Google" (Place Details) também respeita o limite mensal. Antes de uma pesquisa paga aparece a estimativa (requisições e valor) e o uso do mês. O uso fica em
 `api_usage`. Confira sempre a tabela de preços vigente e o crédito gratuito mensal da sua conta Google.
 
@@ -191,7 +191,7 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_u
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 ```
 
-162 testes no módulo (96 originais + 66 de regressão da revisão do Codex), rodando também no GitHub Actions, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
+175 testes no módulo (96 originais + 79 de regressão das revisões do Codex), rodando também no GitHub Actions, sem internet (transporte HTTP falso com respostas gravadas e fictícias em
 `tests/lead_finder/fixtures/`): telefones e `wa.me`, IBGE, palavras-chave, mensagens, IA (formato da
 requisição), HTTP (novas tentativas, cancelamento imediato, limite por host, logs sem chaves), OSM, Google
 (máscara de campos, limite de custo), BrasilAPI (minimização), importador da Receita com ZIP sintético
