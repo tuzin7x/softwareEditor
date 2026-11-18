@@ -451,6 +451,11 @@ def _cli(monkeypatch, capsys, args):
 
     eng = FakeEngine()
     monkeypatch.setattr(api, "get_engine", lambda *a, **k: eng)
+
+    def no_lama(*a, **k):
+        raise RuntimeError("sem removedor nos testes")
+    monkeypatch.setattr("mobilia.removal.plate.load_lama", no_lama)
+    monkeypatch.setattr("mobilia.analysis.weights.missing_design_models", lambda: [])
     monkeypatch.setattr(api, "estimate_depth", lambda rgb, dev, **k: np.tile(
         np.linspace(6, 2, rgb.shape[0], dtype=np.float32)[:, None], (1, rgb.shape[1])))
     monkeypatch.setattr(api, "estimate_groups", lambda rgb, dev, **k: _room(rgb.shape[1], rgb.shape[0])[1])
@@ -1311,3 +1316,95 @@ def test_fetch_reports_progress_and_offline_message(monkeypatch, tmp_path):
         raise urllib.error.URLError("offline")
     with pytest.raises(Wt.WeightsError, match="sem internet"):
         Wt.ensure_file_weight(spec, root=tmp_path, fetch=no_net)
+
+
+def test_ceiling_paste_has_no_halo_around_a_dot():
+    """Teto bege da foto sobre teto branco gerado com um pontinho (segmentado como luminária): antes ficava um
+    buraco redondo com halo claro em volta do ponto. Agora o ponto não é luminária e o tom é casado por Poisson."""
+    H, W = 120, 200
+    src = np.full((H, W), WALL, np.uint8)
+    src[:50] = CEIL
+    gen_g = src.copy()
+    gen_g[20:23, 100:103] = GROUP_IDS["ceiling_fixture"]
+    original = np.zeros((H, W, 3), np.uint8)
+    original[:] = (200, 190, 175)
+    generated = np.zeros((H, W, 3), np.uint8)
+    generated[:] = (210, 205, 200)
+    generated[:50] = (238, 236, 232)
+    m = AL.ceiling_keep_mask(src, gen_g, (W, H))
+    assert m[21, 101]                                                 # o pontinho não abre buraco
+    out, _ = AL.paste_ceiling(generated, original, m)
+    L = out[8:36, 70:132].astype(float).mean(axis=2)
+    assert L.std() < 1.5                                               # em volta do ponto: uniforme, sem halo
+
+
+def test_christmas_tree_is_not_an_invented_window(tmp_path):
+    """No teste, a árvore de Natal com luzes era segmentada como janela e o reparo a apagava (sobravam presentes)."""
+    gen = np.full((100, 100), WALL, np.uint8)
+    yy, xx = np.mgrid[0:100, 0:100]
+    tree = (yy > 20) & (yy < 80) & (np.abs(xx - 50) < (yy - 20) * 0.4)        # triângulo
+    gen[tree] = WIN
+    assert not AL.new_openings(gen, np.zeros((100, 100), bool), (100, 100)).any()
+    gen[10:60, 5:30] = WIN                                                    # janela retangular inventada
+    assert AL.new_openings(gen, np.zeros((100, 100), bool), (100, 100))[30, 15]
+    assert not P.function("evento").repair
+    rgb, g, depth, _ = _room()
+    eng = FakeEngine()
+    api.redesign(rgb, "evento", None, "sala", evento="natal", n=1, seed=1, out_dir=tmp_path, engine=eng, depth=depth,
+                 groups=g, rank_fn=lambda im: np.full(im.shape[:2], WIN, np.uint8))
+    assert len(eng.calls) == 1                                                # nenhuma chamada de reparo
+
+
+def test_edit_area_pastes_only_the_new_object(room, tmp_path):
+    """Retângulo sobre um tapete estampado: o gerador refazia o tapete como piso liso e a borda do retângulo
+    aparecia. Com a segmentação, só o objeto novo (+ sombra) entra; o tapete em volta continua o da foto."""
+    rgb, _, depth, _ = room
+    H, W = rgb.shape[:2]
+    rng = np.random.default_rng(3)
+    rug = rng.integers(60, 200, (H, W, 3), dtype=np.uint8)
+    rgb = rgb.copy()
+    rgb[150:, :] = rug[150:, :]                                       # "tapete" estampado embaixo
+    mask = np.zeros((H, W), np.uint8)
+    mask[150:230, 60:260] = 255
+
+    def seg(img):                                                     # objeto = a área azul que o falso gerou
+        out = np.full(img.shape[:2], FLOOR, np.uint8)
+        blue = (img[..., 2] > 190) & (img[..., 1] > 100) & (img[..., 1] < 140)
+        ys, xs = np.nonzero(blue)
+        if len(xs):
+            cy, cx = int(ys.mean()), int(xs.mean())
+            h, w = img.shape[:2]
+            out[cy - h // 12:cy + h // 12, cx - w // 12:cx + w // 12] = FURN   # mesa no meio da área
+        return out
+
+    eng = FakeEngine()
+    res = api.edit_area(rgb, mask, prompt="mesa de centro redonda", n=1, seed=2, out_dir=tmp_path, engine=eng,
+                        depth=depth, seg_fn=seg)
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["colagem"] == ["objeto"]
+    img = res.images[0]
+    corner = (slice(155, 165), slice(66, 90))                         # canto da área, longe da mesa
+    assert np.abs(img[corner].astype(int) - rgb[corner].astype(int)).mean() < 6   # tapete da foto
+    cy, cx = 190, 160
+    assert np.abs(img[cy - 3:cy + 3, cx - 3:cx + 3].astype(int) - rgb[cy - 3:cy + 3, cx - 3:cx + 3].astype(int)).mean() > 20
+    # sem objeto reconhecido: a área inteira, como antes
+    res2 = api.edit_area(rgb, mask, prompt="mesa", n=1, seed=2, out_dir=tmp_path / "b", engine=FakeEngine(),
+                         depth=depth, seg_fn=lambda im: np.full(im.shape[:2], FLOOR, np.uint8))
+    assert json.loads(Path(res2.report).read_text(encoding="utf-8"))["colagem"] == ["area"]
+
+
+def test_split_target_separates_touching_furniture():
+    objs = np.zeros((200, 300), bool)
+    objs[40:120, 10:150] = True                                       # sofá (sai bastante da área)
+    objs[118:170, 120:220] = True                                     # mesa encostada no sofá
+    area = np.zeros((200, 300), bool)
+    area[100:190, 100:240] = True
+    ids = np.zeros((200, 300), np.uint8)
+    ids[40:120, 10:150] = 7                                           # rótulo "sofa"
+    ids[118:170, 120:220] = 9                                         # rótulo "coffee table"
+    target, protect = api._split_target(objs, area, ids=ids)
+    assert target[150, 170] and not target[80, 60] and protect[80, 60] and not protect[150, 170]
+    sep = objs.copy()
+    sep[110:130] = False                                              # sem rótulos: separados só se não encostam
+    target, protect = api._split_target(sep, area)
+    assert target[150, 170] and protect[80, 60]

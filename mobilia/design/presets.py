@@ -307,7 +307,10 @@ FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
     # 0,62 não punha nem a árvore de Natal; 0,8 com orientação 1,8 punha só velas e presentes (teste na GPU): a
     # decoração precisa de espaço (0,86) e de mais peso do texto (2,4); a profundidade guia só o começo (0,5/0,5)
     FunctionPreset("evento", "Decoração de evento", strength=0.86, control_scale=0.5, control_end=0.5,
-                   guidance=2.4, furnish=False, keep_layout=True, event=True, fixed=APPLIANCES, keep_ceiling=True),
+                   guidance=2.4, furnish=False, keep_layout=True, event=True, fixed=APPLIANCES, keep_ceiling=True,
+                   # o reparo de "abertura inventada" apagava a árvore de Natal com luzes (segmentada como janela)
+                   # e deixava só os presentes: a decoração é o objetivo, as janelas originais seguem travadas
+                   repair=False),
     FunctionPreset("texto", "Texto para ambiente", strength=1.0, control_scale=0.0, control_end=0.0, guidance=2.0,
                    lock=(), needs_photo=False, repair=False),
 )}

@@ -109,10 +109,13 @@ def composite(base: np.ndarray, top: np.ndarray, alpha: np.ndarray) -> np.ndarra
     return out
 
 
-def poisson_blend(base: np.ndarray, top: np.ndarray, mask: np.ndarray, pad: int = 8) -> np.ndarray:
+def poisson_blend(base: np.ndarray, top: np.ndarray, mask: np.ndarray, pad: int = 8, mixed: bool = False
+                  ) -> np.ndarray:
     """Mistura de Poisson (``cv2.seamlessClone``) de ``top`` em ``base`` dentro de ``mask`` (mesmo tamanho): os
     gradientes vêm de ``top`` e a borda é a de ``base`` — sem degrau de cor/luz na borda nem "retângulo chapado".
-    As imagens ganham uma margem espelhada (a máscara pode encostar na borda da foto). Fora da máscara = ``base``."""
+    As imagens ganham uma margem espelhada (a máscara pode encostar na borda da foto). Fora da máscara = ``base``.
+    ``mixed``: em cada pixel vale o gradiente mais forte dos dois (a estampa do tapete da foto atravessa o piso liso
+    que o gerador pôs em volta do objeto novo)."""
     m = np.asarray(mask, bool)
     if not m.any() or m.all():
         return top.copy() if m.all() else base.copy()
@@ -123,7 +126,7 @@ def poisson_blend(base: np.ndarray, top: np.ndarray, mask: np.ndarray, pad: int 
     mm[pad:pad + H, pad:pad + W] = m.astype(np.uint8) * 255
     x, y, w, h = cv2.boundingRect(mm)
     try:
-        out = cv2.seamlessClone(t, b, mm, (x + w // 2, y + h // 2), cv2.NORMAL_CLONE)
+        out = cv2.seamlessClone(t, b, mm, (x + w // 2, y + h // 2), cv2.MIXED_CLONE if mixed else cv2.NORMAL_CLONE)
     except cv2.error:
         return top.copy()
     out = out[pad:pad + H, pad:pad + W]
@@ -326,8 +329,8 @@ def cap_doors(lock: np.ndarray, door: np.ndarray, max_frac: float = 0.12, all_fr
 
 
 def new_openings(gen_groups: np.ndarray, original_openings: np.ndarray, size: tuple[int, int],
-                 min_frac: float = 0.004, source_groups: np.ndarray | None = None, wall_frac: float = 0.5
-                 ) -> np.ndarray:
+                 min_frac: float = 0.004, source_groups: np.ndarray | None = None, wall_frac: float = 0.5,
+                 min_fill: float = 0.62) -> np.ndarray:
     """Janela/porta/cortina na imagem gerada onde a foto não tinha abertura (a abertura original, dilatada, fica de
     fora: cortinas emoldurando a janela existente são bem-vindas). Resolução ``size`` = (largura, altura).
 
@@ -347,6 +350,14 @@ def new_openings(gen_groups: np.ndarray, original_openings: np.ndarray, size: tu
     hard = np.isin(g, [GROUP_IDS["window"], GROUP_IDS["door"]]) & ~near_open
     soft = (g == GROUP_IDS["window_covering"]) & ~near_cover
     out = clean_mask(hard | soft, min_frac=min_frac)
+    # janelas, portas e cortinas são retangulares: um componente que ocupa pouco da própria caixa (a árvore de Natal
+    # com luzes, triangular, segmentada como janela) é decoração e não é apagado
+    if out.any():
+        n, lab, st, _ = cv2.connectedComponentsWithStats(out.astype(np.uint8), connectivity=8)
+        for k in range(1, n):
+            fill = st[k, cv2.CC_STAT_AREA] / max(1, st[k, cv2.CC_STAT_WIDTH] * st[k, cv2.CC_STAT_HEIGHT])
+            if fill < min_fill:
+                out[lab == k] = False
     if source_groups is not None and out.any():
         sg = np.asarray(source_groups)
         if sg.shape != g.shape:
@@ -385,8 +396,8 @@ def missing_openings(gen_groups: np.ndarray, source_openings: np.ndarray, size: 
     return out
 
 
-def paste_ceiling(generated: np.ndarray, original: np.ndarray, mask: np.ndarray, feather_frac: float = 0.025
-                  ) -> tuple[np.ndarray, dict]:
+def paste_ceiling(generated: np.ndarray, original: np.ndarray, mask: np.ndarray, feather_frac: float = 0.025,
+                  max_shift: float = 20.0) -> tuple[np.ndarray, dict]:
     """Teto original por cima da imagem gerada (``mask``: teto da foto, já sem as luminárias/móveis que o gerador
     pôs ali). Rampa toda por DENTRO do teto (a junção teto/parede da imagem gerada fica intacta: nada da faixa
     borrada que manter o teto nos latentes deixava) e cor de baixa frequência casada com a do gerador."""
@@ -394,7 +405,14 @@ def paste_ceiling(generated: np.ndarray, original: np.ndarray, mask: np.ndarray,
     if not m.any():
         return generated, {"fracao": 0.0}
     diag = float(np.hypot(*m.shape))
-    src = match_color(original, generated, m, sigma=max(2.0, 0.01 * diag), max_shift=10.0, amount=0.7)
+    # Poisson: a textura/forma vem do teto original e a borda (e a luz geral) da imagem gerada. Com só um
+    # deslocamento de cor limitado, o teto bege da foto sobre o teto branco gerado deixava um "halo" redondo em
+    # volta de cada luminária preservada e uma faixa na rampa
+    # A correção de Poisson é limitada (``max_shift`` níveis): um teto gerado de outra cor (azul, madeira) não
+    # tinge o teto original de volta — só a diferença de luz/tom pequena some
+    pois = poisson_blend(generated, original, m).astype(np.float32)
+    orig = original.astype(np.float32)
+    src = np.clip(orig + np.clip(pois - orig, -max_shift, max_shift) + 0.5, 0, 255).astype(np.uint8)
     alpha = feather_alpha(m, max(2.0, feather_frac * diag), inside=1.0)
     return composite(generated, src, alpha), {"fracao": round(float(m.mean()), 4)}
 
@@ -413,7 +431,7 @@ def _soffit_islands(ceil: np.ndarray, gen_wall: np.ndarray, gap: int) -> np.ndar
 
 def ceiling_keep_mask(src_groups: np.ndarray, gen_groups: np.ndarray, size: tuple[int, int],
                       lock: np.ndarray | None = None, edge_frac: float = 0.006, clear_frac: float = 0.03,
-                      deep_frac: float = 0.03) -> np.ndarray:
+                      deep_frac: float = 0.03, min_busy_frac: float = 0.0015) -> np.ndarray:
     """Onde o teto da foto volta: teto na foto e na imagem gerada (sem a faixa junto da parede), menos onde a
     imagem gerada tem luminária, móvel ou armário (um pendente novo não perde o fio) e menos a trava das
     aberturas."""
@@ -426,11 +444,13 @@ def ceiling_keep_mask(src_groups: np.ndarray, gen_groups: np.ndarray, size: tupl
     g = np.asarray(gen_groups)
     if (g.shape[1], g.shape[0]) != (W, H):
         g = cv2.resize(g, (W, H), interpolation=cv2.INTER_NEAREST)
-    busy = np.isin(g, [GROUP_IDS["ceiling_fixture"], GROUP_IDS["furniture"], GROUP_IDS["fixture"]])
+    busy_raw = np.isin(g, [GROUP_IDS["ceiling_fixture"], GROUP_IDS["furniture"], GROUP_IDS["fixture"]])
+    busy = clean_mask(busy_raw, min_frac=min_busy_frac, close_frac=0.0)  # um pontinho não é luminária
+    dots = busy_raw & ~busy                                              # ... e o teto cobre o pontinho
     busy = cv2.dilate(busy.astype(np.uint8), _disk(max(1, int(clear_frac * diag)))).astype(bool)
     # só onde a imagem gerada também tem teto: se a parede gerada sobe um pouco mais, colar o teto por cima dela
     # deixava um degrau na junção (vigas e sancas são segmentadas como teto e saem)
-    gen_ceil = cv2.erode((g == GROUP_IDS["ceiling"]).astype(np.uint8), _disk(max(1, int(edge_frac * diag))))
+    gen_ceil = cv2.erode(((g == GROUP_IDS["ceiling"]) | dots).astype(np.uint8), _disk(max(1, int(edge_frac * diag))))
     # rebaixo/sanca inventado: a face vertical dele é segmentada como PAREDE dentro do teto da foto. Um pedaço de
     # "parede" ilhado no teto (sem encostar na junção teto/parede da foto) também recebe o teto original de volta;
     # a parede gerada que só SOBE a partir da junção fica (colar o teto ali deixava um degrau)

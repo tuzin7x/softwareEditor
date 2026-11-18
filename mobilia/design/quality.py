@@ -111,6 +111,10 @@ class Segmenter:
             self.parked = False
 
     def groups(self, rgb: np.ndarray) -> np.ndarray:
+        return labels_to_groups(self.labels(rgb), self.id2label)
+
+    def labels(self, rgb: np.ndarray) -> np.ndarray:
+        """Rótulos ADE20K (ids) na resolução reduzida (``long_side``)."""
         from PIL import Image
 
         torch = self._torch
@@ -124,7 +128,7 @@ class Segmenter:
         with torch.inference_mode():
             out = self.model(**inputs)
         seg = self.processor.post_process_semantic_segmentation(out, target_sizes=[small.shape[:2]])[0]
-        return labels_to_groups(seg.cpu().numpy().astype(np.uint8), self.id2label)
+        return seg.cpu().numpy().astype(np.uint8)
 
     def close(self) -> None:
         del self.model
