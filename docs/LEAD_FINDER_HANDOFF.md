@@ -62,7 +62,7 @@ Nada do motor de redesenho ou de vídeo foi tocado; `api.py` não importa nada d
 ## 5. Como testar
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 175 testes
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/lead_finder                      # 185 testes
 QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_modules.py tests/test_ui.py
 QT_QPA_PLATFORM=offscreen python -m pytest -q -m "not slow and not models and not gpu"
 python -m pytest --collect-only -q
@@ -73,10 +73,10 @@ Resultado nesta branch (`ce0c00c`, depois do merge com `eaee226` e das correçõ
 
 | Onde | Resultado |
 |---|---|
-| `tests/lead_finder` (local) | **162 passaram**: 96 originais + 66 de regressão da revisão do Codex |
-| `tests/test_modules.py` + `tests/test_ui.py` + `tests/lead_finder` (local) | **205 passaram** |
-| Suíte rápida inteira (local, instalação completa do `tests.yml`) | **868 passaram, 258 pulados, 4 falharam**: as mesmas 4 falhas da base (`ModuleNotFoundError` de `torch`/`huggingface_hub`), que **falham igualmente em `claude/sweet-bohr-4uzml2` sem o Lead Finder** |
-| GitHub Actions, "Testes (CPU)" | **285 passaram** (123 da lista original + 162 do Lead Finder). Antes de `ce0c00c` o CI rodava só os 123 e nenhum teste do módulo |
+| `tests/lead_finder` (local, `505713a`) | **185 passaram**: 96 originais + 89 de regressão das 3 revisões do Codex |
+| `tests/test_modules.py` + `tests/test_ui.py` + `tests/lead_finder` (local) | **228 passaram** |
+| Suíte rápida inteira (local, instalação completa do `tests.yml`) | **882 passaram, 257 pulados, 4 falharam** (em `799dc54`): as mesmas 4 falhas da base (`ModuleNotFoundError` de `torch`/`huggingface_hub`), que **falham igualmente em `claude/sweet-bohr-4uzml2` sem o Lead Finder** |
+| GitHub Actions, "Testes (CPU)" | **298 passaram** em `07c8371` (123 da lista original + 175 do Lead Finder). Antes de `ce0c00c` o CI rodava só os 123 e nenhum teste do módulo |
 | GitHub Actions, "Build Windows" (manual, `publicar=false`, run 44202166745) | **sucesso**: PyInstaller, autoteste do `.exe`, Inno Setup; "Publicar em Releases" **pulado** |
 | Conteúdo do `.exe` (artefato `7xAi-onedir` baixado, SHA-256 conferido) | os 39 módulos do Lead Finder estão no `PYZ` do `7xAi.exe`, com o código corrigido; `sqlite3`, `ssl` (`_ssl.pyd`, `_sqlite3.pyd`), `urllib.robotparser`, `html.parser`, `zipfile` e `csv` presentes; nenhuma biblioteca do motor |
 
@@ -183,6 +183,15 @@ os testes, e marcados como resolvidos.
 | 10 | Voltar à aba Mensagens apagava o rascunho | modelos carregados uma vez; recarregar a lista não regenera o texto |
 | 11 | Mesma empresa não era consolidada pelo telefone secundário | coluna `phone2_e164` (migração v4) nas chaves de duplicidade |
 | 12 | Natureza jurídica desconhecida (sem `Empresas*.zip`) passava pelo filtro de MEI | natureza vazia fica fora da busca padrão; aviso na importação e na fonte |
+
+**Rodada 3** (`799dc54` → corrigida em `505713a`; 10 testes, 7 falham no código anterior):
+
+| # | Problema | Correção |
+|---|---|---|
+| 13 | CSV ignorava a confirmação manual do WhatsApp e o "Não tem WhatsApp" | `_export_whatsapp` aplica as decisões manuais; número só do Google continua fora |
+| 14 | Pesquisa paga e "Atualizar dados do Google" simultâneas podiam estourar o limite mensal | reserva exclusiva de operação paga no `AppContext` |
+| 15 | Telefone da lista de não contato voltava a ser contatável via atualização de outro registro | supressão checada em toda ingestão; número bloqueado nunca vira WhatsApp nem pode ser confirmado |
+| 16 | Trocar para UF sem cache mantinha a lista de municípios da UF anterior | lista sempre da UF selecionada; sem lista, aceita o nome digitado |
 
 Migrações do banco nesta branch: v1 (estrutura), v2 (vínculos AI Studio), v3 (`wa_user_number`), v4
 (`phone2_e164`). Todas atômicas; bancos de versões anteriores são atualizados ao abrir.
