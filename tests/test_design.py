@@ -1320,7 +1320,9 @@ def test_fetch_reports_progress_and_offline_message(monkeypatch, tmp_path):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: Resp(data))
+    from mobilia import netfast
+
+    monkeypatch.setattr(netfast, "urlopen", lambda req, timeout=0: Resp(data))      # downloads via netfast
     seen = []
     Wt._fetch("https://example.invalid/w.pth", tmp_path / "w.pth", progress=lambda d, t: seen.append((d, t)))
     assert (tmp_path / "w.pth").read_bytes() == data and seen[-1] == (len(data), len(data)) and len(seen) == 4
