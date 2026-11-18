@@ -14,6 +14,7 @@ Visual só com os tokens e nomes de objeto do tema (``theme``), sem cores própr
 from __future__ import annotations
 
 import threading
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 
@@ -24,7 +25,6 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QHBoxLayout, QL
 
 from .. import APP_NAME, __version__
 from . import theme, updater
-from .widgets import on_click
 
 
 def _button(text: str, kind: str) -> QPushButton:
@@ -102,15 +102,18 @@ class UpdateDialog(QDialog):
         for b in (self.btn_cancel, self.btn_folder, self.btn_later, self.btn_update):
             row.addWidget(b)
         lay.addLayout(row)
-        on_click(self.btn_update, self._primary)
-        on_click(self.btn_later, self.later_requested.emit)
-        on_click(self.btn_skip, self.skip_requested.emit)
-        on_click(self.btn_cancel, self.cancel_requested.emit)
-        on_click(self.btn_folder, self.folder_requested.emit)
+        # ligações diretas (sinal -> sinal/método), sem lambda: uma lambda que guarda a janela cria um ciclo que a
+        # mantém viva até o fim do Python, e o PySide a destrói depois do QApplication (o processo cai na saída).
+        # O ``checked`` do ``clicked(bool)`` é descartado (os sinais não têm parâmetros; ``_primary`` ignora).
+        self.btn_update.clicked.connect(self._primary)
+        self.btn_later.clicked.connect(self.later_requested)
+        self.btn_skip.clicked.connect(self.skip_requested)
+        self.btn_cancel.clicked.connect(self.cancel_requested)
+        self.btn_folder.clicked.connect(self.folder_requested)
         self.btn_update.setDefault(True)
 
     # ------------------------------------------------------------------------------------------ estados
-    def _primary(self) -> None:
+    def _primary(self, *_checked) -> None:
         (self.open_requested if self.state == "ready" else self.update_requested).emit()
 
     def _open_link(self, url: QUrl) -> None:
@@ -189,7 +192,7 @@ class UpdateController(QObject):
                  confirm: Callable[[str, str], bool] | None = None, spawn: Callable = _thread,
                  download_dir: Path | None = None, current: str = __version__):
         super().__init__(window)
-        self.window = window
+        self._window = weakref.ref(window) if window is not None else (lambda: None)   # sem ciclo com a janela
         self.enabled = updater.updater_enabled() if enabled is None else enabled
         self.kind = kind or updater.install_kind()
         self.settings_path = settings_path or updater.UpdaterSettings.path()
@@ -214,6 +217,10 @@ class UpdateController(QObject):
         self.bridge.progress.connect(self._on_progress)
         self.bridge.downloaded.connect(self._on_downloaded)
         self.bridge.failed.connect(self._on_failed)
+
+    @property
+    def window(self):
+        return self._window()
 
     # ------------------------------------------------------------------------------------------ consulta
     def start_auto_check(self, now: float | None = None) -> bool:
@@ -352,6 +359,13 @@ class UpdateController(QObject):
         if self.kind == "portable":
             self.dialog.set_ready(self.downloaded_path)
             return
+        if self.kind != "installed":            # código-fonte com MOBILIA_UPDATER_TEST=1: nunca executa nada
+            self.dialog.set_ready(self.downloaded_path)
+            self.dialog.btn_update.hide()
+            self.dialog._show_status(f"Modo de teste (código-fonte): {self.downloaded_path.name} foi baixado e "
+                                     f"conferido (SHA-256) em\n{self.downloaded_path.parent}\n"
+                                     "O instalador não é executado.")
+            return
         self.dialog.set_installing()
         try:
             self.launcher(self.downloaded_path)
@@ -385,10 +399,14 @@ class UpdateController(QObject):
         QApplication.quit()
 
 
-def attach_updater(window, statusbar, busy: Callable[[], bool] | None = None, **kw) -> UpdateController:
+def attach_updater(window, statusbar, jobs=(), **kw) -> UpdateController:
     """Liga a atualização à janela principal: botão "Atualizações" na barra de status e consulta automática
-    alguns segundos depois de abrir. Pelo código-fonte (sem ``MOBILIA_UPDATER_TEST=1``) não acrescenta nada."""
-    ctl = UpdateController(window, busy=busy, **kw)
+    alguns segundos depois de abrir. ``jobs``: tarefas com ``busy()`` (pergunta antes de fechar no meio de um
+    trabalho). Pelo código-fonte (sem ``MOBILIA_UPDATER_TEST=1``) não acrescenta nada."""
+    jobs = tuple(jobs)
+    if jobs and "busy" not in kw:
+        kw["busy"] = lambda: any(t.busy() for t in jobs)
+    ctl = UpdateController(window, **kw)
     if not ctl.enabled:
         return ctl
     btn = QPushButton("Atualizações"); btn.setObjectName("link"); btn.setCursor(Qt.PointingHandCursor)
@@ -398,7 +416,7 @@ def attach_updater(window, statusbar, busy: Callable[[], bool] | None = None, **
                        f"{theme.HAIRLINE_STRONG}; padding: 4px; }} QMenu::item {{ padding: 6px 18px; }} "
                        f"QMenu::item:selected {{ background: {theme.SELECTED_BG}; color: {theme.ACCENT_HI}; }}")
     act_check = QAction("Procurar atualizações", menu)
-    act_check.triggered.connect(lambda *_: ctl.check_now())
+    act_check.triggered.connect(ctl.check_now)
     act_auto = QAction("Procurar automaticamente ao abrir", menu)
     act_auto.setCheckable(True); act_auto.setChecked(ctl.settings.auto_check)
     act_auto.toggled.connect(ctl.set_auto_check)

@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
         sb = StatusBar(); self.setStatusBar(sb); sb.setSizeGripEnabled(False); self.sb = sb
         sb.addPermanentWidget(QLabel(f"{APP_NAME}  {__version__}"))
         # atualização automática (GitHub Releases): só no executável; ver updater_dialog.py
-        self.updater = attach_updater(self, sb, busy=lambda: self.design.busy() or self.side.busy())
+        self.updater = attach_updater(self, sb, jobs=(self.design, self.side))
         sb.showMessage("Detectando GPU…")
         self.probe = HardwareProbe(self); self.probe.done.connect(self._on_hardware)
         self.go(self.P_PHOTO)

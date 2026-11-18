@@ -600,6 +600,21 @@ def test_flow_portable_download_then_open(app, tmp_path):
     d.close()
 
 
+def test_flow_dev_test_mode_never_runs_installer(app, tmp_path):
+    h = Harness(tmp_path, kind="dev")
+    h.ctl.check_now()
+    h.ctl.dialog.btn_update.click()
+    assert h.downloads == ["setup"] and h.launched == [] and h.opened == [] and h.quits == 0
+    assert "Modo de teste" in h.ctl.dialog.status.text() and not h.ctl.dialog.btn_update.isVisible()
+    h.ctl.dialog.close()
+
+
+def test_download_http_error_message(tmp_path):
+    url = BASE + "x.exe"
+    with pytest.raises(up.UpdateError, match="código 404"):
+        up.download(url, tmp_path / "x.exe", FakeOpener({url: http_error(404)}))
+
+
 def test_auto_check_toggle_persists(app, tmp_path):
     h = Harness(tmp_path)
     h.ctl.check_now()

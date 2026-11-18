@@ -329,6 +329,10 @@ def download(url: str, dest: Path, opener=None, progress: Progress | None = None
     except UpdateError:
         _unlink(part)
         raise
+    except urllib.error.HTTPError as e:
+        _unlink(part)
+        raise UpdateError(f"Não foi possível baixar a atualização (o GitHub respondeu com o código {e.code}). "
+                          "Tente de novo mais tarde.") from e
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as e:
         _unlink(part)
         raise UpdateError(f"Não foi possível baixar a atualização (sem conexão?). Detalhe: {e}") from e
