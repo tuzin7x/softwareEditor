@@ -245,7 +245,9 @@ def payload_fingerprints(payload: Path, gpu: str | None = None) -> dict[str, str
     aquecimento, dependências + GPU/driver (``gpu``; ``None`` consulta o ``nvidia-smi``)."""
     deps = fingerprint(payload / "requirements")
     gpu = gpu_signature() if gpu is None else gpu
-    return {"app": fingerprint(payload / "mobilia", skip=("__pycache__", "ui")),
+    app = fingerprint(payload / "mobilia", skip=("__pycache__", "ui"))
+    fonts = fingerprint(payload / "mobilia" / "ui" / "fonts")   # vão para o motor (rótulos do vídeo)
+    return {"app": _text_sha(app + "|" + fonts) if app and fonts else app,
             "dependencias": deps,
             "modelos": models_fingerprint(payload),
             "ativos": _text_sha(_file_text(payload / "mobilia" / "layout" / "catalog.py")),
@@ -409,6 +411,11 @@ def step_runners(progress: Progress, paths: runtime.RuntimePaths, payload: Path,
             shutil.rmtree(paths.app_dir)
         shutil.copytree(payload / "mobilia", paths.app_dir / "mobilia",
                         ignore=shutil.ignore_patterns("__pycache__", "ui"))
+        # a interface não vai para o motor, mas as fontes dela sim: o vídeo antes e depois (``video/showcase``)
+        # escreve os rótulos com a Inter (sem elas cairia na fonte bitmap padrão do PIL)
+        fonts = payload / "mobilia" / "ui" / "fonts"
+        if fonts.is_dir():
+            shutil.copytree(fonts, paths.app_dir / "mobilia" / "ui" / "fonts")
 
     return {
         "python": python_step,

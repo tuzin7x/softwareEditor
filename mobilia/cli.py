@@ -115,7 +115,15 @@ def _cmd_batch(a) -> int:
 
 
 def _json_or_human(a):
+    import threading
+
+    lock = threading.Lock()   # o download dos pesos informa o progresso também de uma thread auxiliar
+
     def emit(ev):
+        with lock:
+            _emit(ev)
+
+    def _emit(ev):
         if a.json:
             print(json.dumps(ev, ensure_ascii=False), flush=True)
         elif ev.get("event") == "progress":

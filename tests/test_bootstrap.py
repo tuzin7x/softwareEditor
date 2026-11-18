@@ -290,3 +290,50 @@ def test_cpu_installer_warmup_runs_real_blender_and_saves_state(tmp_path, monkey
     assert len(devs[0]["renders"]) == 3 and all(r["amostras"] for r in devs[0]["renders"])
     assert st["primeira_execucao_pendente"] is True
     assert any("Kernels de render prontos" in m for m in msgs)
+
+
+def test_runtime_requirements_cover_design_engine():
+    """O redesenho (fluxo principal) usa diffusers/accelerate/safetensors: precisam ir para o motor do cliente."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "requirements"
+    for f in ("runtime-cuda.txt", "runtime-cpu.txt"):
+        _, reqs = bootstrap.parse_requirements((root / f).read_text())
+        names = {r.split("==")[0].split()[0].lower() for r in reqs}
+        assert {"diffusers", "accelerate", "safetensors", "transformers", "opencv-python-headless",
+                "huggingface_hub", "imageio-ffmpeg", "pillow"} <= names, f
+        assert all("==" in r for r in reqs if r.split("==")[0].lower() in ("diffusers", "accelerate", "safetensors"))
+
+
+def test_prefetch_reports_bytes_while_a_big_weight_downloads(tmp_path):
+    import time
+
+    from mobilia.analysis import weights
+
+    got = []
+    folder = tmp_path / "blobs"
+    folder.mkdir()
+    with weights._download_monitor(lambda f, m: got.append((f, m)), 0.5, "gerador", folder, every_s=0.05):
+        (folder / "x.incomplete").write_bytes(b"\0" * (3 << 20))
+        time.sleep(0.4)
+    assert got and all(f == 0.5 for f, _ in got)
+    assert "MB baixados" in got[-1][1] and got[-1][1].startswith("gerador")
+
+
+def test_engine_copy_keeps_ui_fonts_for_the_showcase_labels(tmp_path):
+    """O motor não leva a interface, mas leva as fontes (rótulos do vídeo antes e depois)."""
+    from mobilia import runtime
+
+    payload = tmp_path / "payload"
+    (payload / "mobilia" / "video").mkdir(parents=True)
+    (payload / "mobilia" / "video" / "showcase.py").write_text("x = 1\n")
+    (payload / "mobilia" / "ui" / "fonts").mkdir(parents=True)
+    (payload / "mobilia" / "ui" / "app.py").write_text("ui = 1\n")
+    (payload / "mobilia" / "ui" / "fonts" / "Inter-Medium.otf").write_bytes(b"otf")
+    paths = runtime.RuntimePaths(tmp_path / "home")
+    bootstrap.step_runners(lambda *a: None, paths, payload, {})["app"]()
+    app = paths.app_dir / "mobilia"
+    assert (app / "video" / "showcase.py").exists() and (app / "ui" / "fonts" / "Inter-Medium.otf").exists()
+    assert not (app / "ui" / "app.py").exists()
+    fps = bootstrap.payload_fingerprints(payload, gpu="")
+    (payload / "mobilia" / "ui" / "fonts" / "Inter-Medium.otf").write_bytes(b"otf2")
+    assert bootstrap.payload_fingerprints(payload, gpu="")["app"] != fps["app"]

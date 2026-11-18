@@ -5,6 +5,11 @@ torch==2.15.0+cu132
 torchvision==0.29.2+cu132
 bpy==5.3.0
 transformers==5.23.0
+# Redesenho de ambientes (fluxo principal): SDXL + ControlNet pelo diffusers; accelerate carrega os pesos sem
+# duplicar a RAM; safetensors lê os arquivos .safetensors. Versões testadas com o torch e o transformers acima.
+diffusers==0.43.0
+accelerate==1.16.0
+safetensors==0.8.0
 huggingface_hub
 numpy
 scipy

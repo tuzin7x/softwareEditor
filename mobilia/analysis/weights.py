@@ -99,14 +99,81 @@ def prefetch_models(progress: Callable[[float, str], None] | None = None, v3: bo
     for i, repo in enumerate(repos):
         if progress:
             progress(i / n, repo)
-        snapshot_download(repo, allow_patterns=PATTERNS)
+        with _download_monitor(progress, i / n, repo, _repo_cache_dir(repo)):
+            snapshot_download(repo, allow_patterns=PATTERNS)
     if progress:
         progress(len(repos) / n, ONEFORMER_METADATA[0])
     hf_hub_download(ONEFORMER_METADATA[0], ONEFORMER_METADATA[1], repo_type="dataset")
     for j, w in enumerate(v3w):
+        f = (len(repos) + 1 + j) / n
         if progress:
-            progress((len(repos) + 1 + j) / n, w.label)
-        ensure_weight(w)
+            progress(f, w.label)
+        folder = _repo_cache_dir(w.repo_id) if isinstance(w, HubWeight) else file_weight_path(w).parent
+        with _download_monitor(progress, f, w.label, folder):
+            ensure_weight(w)
+
+
+def _repo_cache_dir(repo_id: str) -> Path | None:
+    try:
+        from huggingface_hub import constants
+
+        return Path(constants.HF_HUB_CACHE) / ("models--" + repo_id.replace("/", "--"))
+    except Exception:
+        return None
+
+
+def _dir_bytes(folder: Path | None) -> int:
+    if folder is None or not folder.exists():
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            p = os.path.join(root, name)
+            try:
+                if not os.path.islink(p):
+                    total += os.path.getsize(p)
+            except OSError:
+                pass
+    return total
+
+
+class _download_monitor:
+    """Enquanto um peso grande baixa (o gerador do SDXL tem ~5 GB num arquivo só), repete o progresso a cada
+    poucos segundos com os MB já gravados na pasta de destino, para a instalação não parecer travada."""
+
+    def __init__(self, progress, fraction: float, label: str, folder: Path | None, every_s: float = 2.0):
+        import threading
+
+        self.progress, self.fraction, self.label, self.folder, self.every = progress, fraction, label, folder, every_s
+        self.stop = threading.Event()
+        self.thread = None
+
+    def __enter__(self):
+        import threading
+
+        if self.progress is None or self.folder is None:
+            return self
+        self.base = _dir_bytes(self.folder)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        return self
+
+    def _run(self):
+        last = 0
+        while not self.stop.wait(self.every):
+            got = _dir_bytes(self.folder) - self.base
+            if got - last >= 1 << 20:
+                last = got
+                try:
+                    self.progress(self.fraction, f"{self.label} ({got / 1e6:.0f} MB baixados)")
+                except Exception:
+                    return
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+        return False
 
 
 # ============================================================================ pesos do modo B (V3)
