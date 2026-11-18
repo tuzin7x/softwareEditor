@@ -289,9 +289,14 @@ def cap_doors(lock: np.ndarray, door: np.ndarray, max_frac: float = 0.12, all_fr
 
 
 def new_openings(gen_groups: np.ndarray, original_openings: np.ndarray, size: tuple[int, int],
-                 min_frac: float = 0.004) -> np.ndarray:
+                 min_frac: float = 0.004, source_groups: np.ndarray | None = None, wall_frac: float = 0.5
+                 ) -> np.ndarray:
     """Janela/porta/cortina na imagem gerada onde a foto não tinha abertura (a abertura original, dilatada, fica de
-    fora: cortinas emoldurando a janela existente são bem-vindas). Resolução ``size`` = (largura, altura)."""
+    fora: cortinas emoldurando a janela existente são bem-vindas). Resolução ``size`` = (largura, altura).
+
+    ``source_groups`` (grupos da foto): só conta o que nasceu numa PAREDE (ou teto) lisa da foto — ao menos
+    ``wall_frac`` do componente. Um box de vidro ou um armário de portas onde a foto tinha um armário/espelho é
+    móvel novo, não abertura inventada; refazê-lo como "parede lisa" deixava um borrão bege no lugar."""
     g = np.asarray(gen_groups)
     if (g.shape[1], g.shape[0]) != tuple(size):
         g = cv2.resize(g, tuple(size), interpolation=cv2.INTER_NEAREST)
@@ -304,7 +309,79 @@ def new_openings(gen_groups: np.ndarray, original_openings: np.ndarray, size: tu
     near_cover = cv2.dilate(orig.astype(np.uint8), _disk(int(0.08 * diag))).astype(bool)
     hard = np.isin(g, [GROUP_IDS["window"], GROUP_IDS["door"]]) & ~near_open
     soft = (g == GROUP_IDS["window_covering"]) & ~near_cover
-    return clean_mask(hard | soft, min_frac=min_frac)
+    out = clean_mask(hard | soft, min_frac=min_frac)
+    if source_groups is not None and out.any():
+        sg = np.asarray(source_groups)
+        if sg.shape != g.shape:
+            sg = cv2.resize(sg, tuple(size), interpolation=cv2.INTER_NEAREST)
+        plain = np.isin(sg, [GROUP_IDS["wall"], GROUP_IDS["ceiling"]])
+        n, lab = cv2.connectedComponents(out.astype(np.uint8), connectivity=8)
+        for k in range(1, n):
+            comp = lab == k
+            if float(plain[comp].mean()) < wall_frac:
+                out[comp] = False
+    return out
+
+
+def missing_openings(gen_groups: np.ndarray, source_openings: np.ndarray, size: tuple[int, int],
+                     min_frac: float = 0.002, keep_frac: float = 0.35) -> np.ndarray:
+    """Aberturas da foto (janela, cortina/persiana) que SUMIRAM na imagem gerada: componentes de
+    ``source_openings`` em que menos de ``keep_frac`` dos pixels continuam janela/porta/cortina na segmentação da
+    imagem gerada (viraram parede, tijolo, armário...). Resolução ``size`` = (largura, altura)."""
+    g = np.asarray(gen_groups)
+    if (g.shape[1], g.shape[0]) != tuple(size):
+        g = cv2.resize(g, tuple(size), interpolation=cv2.INTER_NEAREST)
+    src = np.asarray(source_openings, bool)
+    if src.shape != g.shape:
+        src = cv2.resize(src.astype(np.uint8), tuple(size), interpolation=cv2.INTER_NEAREST).astype(bool)
+    out = np.zeros(g.shape, bool)
+    if not src.any():
+        return out
+    still = np.isin(g, [GROUP_IDS["window"], GROUP_IDS["door"], GROUP_IDS["window_covering"]])
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(src.astype(np.uint8), connectivity=8)
+    for k in range(1, n):
+        if stats[k, cv2.CC_STAT_AREA] < min_frac * src.size:
+            continue
+        comp = lab == k
+        if float(still[comp].mean()) < keep_frac:
+            out |= comp
+    return out
+
+
+def paste_ceiling(generated: np.ndarray, original: np.ndarray, mask: np.ndarray, feather_frac: float = 0.025
+                  ) -> tuple[np.ndarray, dict]:
+    """Teto original por cima da imagem gerada (``mask``: teto da foto, já sem as luminárias/móveis que o gerador
+    pôs ali). Rampa toda por DENTRO do teto (a junção teto/parede da imagem gerada fica intacta: nada da faixa
+    borrada que manter o teto nos latentes deixava) e cor de baixa frequência casada com a do gerador."""
+    m = np.asarray(mask, bool)
+    if not m.any():
+        return generated, {"fracao": 0.0}
+    diag = float(np.hypot(*m.shape))
+    src = match_color(original, generated, m, sigma=max(2.0, 0.01 * diag), max_shift=10.0, amount=0.7)
+    alpha = feather_alpha(m, max(2.0, feather_frac * diag), inside=1.0)
+    return composite(generated, src, alpha), {"fracao": round(float(m.mean()), 4)}
+
+
+def ceiling_keep_mask(src_groups: np.ndarray, gen_groups: np.ndarray, size: tuple[int, int],
+                      lock: np.ndarray | None = None, edge_frac: float = 0.006, clear_frac: float = 0.03
+                      ) -> np.ndarray:
+    """Onde o teto da foto volta: teto na foto (sem a faixa junto da parede), menos onde a imagem gerada tem
+    luminária, móvel ou armário (um pendente novo não perde o fio) e menos a trava das aberturas."""
+    W, H = size
+    ceil = lock_mask(src_groups, ("ceiling",), (W, H))
+    if not ceil.any():
+        return ceil
+    diag = float(np.hypot(W, H))
+    ceil = cv2.erode(ceil.astype(np.uint8), _disk(max(1, int(edge_frac * diag)))).astype(bool)
+    g = np.asarray(gen_groups)
+    if (g.shape[1], g.shape[0]) != (W, H):
+        g = cv2.resize(g, (W, H), interpolation=cv2.INTER_NEAREST)
+    busy = np.isin(g, [GROUP_IDS["ceiling_fixture"], GROUP_IDS["furniture"], GROUP_IDS["fixture"]])
+    busy = cv2.dilate(busy.astype(np.uint8), _disk(max(1, int(clear_frac * diag)))).astype(bool)
+    out = ceil & ~busy
+    if lock is not None:
+        out &= ~np.asarray(lock, bool)
+    return clean_mask(out, min_frac=0.002)
 
 
 def anchor_tone(img: np.ndarray, ref: np.ndarray, amount_l: float = 0.35, amount_ab: float = 0.35,
@@ -335,4 +412,5 @@ def anchor_tone(img: np.ndarray, ref: np.ndarray, amount_l: float = 0.35, amount
 
 __all__ = ["LOCK_GROUPS", "clean_mask", "lock_mask", "feather_alpha", "match_color", "composite", "lock_openings",
            "generation_mask", "user_mask", "mask_bbox", "label_mask", "bright_coverings", "doorway_views",
-           "frame_only", "cap_doors", "new_openings", "anchor_tone"]
+           "frame_only", "cap_doors", "new_openings", "missing_openings", "paste_ceiling", "ceiling_keep_mask",
+           "anchor_tone"]

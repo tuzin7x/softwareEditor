@@ -21,10 +21,18 @@ from ..analysis.segmentation import GROUP_IDS, labels_to_groups
 
 FURNISHED_TARGET = 0.30      # fração mobiliada a partir da qual a nota não sobe mais
 NEW_OPENING_WEIGHT = 4.0
+MISSING_OPENING_WEIGHT = 3.0
+OVERSIZE_FRAC = 0.22         # um único móvel cobrindo mais que isto da imagem: fora de escala (sofá gigante)
+OVERSIZE_WEIGHT = 2.0
 
 
-def score(groups: np.ndarray, lock: np.ndarray, furnish: bool = True) -> dict:
-    """Nota de um candidato a partir dos grupos semânticos da imagem gerada (``lock`` na mesma resolução)."""
+def score(groups: np.ndarray, lock: np.ndarray, furnish: bool = True, source_openings: np.ndarray | None = None
+          ) -> dict:
+    """Nota de um candidato a partir dos grupos semânticos da imagem gerada (``lock`` na mesma resolução).
+
+    ``source_openings``: janelas/cortinas da foto fora da trava; as que sumiram (viraram parede) pesam contra
+    (``aberturas_perdidas``). ``maior_movel``: fração da imagem do maior móvel contínuo; acima de
+    ``OVERSIZE_FRAC`` pesa contra (móvel fora de escala)."""
     g = np.asarray(groups)
     lk = np.asarray(lock, bool)
     if lk.shape != g.shape:
@@ -33,11 +41,37 @@ def score(groups: np.ndarray, lock: np.ndarray, furnish: bool = True) -> dict:
     furn = np.isin(g, [GROUP_IDS["furniture"], GROUP_IDS["fixture"]]) & free
     f = float(furn.sum() / max(free.sum(), 1))
     r = max(2, int(0.02 * np.hypot(*g.shape)))
-    near = cv2.dilate(lk.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2)).astype(bool)
+    known = lk
+    if source_openings is not None:       # abertura da foto que continua lá não é "nova"
+        so = np.asarray(source_openings, bool)
+        if so.shape != g.shape:
+            so = cv2.resize(so.astype(np.uint8), (g.shape[1], g.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+        known = lk | so
+    near = cv2.dilate(known.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2)).astype(bool)
     openings = np.isin(g, [GROUP_IDS["window"], GROUP_IDS["door"]]) & ~near
     o = float(openings.mean())
     s = (min(f, FURNISHED_TARGET) / FURNISHED_TARGET if furnish else 0.0) - NEW_OPENING_WEIGHT * o / 0.02
-    return {"nota": round(s, 4), "mobiliado": round(f, 4), "aberturas_novas": round(o, 4)}
+    miss = 0.0
+    if source_openings is not None:
+        from .archlock import missing_openings
+
+        src = np.asarray(source_openings, bool)
+        if src.shape != g.shape:
+            src = cv2.resize(src.astype(np.uint8), (g.shape[1], g.shape[0]),
+                             interpolation=cv2.INTER_NEAREST).astype(bool)
+        if src.any():
+            lost = missing_openings(g, src, (g.shape[1], g.shape[0]))
+            miss = float(lost.sum() / max(float(src.sum()), 1.0))
+            s -= MISSING_OPENING_WEIGHT * miss
+    big = 0.0
+    fm = np.isin(g, [GROUP_IDS["furniture"]]).astype(np.uint8)
+    if fm.any():
+        n, _, stats, _ = cv2.connectedComponentsWithStats(fm, connectivity=8)
+        big = float(stats[1:, cv2.CC_STAT_AREA].max() / fm.size) if n > 1 else 0.0
+        if furnish and big > OVERSIZE_FRAC:
+            s -= OVERSIZE_WEIGHT * (big - OVERSIZE_FRAC) / 0.1
+    return {"nota": round(s, 4), "mobiliado": round(f, 4), "aberturas_novas": round(o, 4),
+            "aberturas_perdidas": round(miss, 4), "maior_movel": round(big, 4)}
 
 
 class Segmenter:
@@ -94,4 +128,5 @@ def rank(images: list[np.ndarray], lock: np.ndarray, device: str = "cpu", furnis
             seg.close()
 
 
-__all__ = ["score", "rank", "Segmenter", "FURNISHED_TARGET", "NEW_OPENING_WEIGHT"]
+__all__ = ["score", "rank", "Segmenter", "FURNISHED_TARGET", "NEW_OPENING_WEIGHT", "MISSING_OPENING_WEIGHT",
+           "OVERSIZE_FRAC"]

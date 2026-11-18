@@ -176,7 +176,7 @@ class DesignEngine:
             control = np.zeros((h, w), np.float32)
             control_scale, control_end = 0.0, 1.0
         ctrl = np.repeat((np.clip(control, 0, 1) * 255).round().astype(np.uint8)[..., None], 3, axis=2)
-        m8 = (np.asarray(mask, bool).astype(np.uint8) * 255)
+        m8, soft = mask_u8(mask)
 
         def _cb(pipe, i, t, kw):
             if callback is not None:
@@ -184,23 +184,46 @@ class DesignEngine:
             return kw
 
         t0 = time.perf_counter()
-        with torch.inference_mode():
-            res = self.pipe(
-                prompt_embeds=e["prompt"].to(dev, dt), negative_prompt_embeds=e["negative"].to(dev, dt),
-                pooled_prompt_embeds=e["pooled"].to(dev, dt),
-                negative_pooled_prompt_embeds=e["negative_pooled"].to(dev, dt),
-                image=Image.fromarray(np.ascontiguousarray(image)), mask_image=Image.fromarray(m8),
-                control_image=Image.fromarray(ctrl), height=h, width=w, strength=min(1.0, strength + 1e-4),
-                num_inference_steps=steps, guidance_scale=float(guidance),
-                controlnet_conditioning_scale=float(control_scale), control_guidance_start=0.0,
-                control_guidance_end=float(max(control_end, 0.05)),
-                generator=torch.Generator(device="cpu").manual_seed(int(seed)), output_type="np",
-                callback_on_step_end=_cb)
+        hard_proc = self.pipe.mask_processor
+        if soft:
+            # máscara suave: o diffusers binariza por padrão; sem isso a mistura dos latentes a cada passo vira um
+            # degradê (a área nova "funde" com a foto em vez de terminar num contorno visível)
+            from diffusers.image_processor import VaeImageProcessor
+
+            self.pipe.mask_processor = VaeImageProcessor(vae_scale_factor=self.pipe.vae_scale_factor,
+                                                         do_normalize=False, do_binarize=False,
+                                                         do_convert_grayscale=True)
+        try:
+            with torch.inference_mode():
+                res = self.pipe(
+                    prompt_embeds=e["prompt"].to(dev, dt), negative_prompt_embeds=e["negative"].to(dev, dt),
+                    pooled_prompt_embeds=e["pooled"].to(dev, dt),
+                    negative_pooled_prompt_embeds=e["negative_pooled"].to(dev, dt),
+                    image=Image.fromarray(np.ascontiguousarray(image)), mask_image=Image.fromarray(m8),
+                    control_image=Image.fromarray(ctrl), height=h, width=w, strength=min(1.0, strength + 1e-4),
+                    num_inference_steps=steps, guidance_scale=float(guidance),
+                    controlnet_conditioning_scale=float(control_scale), control_guidance_start=0.0,
+                    control_guidance_end=float(max(control_end, 0.05)),
+                    generator=torch.Generator(device="cpu").manual_seed(int(seed)), output_type="np",
+                    callback_on_step_end=_cb)
+        finally:
+            self.pipe.mask_processor = hard_proc
         out = res.images[0]
         dt_s = time.perf_counter() - t0
         self.calls.append({"tamanho": [w, h], "passos_efetivos": n_eff, "s": round(dt_s, 2),
                            "s_por_passo": round(dt_s / n_eff, 3)})
         return (np.clip(out, 0, 1) * 255).round().astype(np.uint8)
+
+
+def mask_u8(mask: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Máscara para o pipeline (uint8 0–255) e se ela é suave: ``bool`` = binária (o padrão); ``float`` em [0, 1] =
+    suave (peso da geração por pixel; a mistura com os latentes da foto a cada passo segue esse peso)."""
+    m = np.asarray(mask)
+    if m.dtype == bool:
+        return m.astype(np.uint8) * 255, False
+    m = np.clip(m.astype(np.float32), 0, 1)
+    soft = bool(((m > 0.02) & (m < 0.98)).any())
+    return (m * 255 + 0.5).astype(np.uint8), soft
 
 
 def plan_steps(steps: int, strength: float) -> tuple[int, float, int]:
@@ -312,4 +335,4 @@ def release_engines() -> None:
 
 
 __all__ = ["Generator", "DesignEngine", "get_engine", "release_engines", "encode_prompts", "pick_device",
-           "OFFLOAD_BELOW_GB", "plan_steps"]
+           "OFFLOAD_BELOW_GB", "plan_steps", "mask_u8"]

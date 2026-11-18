@@ -37,7 +37,10 @@ class FakeEngine:
 
     def generate(self, image, mask, control, prompt, seed, strength, steps, guidance, control_scale, control_end,
                  callback=None):
-        self.calls.append(dict(shape=image.shape, mask=mask.copy(), control=None if control is None else
+        mask = np.asarray(mask)
+        if mask.dtype != bool:          # máscara suave (peso em [0, 1]): "gera" onde o peso passa de 0,5
+            mask = mask > 0.5
+        self.calls.append(dict(shape=image.shape, image=np.asarray(image).copy(), mask=mask.copy(), control=None if control is None else
                                control.copy(), prompt=prompt, seed=seed, strength=strength, steps=steps,
                                guidance=guidance, control_scale=control_scale, control_end=control_end))
         for k in range(1, 4):
@@ -111,10 +114,10 @@ def test_catalog_has_all_functions_styles_and_rooms():
 
 def test_function_strengths_are_ordered():
     f = P.FUNCTIONS
-    assert f["redesign_simples"].strength < f["mudar_estilo"].strength < f["reforma"].strength
+    assert f["redesign_simples"].strength < f["mudar_estilo"].strength <= f["reforma"].strength
     assert 0.35 <= f["redesign_simples"].strength <= 0.5
-    assert 0.55 <= f["mudar_estilo"].strength <= 0.85
-    assert f["reforma"].strength >= 0.8 and f["reforma"].control_scale < f["mudar_estilo"].control_scale
+    assert 0.78 <= f["mudar_estilo"].strength <= 0.9 and f["mudar_estilo"].control_end <= 0.75
+    assert f["reforma"].strength >= 0.85 and f["reforma"].structural and not f["mudar_estilo"].structural
     assert set(f["mobiliar"].lock) >= {"window", "door"} and f["mobiliar"].control_scale < 0.5
     assert f["mudar_estilo"].lock == ("window", "door") and f["editar_area"].lock == ()
 
@@ -141,7 +144,7 @@ def test_style_adjective_leads_and_variations_change_palette():
 
 def test_free_text_goes_first_and_events_and_facade():
     p = P.build_prompt("reforma", "luxo", "sala", 0, extra="  sofá   verde  ")
-    assert p.positive.startswith("sofá verde, ")
+    assert p.positive.startswith("green sofa, ")          # texto do usuário traduzido (glossary.py)
     e = P.build_prompt("evento", None, "sala", 0, evento="natal")
     assert "christmas tree" in e.positive and P.NEGATIVE_EMPTY not in e.negative
     f = P.build_prompt("fachada", "tropical", "sala", 0)
@@ -431,7 +434,7 @@ def test_text_to_design(tmp_path):
     assert H > W and W % 64 == 0 and len(res.outputs) == 2
     c = eng.calls[0]
     assert c["strength"] == 1.0 and c["control"] is None and c["mask"].all()
-    assert c["prompt"].positive.startswith("sala aconchegante com lareira")
+    assert c["prompt"].positive.startswith("cozy living room with fireplace")     # português -> inglês
 
 
 def test_depth_control_near_is_bright_and_invalid_is_far():
@@ -598,7 +601,7 @@ def test_prompts_curtains_only_with_windows_and_palette_yields_to_user_text():
     assert "curtains framing the existing windows" in q.positive and "existing windows" in q.positive
     e = P.build_prompt("editar_area", "mid_century", "sala", 1, extra="poltrona de couro caramelo")
     assert not any(pal in e.positive for pal in P.STYLES["mid_century"].palettes)
-    assert e.positive.startswith("poltrona de couro caramelo") and "mid-century" in e.positive
+    assert e.positive.startswith("a leather caramel armchair") and "mid-century" in e.positive
     b = P.build_prompt("mudar_estilo", "costeiro", "banheiro", 0)
     assert "shiplap" in b.positive and "sofa" not in b.positive.split("a floating vanity")[0]
     k = P.build_prompt("mudar_estilo", "tropical", "sala", 0, open_kitchen=True)
@@ -715,3 +718,224 @@ def test_anchor_tone_pulls_cast_back_but_keeps_style_color():
     assert out[..., 0].mean() - out[..., 2].mean() > 20      # mas ainda quente (âncora parcial)
     same = AL.anchor_tone(ref, ref)
     assert np.abs(same.astype(int) - ref.astype(int)).max() <= 2
+
+
+# ============================================================================ correções da avaliação (rodada 3)
+def test_portuguese_free_text_is_translated_for_the_generator():
+    from mobilia.design.glossary import to_english
+
+    assert to_english("mesa de centro baixa retangular de madeira clara com livros e um vaso de cerâmica") == \
+        "low rectangular light wood coffee table with books and ceramic vase"
+    assert to_english("sofá de linho bege com almofadas verdes") == "linen beige sofa with green cushions"
+    assert to_english("a wooden coffee table with flowers") == "a wooden coffee table with flowers"   # já inglês
+    assert to_english("sofá") == "sofa" and to_english("") == ""
+    p = P.build_prompt("editar_area", None, "sala", 0, "mesa de centro de madeira com flores")
+    assert p.positive.startswith("a wood coffee table with flowers") and "living room" in p.positive
+    assert "empty floor" in p.negative
+
+
+def test_soft_mask_is_kept_soft_for_the_pipeline():
+    from mobilia.design.engine import mask_u8
+
+    hard, soft = mask_u8(np.array([[True, False]]))
+    assert not soft and hard.tolist() == [[255, 0]]
+    m, soft = mask_u8(np.array([[1.0, 0.5, 0.0]], np.float32))
+    assert soft and m.tolist() == [[255, 128, 0]]
+
+
+def _plane_room(H=120, W=160):
+    """Profundidade sintética: parede do fundo (z = 5) e piso (disparidade linear em y) com um 'sofá' perto."""
+    ys = np.arange(H, dtype=np.float32)[:, None] * np.ones((1, W), np.float32)
+    z = np.full((H, W), 5.0, np.float32)
+    floor = ys >= H // 2
+    disp_floor = 0.2 + (ys - H // 2) / (H // 2) * 0.6             # 1/z: de 0,2 (fundo) a 0,8 (perto)
+    z[floor] = 1.0 / disp_floor[floor]
+    g = np.full((H, W), WALL, np.uint8)
+    g[floor] = FLOOR
+    sofa = np.zeros((H, W), bool)
+    sofa[H // 3:H * 3 // 4, W // 4:W * 11 // 16] = True
+    z_sofa = z.copy()
+    z_sofa[sofa] = 1.6                                            # o sofá está na frente da parede e do piso
+    g_sofa = g.copy()
+    g_sofa[sofa] = FURN
+    return z, z_sofa, g_sofa, sofa
+
+
+def test_structural_depth_removes_furniture_and_restores_planes():
+    from mobilia.design import structure as S
+
+    z, z_sofa, g, sofa = _plane_room()
+    out = S.structural_depth(z_sofa, sofa, g)
+    inner = np.zeros_like(sofa)
+    inner[46:84, 48:102] = True
+    err = np.abs(1 / out[inner] - 1 / z[inner]) / (1 / z[inner])
+    assert np.median(err) < 0.08                                     # parede e piso atrás do sofá voltam
+    assert np.all(out[sofa] >= z_sofa[sofa] - 1e-3)                  # nada mais perto que o próprio móvel
+    assert np.array_equal(out[~sofa], z_sofa[~sofa])                 # fora do buraco nada muda
+    hole = S.movable_mask(g, grow_frac=0.0)
+    assert hole[60, 70] and not hole[10, 10]
+
+
+def test_reforma_uses_structural_depth_and_prefills_the_furniture(tmp_path):
+    z, z_sofa, g, sofa = _plane_room(240, 320)
+    rgb = np.full((240, 320, 3), 200, np.uint8)
+    rgb[g == FLOOR] = (140, 100, 70)
+    rgb[sofa] = (40, 40, 160)                                       # sofá azul
+    eng = FakeEngine()
+    res = api.redesign(rgb, "reforma", "japandi", "sala", n=1, seed=1, out_dir=tmp_path / "r", engine=eng,
+                       depth=z_sofa, groups=g, long_side=320, repair=False)
+    c = eng.calls[0]
+    H, W = c["shape"][:2]
+    ctl_plain = api.depth_control(z_sofa, (W, H))
+    yy, xx = int(0.54 * H), int(0.45 * W)
+    assert c["control"][yy, xx] < ctl_plain[yy, xx] - 0.1            # a silhueta do sofá saiu do controle
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["trava"]["profundidade_estrutural"] and rep["trava"]["estrutural_moveis"] > 0.05
+    px = c["image"][yy, xx].astype(int)                             # o sofá azul não semeia a geração
+    assert px[2] - px[0] < 60
+    # mudar estilo mantém a disposição: profundidade da foto como está
+    eng2 = FakeEngine()
+    api.redesign(rgb, "mudar_estilo", "japandi", "sala", n=1, seed=1, out_dir=tmp_path / "m", engine=eng2,
+                 depth=z_sofa, groups=g, long_side=320, repair=False)
+    assert abs(eng2.calls[0]["control"][yy, xx] - ctl_plain[yy, xx]) < 0.05
+
+
+def test_edit_area_soft_mask_structural_control_and_translation(room, tmp_path):
+    rgb, _, depth, _ = room
+    mask = np.zeros(rgb.shape[:2], np.uint8)
+    mask[160:220, 60:150] = 255
+    d = depth.copy()
+    d[160:220, 60:150] = 1.0                                        # o objeto antigo, bem perto
+    seen = {}
+
+    class Eng(FakeEngine):
+        def generate(self, image, mask, *a, **k):
+            seen["mask"] = np.asarray(mask).copy()
+            return super().generate(image, mask, *a, **k)
+
+    eng = Eng()
+    res = api.edit_area(rgb, mask, prompt="mesa de centro de madeira com flores", n=1, seed=4,
+                        out_dir=tmp_path / "e", engine=eng, depth=d)
+    w = seen["mask"]
+    assert w.dtype != bool and w.max() == pytest.approx(1.0) and ((w > 0.05) & (w < 0.95)).any()   # rampa suave
+    c = eng.calls[0]
+    assert "coffee table" in c["prompt"].positive and c["control"] is not None
+    H, W = c["shape"][:2]
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    x0, y0, x1, y1 = rep["recorte"]
+    cy, cx = int((190 - y0) / (y1 - y0) * H), int((105 - x0) / (x1 - x0) * W)
+    ring = c["control"][max(0, cy - 40):cy + 40, :]
+    assert c["control"][cy, cx] < ring.max() + 1e-3 and c["control"][cy, cx] < 0.95   # sem a silhueta do objeto
+    # o recorte tem contexto: bem maior que a área pintada
+    assert (x1 - x0) * (y1 - y0) > 3 * (90 * 60)
+
+
+def test_missing_opening_is_restored_and_ceiling_kept(tmp_path):
+    rgb, g, depth, (y0, y1, x0, x1) = _room()
+    H, W = rgb.shape[:2]
+    COV = GROUP_IDS["window_covering"]
+    g = g.copy()
+    g[y0:y1, 20:70] = COV                                   # uma persiana fechada (não travada no "Mudar estilo")
+    rgb[y0:y1, 20:70] = (90, 60, 30)
+    eng = FakeEngine()
+
+    def gen_groups(img):                                    # a persiana virou parede na imagem gerada
+        out = np.full(img.shape[:2], WALL, np.uint8)
+        out[: img.shape[0] // 6] = CEIL
+        return out
+
+    res = api.redesign(rgb, "mudar_estilo", "industrial", "sala", n=1, seed=2, out_dir=tmp_path, engine=eng,
+                       depth=depth, groups=g, long_side=320, rank_fn=gen_groups)
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["reparos"]["0"]["aberturas_perdidas"] > 0
+    base = np.asarray(Image.open(res.before))
+    Wr, Hr = res.size
+    sx, sy = Wr / W, Hr / H
+    core = (slice(int((y0 + 8) * sy), int((y1 - 8) * sy)), slice(int(28 * sx), int(62 * sx)))
+    assert np.abs(res.images[0][core].astype(int) - base[core].astype(int)).mean() < 30
+    # teto: a foto volta (só com o casamento de cor), a junção com a parede fica com a imagem gerada
+    assert rep["reparos"]["0"]["teto"] > 0.05
+    top = (slice(2, int(H / 6 * sy) - 8), slice(10, Wr - 10))
+    assert np.abs(res.images[0][top].astype(int) - base[top].astype(int)).mean() < 30
+    assert P.FUNCTIONS["mobiliar"].keep_ceiling and not P.FUNCTIONS["reforma"].keep_ceiling
+
+
+def test_ceiling_keep_mask_spares_new_pendant_lights():
+    src = np.full((100, 100), WALL, np.uint8)
+    src[:30] = CEIL
+    gen = src.copy()
+    gen[0:25, 45:55] = GROUP_IDS["ceiling_fixture"]                 # um pendente novo
+    m = AL.ceiling_keep_mask(src, gen, (100, 100))
+    assert m[10, 20] and not m[10, 50] and not m[29, 20]
+
+
+def test_refine_openings_finds_window_behind_glass():
+    g = np.full((100, 100), WALL, np.uint8)
+    g[10:90, 40:90] = DOOR                                          # box de vidro inteiro = "porta"
+    rgb = np.zeros((200, 200, 3), np.uint8)
+
+    def seg_fn(crop):                                               # o recorte ampliado mostra a janela
+        out = np.full(crop.shape[:2], DOOR, np.uint8)
+        h, w = out.shape
+        out[int(h * 0.2):int(h * 0.4), int(w * 0.3):int(w * 0.7)] = WIN
+        return out
+
+    g2, changed = api.refine_openings(rgb, g, seg_fn)
+    assert changed > 0 and (g2 == WIN).sum() == changed and np.all(g2[g != DOOR] == g[g != DOOR])
+    lock = AL.lock_mask(g2, ("window", "door"))
+    lock2, _ = AL.cap_doors(lock, AL.lock_mask(g2, ("door",)), all_frames=True)    # banheiro: só a moldura
+    assert lock2[(g2 == WIN)].mean() > 0.9                          # mas a janela continua travada
+
+
+def test_quality_score_punishes_lost_openings_and_oversized_furniture():
+    g = np.full((100, 100), WALL, np.uint8)
+    lock = np.zeros((100, 100), bool)
+    src = np.zeros((100, 100), bool)
+    src[10:30, 10:30] = True
+    kept = g.copy()
+    kept[10:30, 10:30] = WIN
+    kept[60:90, 40:60] = FURN
+    a = Q.score(kept, lock, source_openings=src)
+    lost = kept.copy()
+    lost[10:30, 10:30] = WALL
+    b = Q.score(lost, lock, source_openings=src)
+    assert b["aberturas_perdidas"] > 0.9 and b["nota"] < a["nota"]
+    giant = kept.copy()
+    giant[40:100, 0:100] = FURN
+    c = Q.score(giant, lock, source_openings=src)
+    assert c["maior_movel"] > Q.OVERSIZE_FRAC and c["nota"] < a["nota"]
+
+
+def test_style_prompts_are_distinct_and_ceiling_negatives():
+    esc = P.build_prompt("mudar_estilo", "escandinavo", "sala", 0)
+    mod = P.build_prompt("mudar_estilo", "moderno", "sala", 0)
+    w1 = set(esc.positive.replace(",", " ").split())
+    w2 = set(mod.positive.replace(",", " ").split())
+    assert len(w1 ^ w2) > 25                                       # vocabulário bem diferente
+    assert "beams" not in P.STYLES["rustico"].prompt
+    mob = P.build_prompt("mobiliar", "rustico", "sala", 0)
+    assert "coffered ceiling" in mob.negative and "oversized furniture" in mob.negative
+    assert P.FUNCTIONS["mudar_estilo"].tone_ab < 0.2 and P.FUNCTIONS["mudar_estilo"].strength >= 0.78
+
+
+def test_new_furniture_where_photo_had_furniture_is_not_an_invented_opening():
+    src = np.full((100, 100), WALL, np.uint8)
+    src[40:100, 50:100] = GROUP_IDS["fixture"]                      # armário/espelho na foto
+    gen = src.copy()
+    gen[10:30, 10:30] = WIN                                         # janela numa parede lisa: inventada
+    gen[50:90, 60:90] = DOOR                                        # box de vidro onde havia o armário: móvel novo
+    orig = np.zeros((100, 100), bool)
+    new = AL.new_openings(gen, orig, (100, 100), source_groups=src)
+    assert new[20, 20] and not new[70, 75]
+    assert AL.new_openings(gen, orig, (100, 100))[70, 75]           # sem os grupos da foto: os dois contam
+
+
+def test_movable_mask_keeps_open_kitchen_fixtures():
+    from mobilia.design import structure as S
+
+    g = np.full((60, 80), WALL, np.uint8)
+    g[30:50, 5:30] = FURN
+    g[10:40, 50:75] = GROUP_IDS["fixture"]
+    assert S.movable_mask(g, grow_frac=0)[20, 60] and S.movable_mask(g, grow_frac=0)[40, 10]
+    keep = S.movable_mask(g, grow_frac=0, fixtures=False)
+    assert not keep[20, 60] and keep[40, 10]

@@ -19,7 +19,7 @@ ROOMS: dict[str, dict] = {
     "sala": {
         "label": "Sala de estar",
         "en": "living room",
-        "furniture": ("a large sofa against the wall, two armchairs, a coffee table on a large area rug, side tables "
+        "furniture": ("a three-seat sofa against the wall, two armchairs, a coffee table on a large area rug, side tables "
                       "with table lamps, a floor lamp, large framed wall art above the sofa, potted plants in the "
                       "corners, throw pillows"),
         "empty_negative": "",
@@ -90,32 +90,35 @@ class Style:
 
 STYLES: dict[str, Style] = {s.key: s for s in (
     Style("moderno", "Moderno",
-          "modern interior design, clean lines, low profile furniture, matte black metal accents, warm oak wood, "
-          "neutral textured fabrics",
+          "modern interior design, sleek low profile charcoal sofa, black metal and smoked glass coffee table, "
+          "walnut and matte black accents, graphite gray and white color scheme, bold contrast, flat panel surfaces, "
+          "geometric lighting",
           ("warm white and greige palette", "charcoal and walnut palette", "soft beige and black accents"),
-          "ornate, vintage, cluttered",
+          "ornate, vintage, rustic, beige, cluttered",
           "modern house, flat roof lines, large glass windows, white stucco and wood cladding"),
     Style("contemporaneo", "Contemporâneo",
-          "contemporary interior design, curved sofa, sculptural lighting, natural stone, bouclé and linen, "
-          "layered neutral textures",
+          "contemporary interior design, curved bouclé sofa, sculptural pendant lighting, travertine and natural "
+          "stone, rounded organic shapes, layered ivory taupe and sand textures, fluted details",
           ("ivory and taupe palette", "sand and terracotta accents", "cream and soft gray palette"),
           "rustic, dated, cluttered",
           "contemporary house, mixed materials, stone and wood cladding, large windows"),
     Style("escandinavo", "Escandinavo",
-          "scandinavian interior design, light oak wood, white walls, light gray fabric sofa, wool rug, rattan and "
-          "linen, cozy hygge, simple functional furniture",
+          "scandinavian interior design, bright white walls, pale blonde oak furniture with tapered legs, light gray "
+          "wool sofa, sheepskin throw, white and light wood only, soft pastel accents, chunky knit textiles, "
+          "simple functional hygge decor",
           ("white and light oak palette", "soft gray and sage green accents", "warm white and pale blue accents"),
-          "dark wood, ornate, heavy drapes, cluttered",
+          "dark wood, black furniture, leather, ornate, heavy drapes, cluttered",
           "scandinavian house, white wood cladding, black window frames, gabled roof"),
     Style("minimalista", "Minimalista",
-          "minimalist interior design, few carefully chosen pieces, uncluttered, clean surfaces, hidden storage, "
-          "monochrome, soft diffused light",
+          "minimalist interior design, almost empty room with only a few essential pieces, bare white walls, no "
+          "decorations, no patterns, plain solid white and warm beige surfaces, low simple furniture, hidden "
+          "storage, lots of empty space, calm monochrome",
           ("all white palette", "warm beige monochrome palette", "light gray monochrome palette"),
-          "clutter, many decorations, patterns, ornate",
+          "clutter, many decorations, patterns, colorful, ornate, plants, busy rugs, many cushions",
           "minimalist house, smooth white render, clean geometric volumes"),
     Style("industrial", "Industrial",
-          "industrial loft interior design, exposed brick wall, black steel and reclaimed wood, leather sofa, "
-          "edison bulb pendant lights, concrete textures",
+          "industrial loft interior design, exposed red brick wall, black steel and reclaimed wood, cognac leather "
+          "sofa, edison bulb pendant lights, polished concrete, metal factory furniture, dark moody tones",
           ("charcoal and cognac leather palette", "rust and black palette", "concrete gray and warm wood palette"),
           "pastel, ornate, floral",
           "industrial style building, dark metal cladding, brick, black steel frame windows"),
@@ -138,16 +141,17 @@ STYLES: dict[str, Style] = {s.key: s for s in (
           "cold, sterile, chrome",
           "bohemian house, warm stucco, arches, many plants"),
     Style("japandi", "Japandi",
-          "japandi interior design, low wooden furniture, light ash wood, paper lantern lighting, linen, "
-          "wabi-sabi ceramics, calm natural minimalism",
+          "japandi interior design, very low wooden furniture close to the floor, light ash wood, paper lantern "
+          "lighting, linen in muted beige and charcoal, wabi-sabi ceramics, slatted wood, calm natural minimalism",
           ("warm beige and light wood palette", "muted olive and oak palette", "soft charcoal and natural wood"),
           "clutter, bright colors, ornate",
           "japandi house, natural timber slats, low roof, zen garden"),
     Style("rustico", "Rústico",
-          "rustic interior design, solid reclaimed wood furniture, exposed wooden beams, natural stone, wool and "
-          "leather, warm cozy cabin feel",
+          "rustic interior design, chunky rough reclaimed wood furniture, natural stone accent wall, worn brown "
+          "leather sofa, wrought iron, wool plaid textiles, woven baskets, warm brown and cream tones, cozy country "
+          "cabin feel",
           ("warm brown and cream palette", "olive and natural wood palette", "rust and oak palette"),
-          "chrome, glossy, ultra modern",
+          "chrome, glossy, white lacquer, ultra modern, minimalist",
           "rustic country house, natural stone walls, wooden beams, warm lights"),
     Style("costeiro", "Costeiro",
           "coastal interior design, white and sand tones, light blue accents, linen slipcovered sofa, jute rug, "
@@ -246,35 +250,50 @@ class FunctionPreset:
     fixed: tuple[str, ...] = ()
     # janela/porta/cortina nova numa parede que não tinha abertura é refeita como parede lisa (``api._repair``)
     repair: bool = True
+    # profundidade ESTRUTURAL (a sala sem os móveis, ``structure.py``) no lugar da da foto, e a área dos móveis
+    # pré-preenchida com o entorno: a disposição muda (só paredes, janelas e câmera ficam)
+    structural: bool = False
+    # o teto original volta por cima no fim (rampa por dentro do teto, cor casada), menos onde o gerador pôs uma
+    # luminária ou um móvel alto: nada de vigas, sancas e rebaixos inventados
+    keep_ceiling: bool = False
+    # tom: quanto a exposição/cor da imagem gerada é puxada para a da foto (0 = nada). Troca de estilo precisa de
+    # pouca âncora na cor (senão escandinavo e moderno saem com a mesma cor da foto)
+    tone_ab: float = 0.35
 
 
 APPLIANCES = ("refrigerator", "stove", "oven", "dishwasher", "microwave")
 
 
 FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
-    # 0,8 trocava a cozinha inteira de uma sala integrada e sumia com a geladeira; 0,67 com 6 passos quase não
-    # mudava nada (a força caía para 0,5 antes do ``plan_steps``). 0,72 com profundidade forte e longa mantém a
-    # disposição; os eletrodomésticos voltam por cima (``fixed``)
-    FunctionPreset("mudar_estilo", "Mudar estilo", strength=0.72, control_scale=0.75, control_end=0.9,
-                   guidance=1.8, keep_layout=True, fixed=APPLIANCES),
-    # 1,0 com profundidade só na primeira metade inventava janelas em paredes lisas em metade das versões: 0,9 deixa
-    # um pouco da foto e a profundidade vai até 70% do caminho (paredes e aberturas no lugar, móveis novos)
-    FunctionPreset("reforma", "Reforma completa", strength=0.9, control_scale=0.55, control_end=0.7,
-                   guidance=2.0),
+    # 0,67 com 6 passos quase não mudava nada; 0,72 com profundidade 0,75 até 90% do caminho mantinha tanto que dois
+    # estilos saíam parecidos (escandinavo ~ moderno numa sala já decorada; minimalista e rústico mal apareciam).
+    # 0,88 com a profundidade a 0,6 só nos primeiros 60% do caminho e mais orientação pelo texto (2,4): a
+    # disposição (posição e tamanho dos móveis) vem da profundidade do começo; materiais, cores e formas são do
+    # estilo. Eletrodomésticos voltam por cima (``fixed``) e o teto original também (``keep_ceiling``)
+    FunctionPreset("mudar_estilo", "Mudar estilo", strength=0.88, control_scale=0.6, control_end=0.6,
+                   guidance=2.4, keep_layout=True, fixed=APPLIANCES, keep_ceiling=True, tone_ab=0.12),
+    # profundidade ESTRUTURAL (sala sem móveis) e a área dos móveis pré-preenchida com o entorno: com a da foto
+    # mobiliada o mesmo sofá voltava no mesmo lugar. 0,9 (e não 1): o resto da foto que fica no ponto de partida
+    # segura a câmera e a perspectiva (com ruído puro a sala às vezes "girava" para uma vista frontal); a caixa da
+    # sala guia até 60% do caminho: paredes, janelas e câmera ficam, os móveis são novos e em outra disposição
+    FunctionPreset("reforma", "Reforma completa", strength=0.9, control_scale=0.6, control_end=0.6,
+                   guidance=2.2, structural=True, tone_ab=0.12),
     FunctionPreset("redesign_simples", "Redesign simples", strength=0.45, control_scale=0.8, control_end=1.0,
-                   guidance=1.5, keep_layout=True, fixed=APPLIANCES),
+                   guidance=1.5, keep_layout=True, fixed=APPLIANCES, keep_ceiling=True),
     # profundidade fraca e curta: a da sala VAZIA puxa o gerador para um piso vazio (com 0,5/0,5 metade das versões
-    # saía com um tapete e uma cadeira); a estrutura fica presa pelas janelas/portas mantidas nos latentes
+    # saía com um tapete e uma cadeira); a estrutura fica presa pelas janelas/portas mantidas nos latentes e o teto
+    # original volta por cima (vigas e sancas inventadas)
     FunctionPreset("mobiliar", "Mobiliar ambiente vazio", strength=1.0, control_scale=0.35, control_end=0.35,
-                   guidance=2.8, lock=("window", "door", "window_covering")),
-    # sem profundidade: a do objeto antigo redesenhava a silhueta dele (o "fantasma" na borda da máscara)
-    FunctionPreset("editar_area", "Editar área", strength=1.0, control_scale=0.0, control_end=0.0,
-                   guidance=1.8, lock=(), needs_mask=True, furnish=False, repair=False),
+                   guidance=2.8, lock=("window", "door", "window_covering"), keep_ceiling=True),
+    # máscara suave nos latentes e profundidade do entorno (sem a do objeto antigo, que redesenhava a silhueta
+    # dele) a meio peso: o objeto novo pousa no piso na perspectiva da foto
+    FunctionPreset("editar_area", "Editar área", strength=1.0, control_scale=0.35, control_end=0.5,
+                   guidance=2.2, lock=(), needs_mask=True, furnish=False, repair=False),
     FunctionPreset("fachada", "Fachada", strength=0.72, control_scale=0.7, control_end=0.85, guidance=1.8,
                    lock=(), exterior=True, repair=False),
     # 0,62 não punha nem a árvore de Natal: a decoração precisa de espaço para aparecer
     FunctionPreset("evento", "Decoração de evento", strength=0.8, control_scale=0.55, control_end=0.6,
-                   guidance=1.8, furnish=False, keep_layout=True, event=True, fixed=APPLIANCES),
+                   guidance=1.8, furnish=False, keep_layout=True, event=True, fixed=APPLIANCES, keep_ceiling=True),
     FunctionPreset("texto", "Texto para ambiente", strength=1.0, control_scale=0.0, control_end=0.0, guidance=2.0,
                    lock=(), needs_photo=False, repair=False),
 )}
@@ -296,6 +315,11 @@ NEGATIVE_BASE = ("cgi, 3d render, cartoon, illustration, painting, plastic, waxy
                  "extra door, people, text, letters, typography, logo, watermark, messy, cluttered")
 # aberturas inventadas: cortinas numa parede lisa "explicadas" com uma janela, porta interna virando vidro
 NEGATIVE_OPENINGS = "new window, window on a plain wall, floor-to-ceiling windows, glass wall, curtains on a plain wall"
+# arquitetura nova no teto (o "Mobiliar" punha vigas e sancas) e móveis fora de escala
+NEGATIVE_CEILING = ("ceiling beams, exposed beams, coffered ceiling, tray ceiling, dropped ceiling, ceiling recess, "
+                    "round ceiling cove, new ceiling structure")
+NEGATIVE_SCALE = "oversized furniture, giant sofa, huge coffee table, furniture out of scale"
+SCALE_CUE = "realistic proportions, furniture correctly scaled to the room"
 NEGATIVE_EMPTY = "empty room, unfurnished, bare floor, sparse, single vase, lonely object in the middle of the room"
 OPEN_KITCHEN = "open-plan kitchen with its cabinets and appliances kept in place"
 
@@ -372,7 +396,9 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
     rk = norm_room("fachada" if f.exterior else ambiente)
     r = ROOMS[rk]
     st = STYLES[norm_style(estilo)] if estilo else None
-    extra = " ".join((extra or "").split())
+    from .glossary import to_english
+
+    extra = to_english(extra)
     palette = st.palettes[variation % len(st.palettes)] if (st and not extra) else ""
     tail = PHOTO_TAIL.format(light=LIGHT_WINDOWS if windows else LIGHT_NONE)
     parts: list[str] = []
@@ -391,12 +417,19 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
                   OPEN_KITCHEN if open_kitchen else "", tail]
         neg.append(NEGATIVE_OPENINGS)
     elif f.key == "editar_area":
-        if st:
-            parts.append(st.prompt.split(",")[0])
-            if not extra:
-                parts.append(palette)
-        parts.append(f"inside a {r['en']}, seamless, matching lighting and perspective, {tail}")
-        neg.append("seam, visible border, mismatched lighting")
+        # o objeto pedido abre o prompt e é repetido ancorado no ambiente (sem isso o gerador devolvia só piso e
+        # objetos soltos); escala e sombra de contato ajudam o objeto a "pousar" no piso da foto
+        adj = st.prompt.split(",")[0].replace(" interior design", "").strip() if st else ""
+        if extra:
+            parts[0] = f"a {extra}"
+            parts.append(f"{adj + ' style ' if adj else ''}{extra} in a {r['en']}")
+        else:
+            parts.append(f"{adj} furniture and decor for a {r['en']}, {_style_details(st, rk)}")
+        if st and not extra:
+            parts.append(palette)
+        parts.append(f"realistic scale, natural contact shadows, matching lighting and perspective, {tail}")
+        neg.append("empty floor, bare area, blank space, smudge, blurry patch, seam, visible border, "
+                   "mismatched lighting, floating object, oversized")
     else:
         adj = st.prompt.split(",")[0].replace(" interior design", "").strip() + " " if st else ""
         lead = {"mobiliar": f"photo of a fully furnished {adj}{r['en']}",
@@ -409,6 +442,8 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             parts.append("curtains framing the existing windows")
         if open_kitchen:
             parts.append(OPEN_KITCHEN)
+        if f.furnish:
+            parts.append(SCALE_CUE)
         parts.append(tail)
         if f.furnish:
             neg.append(NEGATIVE_EMPTY)
@@ -416,6 +451,10 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             neg.append(NEGATIVE_OPENINGS)
         if f.key == "mobiliar":     # o volume é da sala vazia: nada de arquitetura nova
             neg.append("fireplace, radiator, column, new wall, built-in niche")
+        if f.keep_ceiling:
+            neg.append(NEGATIVE_CEILING)
+        if f.furnish:
+            neg.append(NEGATIVE_SCALE)
     if st and st.negative:
         neg.append(st.negative)
     pos = ", ".join(p.strip(", ") for p in parts if p and p.strip())
@@ -471,4 +510,5 @@ def catalog() -> dict:
 __all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "WET", "APPLIANCES", "EMPTY_TO_STAGING", "EMPTY_FURNITURE_FRAC",
            "NEGATIVE_OPENINGS", "OPEN_KITCHEN", "Style", "FunctionPreset", "DesignPrompt", "QualityProfile",
            "function", "style", "room", "norm_room", "norm_style", "norm_event", "build_prompt", "with_overrides",
-           "quality_profile", "work_size", "catalog", "NEGATIVE_BASE", "NEGATIVE_EMPTY"]
+           "quality_profile", "work_size", "catalog", "NEGATIVE_BASE", "NEGATIVE_EMPTY", "NEGATIVE_CEILING",
+           "NEGATIVE_SCALE", "SCALE_CUE"]
