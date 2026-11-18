@@ -12,7 +12,21 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
 
 ## [Não publicado]
 
-_Nada ainda. Itens novos entram aqui e passam para a seção da próxima versão quando ela for publicada._
+### Novidades
+
+- **Atualização automática dentro do app** (gratuita, pelo GitHub Releases): ao abrir, o 7xAi procura em segundo
+  plano (no máximo uma vez por dia) a última versão estável e mostra "Nova versão X.Y.Z disponível" com as notas,
+  e os botões **Atualizar agora**, **Depois** e **Pular esta versão**. "Atualizar agora" baixa o instalador oficial
+  com barra de progresso e opção de cancelar, confere o SHA-256 com o `SHA256SUMS.txt`, instala em silêncio e
+  reabre o 7xAi. No portátil, baixa o novo `.exe` (conferido) ao lado do atual. Botão **Atualizações** na barra de
+  status: procurar agora, ligar/desligar a consulta automática e ver todas as versões.
+
+### Notas importantes de atualização
+
+- A atualização só usa HTTPS e hosts do GitHub, exige o SHA-256 publicado e nunca toca nos dados do usuário
+  (`%LOCALAPPDATA%\MobiliaStudio`: motor, modelos, trabalhos, Lead Finder). Pré-lançamentos nunca são oferecidos.
+- O instalador ganhou o parâmetro `/AUTOUPDATE` (usado só pela atualização automática) para reabrir o 7xAi no fim.
+  A primeira versão com este recurso ainda precisa ser instalada à mão; as seguintes chegam pelo próprio app.
 
 ## [0.9.0] - RASCUNHO (aguardando aprovação do dono)
 

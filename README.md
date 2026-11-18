@@ -118,6 +118,12 @@ Prefere não instalar? Baixe **`7xAI-Portable-vX.Y.Z.exe`** e abra direto (abre 
 conferir que o download não foi alterado, compare o SHA-256 do arquivo com o `SHA256SUMS.txt` da mesma página
 (`Get-FileHash .\7xAI-Setup-vX.Y.Z.exe` no PowerShell).
 
+**Atualizações:** o 7xAi procura sozinho uma versão nova (no máximo uma vez por dia, em segundo plano) e mostra o
+aviso "Nova versão X.Y.Z disponível" com as novidades. **Atualizar agora** baixa o instalador oficial, confere o
+SHA-256 e instala em silêncio; o 7xAi fecha e abre de novo sozinho, com trabalhos, motor, modelos e Lead Finder
+intactos. No portátil, o botão baixa o novo `.exe` ao lado do atual. Também dá para procurar na hora ou desligar a
+consulta automática no botão **Atualizações** da barra de status. Detalhes: [`docs/RELEASES.md`](docs/RELEASES.md#atualização-automática).
+
 ### Requisitos do sistema
 
 | Item | Requisito |
