@@ -5,12 +5,11 @@ set -euo pipefail
 VENV="${VENV:-$HOME/.venvs/staging}"
 python3.13 -m venv "$VENV"
 "$VENV/bin/python" -m pip install -q --upgrade pip wheel setuptools
-"$VENV/bin/python" -m pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
-"$VENV/bin/python" -m pip install -q bpy opencv-python-headless transformers huggingface_hub scipy scikit-image \
-  imageio imageio-ffmpeg shapely pytest OpenEXR pyflakes "git+https://github.com/microsoft/MoGe.git"
-export MOBILIA_HOME="${MOBILIA_HOME:-$HOME/mobilia_data}"
 cd "$(dirname "$0")/.."
+# Mesmas versões fixas do motor (requirements/runtime-cpu.txt, com PyTorch CPU) + interface e pytest.
+"$VENV/bin/python" -m pip install -q -r requirements/dev.txt
+"$VENV/bin/python" -m pip install -q --no-deps -r requirements/runtime-nodeps.txt   # MoGe-2 (commit fixo)
+export MOBILIA_HOME="${MOBILIA_HOME:-$HOME/mobilia_data}"
 "$VENV/bin/python" -m mobilia.cli prefetch || true      # modelos de IA + assets 3D (uso offline)
-"$VENV/bin/python" -m pytest -q tests/test_compositor.py tests/test_choreography.py tests/test_room.py \
-  tests/test_encoder.py tests/test_sunlight.py tests/test_depth_mesh.py tests/test_scene_spec.py
+QT_QPA_PLATFORM=offscreen "$VENV/bin/python" -m pytest -q -m "not slow and not models and not gpu" tests
 echo "Ambiente pronto em $VENV (MOBILIA_HOME=$MOBILIA_HOME)"

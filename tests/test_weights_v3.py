@@ -162,7 +162,7 @@ def test_sdxl_installed_is_false_when_weights_missing(monkeypatch):
 
 
 def test_prefetch_includes_v3_weights(monkeypatch):
-    import huggingface_hub
+    huggingface_hub = pytest.importorskip("huggingface_hub")   # não está nas dependências do CI
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: "/cache")
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **k: "/cache/x")

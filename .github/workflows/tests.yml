@@ -26,15 +26,9 @@ jobs:
         run: |
           python -m pip install -r packaging/ci/requirements-tests.txt
           python -m pip check
-      - name: Testes rápidos (sem modelos, sem Blender)
+      - name: Testes rápidos (toda a pasta tests/, inclusive módulos como tests/lead_finder)
         env:
           QT_QPA_PLATFORM: offscreen
-        shell: bash
-        run: |
-          set -euo pipefail
-          files=(tests/test_compositor.py tests/test_choreography.py tests/test_room.py tests/test_encoder.py
-                 tests/test_sunlight.py tests/test_depth_mesh.py tests/test_scene_spec.py tests/test_bootstrap.py
-                 tests/test_ui.py tests/test_modules.py tests/test_packaging.py tests/test_release.py)
-          # Lead Finder (PR #1): entra sozinho quando a pasta existir na branch testada
-          if [ -d tests/lead_finder ]; then files+=(tests/lead_finder); fi
-          python -m pytest -q -m "not slow and not models and not gpu" "${files[@]}"
+        # Sem lista fixa: todo arquivo de teste novo entra sozinho. Os marcadores tiram render, pesos de modelos e
+        # GPU; testes que precisam de PyTorch/diffusers/bpy se pulam sozinhos (não estão nas dependências do CI).
+        run: python -m pytest -q -m "not slow and not models and not gpu" tests

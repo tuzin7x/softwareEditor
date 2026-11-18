@@ -535,6 +535,14 @@ def test_selftest_entrypoint():
     assert main(["--selftest"]) == 0
 
 
+def test_selftest_fails_when_a_module_did_not_load(monkeypatch):
+    """No .exe, um módulo que faltou no pacote (ImportError na descoberta) reprova o autoteste do CI."""
+    from mobilia.ui import modules
+    from mobilia.ui.app import main
+    monkeypatch.setattr(modules, "failed", [("mobilia.modules.quebrado", "ImportError: simulado")])
+    assert main(["--selftest"]) == 3
+
+
 def test_copy_diagnostic_zip_without_photo(app, lwin, tmp_path):
     import zipfile
 

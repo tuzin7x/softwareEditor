@@ -133,19 +133,22 @@ def test_check_refuses_draft_and_empty_sections(tmp_path):
         rn.check("1.2.0", _fake_repo(tmp_path / "b", "1.2.0", empty))
 
 
-def test_real_changelog_has_unreleased_and_draft_1_0_0(tmp_path):
+def test_real_changelog_has_unreleased_and_draft_first_version(tmp_path):
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "## [Não publicado]" in text
-    sec = rn.find_section(text, "1.0.0")
-    assert sec is not None and sec.is_draft, "a 1.0.0 continua rascunho até o dono aprovar"
+    assert rn.code_version() == "0.9.0", "a primeira versão oficial proposta é a 0.9.0"
+    sec = rn.find_section(text, "0.9.0")
+    assert sec is not None and sec.is_draft, "a 0.9.0 continua rascunho até o dono aprovar"
     for item in ("Mudar estilo", "Reforma completa", "Redesign simples", "Mobiliar ambiente vazio", "Editar área",
                  "Fachada", "Decoração de evento", "Texto para ambiente", "Ampliar 4K", "Vídeo antes e depois",
                  "Lead Finder"):
         assert item in sec.body, item
     root = tmp_path / "r"
     root.mkdir()
-    shutil.copy(ROOT / "CHANGELOG.md", _fake_repo(root, "1.0.0") / "CHANGELOG.md")
+    shutil.copy(ROOT / "CHANGELOG.md", _fake_repo(root, "0.9.0") / "CHANGELOG.md")
     with pytest.raises(rn.ReleaseError, match="RASCUNHO"):        # o workflow se recusa a publicar o rascunho
+        rn.check("0.9.0", root)
+    with pytest.raises(rn.ReleaseError):                          # e não existe uma 1.0.0 para publicar
         rn.check("1.0.0", root)
 
 
@@ -244,6 +247,23 @@ def test_release_workflow_is_manual_main_only_and_least_privilege():
                 assert step["with"]["persist-credentials"] is False, name
 
 
+def test_release_latest_only_for_stable_and_optional_prerelease():
+    wf = _wf("release.yml")
+    pre = wf["on"]["workflow_dispatch"]["inputs"]["prerelease"]
+    assert pre["type"] == "boolean" and pre["default"] is False and pre["required"] is False
+    assert "PRÉ-LANÇAMENTO" in pre["description"] and "Latest" in pre["description"]
+    text = (WF / "release.yml").read_text(encoding="utf-8")
+    jobs_text = text.split("\njobs:", 1)[1]
+    assert "${{ inputs.prerelease" not in jobs_text, "o valor entra nos scripts só por variável de ambiente"
+    step = next(s for s in wf["jobs"]["publicar"]["steps"] if s.get("name", "").startswith("Publicar"))
+    run = step["run"]
+    pre_branch, stable_branch = run.split("else", 1)
+    assert '"$PRERELEASE" = "true"' in pre_branch
+    assert "--prerelease --latest=false" in pre_branch and "--latest\n" not in pre_branch
+    assert "--prerelease=false --latest" in stable_branch
+    assert "--latest" not in text.split("Publicar (cria a tag")[0], "só o passo de publicar decide o Latest"
+
+
 def test_dev_builds_never_publish_releases():
     wf = _wf("build-windows.yml")
     assert wf["permissions"] == {"contents": "read"}
@@ -255,11 +275,13 @@ def test_dev_builds_never_publish_releases():
     assert "/DAppVersion=" in text
 
 
-def test_tests_workflow_is_reusable_and_includes_lead_finder_when_present():
+def test_tests_workflow_is_reusable_and_runs_every_test_dir():
     wf = _wf("tests.yml")
     assert "workflow_call" in wf["on"] and wf["permissions"] == {"contents": "read"}
     text = (WF / "tests.yml").read_text(encoding="utf-8")
-    assert "if [ -d tests/lead_finder ]" in text and "tests/test_release.py" in text
+    run = next(s["run"] for s in wf["jobs"]["tests"]["steps"] if "pytest" in s.get("run", ""))
+    assert run.strip().endswith(" tests"), "o CI roda a pasta tests/ inteira (sem lista fixa de arquivos)"
+    assert '-m "not slow and not models and not gpu"' in run
     assert "pip check" in text and "packaging/ci/requirements-tests.txt" in text
 
 
@@ -268,3 +290,39 @@ def test_ci_requirements_are_pinned():
         lines = [ln.strip() for ln in (ROOT / "packaging" / "ci" / name).read_text(encoding="utf-8").splitlines()
                  if ln.strip() and not ln.startswith("#")]
         assert lines and all(re.fullmatch(r"[A-Za-z0-9_.-]+==[\w.]+", ln) for ln in lines), name
+
+
+# ------------------------------------------------------------------------------------- conteúdo do .exe
+
+def _check_bundle():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_bundle", ROOT / "scripts" / "check_bundle.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_bundle_check_requires_every_module_file_and_refuses_engine_libs():
+    cb = _check_bundle()
+    expected = cb.expected_modules()
+    for name in ("mobilia.modules.lead_finder", "mobilia.modules.lead_finder.ui.page",
+                 "mobilia.modules.lead_finder.storage", "mobilia.modules.lead_finder.sources.osm"):
+        assert name in expected, name
+    good = "[" + ",\n".join(f"('{m}', '/x/{m}.py', 'PYMODULE')" for m in (*cb.REQUIRED_CORE, *expected)) + "]"
+    assert cb.check(good) == ([], [], len(expected))
+    missing_page = good.replace("('mobilia.modules.lead_finder.ui.page',", "('outro',")
+    assert cb.check(missing_page)[0] == ["mobilia.modules.lead_finder.ui.page"]
+    heavy = good[:-1] + ",\n('torch.nn', '/x.py', 'PYMODULE'), ('diffusers', '/y.py', 'PYMODULE')]"
+    assert cb.check(heavy)[1] == ["diffusers", "torch.nn"]
+
+
+def test_spec_excludes_engine_libraries_and_workflows_check_the_bundle():
+    spec = (ROOT / "packaging" / "7xai.spec").read_text(encoding="utf-8")
+    excludes = spec.split("excludes = [", 1)[1].split("]", 1)[0]
+    for lib in _check_bundle().FORBIDDEN_TOP:
+        assert f'"{lib}"' in excludes, lib
+    for wf in ("build-windows.yml", "release.yml"):
+        text = (WF / wf).read_text(encoding="utf-8")
+        assert "scripts/check_bundle.py build/7xai/PYZ-00.toc build-portable/7xai/PYZ-00.toc" in text, wf
+    bw = (WF / "build-windows.yml").read_text(encoding="utf-8")
+    assert 'SEVENXAI_ONEFILE = "1"' in bw and "dist-portable" in bw     # o portátil também é gerado e testado

@@ -264,6 +264,7 @@ def test_sdxl_recheck_counts_vram_freed_by_swap(monkeypatch):
 
 
 def test_vram_swap_moves_models_out_during_generate_and_back():
+    pytest.importorskip("torch")                  # a troca de VRAM chama o torch (não está no CI)
     from mobilia import pipeline_b as pb
 
     moves = []

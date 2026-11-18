@@ -9,7 +9,7 @@ FAKE = Path(__file__).parent / "fake_worker.py"
 
 
 def test_ensure_local_separates_network_time(monkeypatch):
-    import huggingface_hub
+    huggingface_hub = pytest.importorskip("huggingface_hub")   # não está nas dependências do CI
 
     from mobilia.analysis import weights
 

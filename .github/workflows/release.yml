@@ -1,6 +1,7 @@
 name: Release oficial (instalador + portátil)
 # Publica UMA versão oficial do 7xAi no GitHub Releases. Só roda quando o dono clica em "Run workflow" na aba
-# Actions, escolhendo a branch main e digitando a versão (ex.: 1.0.0). Passo a passo: docs/RELEASES.md.
+# Actions, escolhendo a branch main e digitando a versão (ex.: 0.9.0). Passo a passo: docs/RELEASES.md.
+# "prerelease" (opcional, desmarcado) publica um beta de teste que NÃO vira "Latest"; versões estáveis sempre viram.
 #
 # Garantias:
 # - só na main; a versão digitada tem de ser igual a mobilia/__init__.py (fonte única) e o CHANGELOG.md tem de ter
@@ -14,15 +15,21 @@ on:
   workflow_dispatch:
     inputs:
       versao:
-        description: "Versão a publicar, igual à de mobilia/__init__.py (ex.: 1.0.0)"
+        description: "Versão a publicar, igual à de mobilia/__init__.py (ex.: 0.9.0)"
         required: true
         type: string
+      prerelease:
+        description: "PRÉ-LANÇAMENTO (beta de teste, só com autorização do dono): não vira 'Latest' e o link 'Baixar a última versão' continua na versão estável anterior"
+        required: false
+        default: false
+        type: boolean
 permissions: {}
 concurrency:
   group: release-oficial
   cancel-in-progress: false
 env:
   VERSAO: ${{ inputs.versao }}
+  PRERELEASE: ${{ inputs.prerelease && 'true' || 'false' }}
 jobs:
   validar:
     name: 1. Validar versão, CHANGELOG e tag
@@ -102,6 +109,8 @@ jobs:
           $env:SEVENXAI_ONEFILE = "1"
           python -m PyInstaller --noconfirm --distpath dist-portable --workpath build-portable packaging/7xai.spec
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller (portátil) falhou" }
+      - name: Conteúdo dos executáveis (todos os módulos dentro; nada do motor)
+        run: python scripts/check_bundle.py build/7xai/PYZ-00.toc build-portable/7xai/PYZ-00.toc
       - name: Inno Setup (instalador)
         shell: pwsh
         run: |
@@ -199,6 +208,9 @@ jobs:
         run: |
           python scripts/release_notes.py notes --version "$VERSAO" --assets artefato/release \
             --sha "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --out notas.md
+          if [ "$PRERELEASE" = "true" ]; then
+            { printf '> **Pré-lançamento (beta de teste).** Pode ter problemas; a versão estável recomendada continua sendo a marcada como "Latest".\n\n'; cat notas.md; } > notas.tmp && mv notas.tmp notas.md
+          fi
           cat notas.md >> "$GITHUB_STEP_SUMMARY"
       - name: Criar a Release como rascunho e anexar os arquivos
         run: |
@@ -208,8 +220,15 @@ jobs:
             "artefato/release/SHA256SUMS.txt"
           n=$(gh release view "v$VERSAO" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
           if [ "$n" != "3" ]; then echo "::error::Esperava 3 arquivos anexados, achei $n"; exit 1; fi
-      - name: Publicar (cria a tag no commit testado)
-        run: gh release edit "v$VERSAO" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+      - name: Publicar (cria a tag no commit testado; "Latest" só para versão estável)
+        run: |
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "v$VERSAO" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+            echo "Publicado como PRÉ-LANÇAMENTO (não é a 'Latest')." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh release edit "v$VERSAO" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
+            echo "Publicado como versão estável (Latest)." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: A tag aponta para o commit testado
         run: |
           sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSAO" --jq '.object.sha')

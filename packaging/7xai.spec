@@ -22,8 +22,12 @@ datas = [(str(ROOT / "mobilia"), "payload/mobilia"), (str(ROOT / "requirements")
          # interface 7xAi: fontes Inter (SIL OFL, com OFL.txt) e imagens da folha de estilo
          (str(ROOT / "mobilia" / "ui" / "fonts"), "mobilia/ui/fonts"),
          (str(ROOT / "mobilia" / "ui" / "res"), "mobilia/ui/res")]
+# Bibliotecas do motor nunca entram no .exe (o motor roda no Python embutido instalado no primeiro uso). Num ambiente
+# de build limpo (CI, .venv-build) elas nem existem; a lista protege o build feito num venv de desenvolvimento.
+# scripts/check_bundle.py confere isso no CI.
 excludes = ["torch", "torchvision", "numpy", "scipy", "cv2", "bpy", "transformers", "PIL", "moge",
             "OpenEXR", "shapely", "matplotlib", "tkinter",
+            "diffusers", "accelerate", "huggingface_hub", "safetensors", "tokenizers", "kornia", "sympy", "imageio_ffmpeg",
             "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.Qt3DCore", "PySide6.QtQuick3D",
             "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf"]
 

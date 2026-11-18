@@ -1556,8 +1556,11 @@ def main(argv: list[str] | None = None) -> int:
         win.show()
         app.processEvents()
         ok = win.windowTitle() == APP_NAME and not theme.app_icon().isNull() and theme.assets_ok()
-        print("selftest ok" if ok else "selftest FALHOU")
-        return 0 if ok else 2
+        from . import modules as _modules
+        mods_ok = not _modules.failed            # um módulo que não importou (ex.: faltou no .exe) reprova
+        print(f"módulos: {', '.join(s.id for s in win.modules.specs) or 'nenhum'}")
+        print("selftest ok" if ok and mods_ok else "selftest FALHOU")
+        return 0 if ok and mods_ok else (2 if not ok else 3)
     win.show()
     return app.exec()
 

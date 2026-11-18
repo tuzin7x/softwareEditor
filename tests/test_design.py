@@ -504,6 +504,7 @@ def test_cli_design_edit_text_and_errors(monkeypatch, capsys, tmp_path):
 
 # ============================================================================ pesos e ampliador
 def test_design_weights_in_prefetch(monkeypatch):
+    pytest.importorskip("huggingface_hub")        # prefetch_models importa o huggingface_hub (não está no CI)
     from mobilia.analysis import weights as Wt
 
     assert Wt.ESRGAN_WEIGHT in Wt.DESIGN_WEIGHTS

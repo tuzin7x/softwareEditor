@@ -19,7 +19,7 @@ O link fixo para a versão mais nova é <https://github.com/tuzin7x/softwareEdit
 1. **Abra um Pull Request para a `main`** com a versão nova e o texto dela no `CHANGELOG.md`.
 2. **Faça o merge** do PR, depois que os testes ficarem verdes.
 3. Na aba **Actions**, escolha **"Release oficial (instalador + portátil)"** → **Run workflow** → em *Use workflow
-   from* deixe **main** → digite a versão (ex.: `1.0.0`) → **Run workflow**.
+   from* deixe **main** → digite a versão (ex.: `0.9.0`) → deixe **prerelease** desmarcado → **Run workflow**.
 4. Espere uns 30 a 40 minutos. Se tudo passar, a Release aparece publicada. Se algo falhar, **nada** é publicado.
 
 ## Passo a passo detalhado
@@ -28,7 +28,7 @@ O link fixo para a versão mais nova é <https://github.com/tuzin7x/softwareEdit
 
 No mesmo PR, mude **dois arquivos**:
 
-- **`mobilia/__init__.py`**: troque `__version__ = "..."` pelo número novo, por exemplo `__version__ = "1.0.0"`.
+- **`mobilia/__init__.py`**: troque `__version__ = "..."` pelo número novo, por exemplo `__version__ = "0.9.0"`.
   Essa é a **fonte única** da versão: o executável, o instalador, o `pyproject.toml` e a tag leem dali.
 - **`CHANGELOG.md`**: crie a seção da versão, com a data da publicação, e passe para ela os itens que estavam em
   `## [Não publicado]`:
@@ -36,7 +36,7 @@ No mesmo PR, mude **dois arquivos**:
   ```markdown
   ## [Não publicado]
 
-  ## [1.0.0] - 2026-12-01
+  ## [0.9.0] - 2026-12-01
 
   ### Novidades
   - ...
@@ -49,7 +49,8 @@ No mesmo PR, mude **dois arquivos**:
   ```
 
   A seção não pode conter a palavra **RASCUNHO**: enquanto ela estiver lá, o workflow se recusa a publicar. A
-  seção `1.0.0` que já existe é um rascunho escrito para você revisar; ajuste o texto e apague o aviso.
+  seção `0.9.0` que já existe é um rascunho escrito para você revisar; ajuste o texto, coloque a data e apague
+  o aviso. O `__version__` já está em `0.9.0`.
 
 O primeiro PR para a `main` também leva todo o código da branch de desenvolvimento
 (`claude/sweet-bohr-4uzml2` → `main`). Os PRs seguintes podem vir da mesma branch ou de outra.
@@ -64,8 +65,11 @@ Espere o check **"Testes (CPU)"** do PR ficar verde e faça o merge (de preferê
 1. Abra **Actions** → **Release oficial (instalador + portátil)**.
 2. Clique em **Run workflow**.
 3. Em **Use workflow from**, escolha **Branch: main** (com outra branch o workflow para na primeira etapa).
-4. Em **versao**, digite exatamente o número do `mobilia/__init__.py`, sem o "v" (ex.: `1.0.0`).
-5. Clique no botão verde **Run workflow**.
+4. Em **versao**, digite exatamente o número do `mobilia/__init__.py`, sem o "v" (ex.: `0.9.0`).
+5. **prerelease**: deixe **desmarcado** para uma versão estável (ela vira a "Latest" e o link "Baixar a última
+   versão" passa a apontar para ela). Marque **só** para publicar um beta de teste autorizado: ele aparece em
+   Releases com a etiqueta *Pre-release*, **não** vira "Latest" e as notas começam com um aviso de beta.
+6. Clique no botão verde **Run workflow**.
 
 ### 4. O que o pipeline faz (e o que impede a publicação)
 
@@ -87,9 +91,12 @@ etapa 4 tem permissão de escrever no repositório.
 | função nova ou melhoria, compatível com o que já existe | MENOR (e zere a correção) | `1.0.1` → `1.1.0` |
 | mudança que quebra algo (ex.: trabalhos antigos não abrem, requisito novo de hardware) | MAIOR (e zere os outros) | `1.4.2` → `2.0.0` |
 
-- A primeira versão oficial é a **`1.0.0`**.
+- A primeira versão oficial recomendada é a **`0.9.0`** (estável, série 0.x): o produto funciona de ponta a
+  ponta, mas ainda tem limitações conhecidas de qualidade (ver `CHANGELOG.md`) e o app completo ainda não foi
+  validado no Windows do dono. A `1.0.0` fica para quando essas pendências forem resolvidas.
+- Versões `0.x` estáveis viram "Latest" normalmente; o número 0 só sinaliza que o produto ainda está amadurecendo.
 - Cada número é publicado **uma vez só**. Se precisar corrigir uma versão já publicada, publique a próxima
-  correção (`1.0.1`).
+  correção (`0.9.1`).
 - Commits do dia a dia **não** geram Release. Os pushes em `claude/**`, `feature/**` e `main` geram só
   **artefatos** no Actions (instalador de teste e pasta do programa, guardados por 14 dias), úteis para testar
   antes de publicar.
@@ -98,7 +105,7 @@ etapa 4 tem permissão de escrever no repositório.
 
 - **Se a Release saiu com problema:** os usuários podem baixar a versão anterior na lista de
   [Releases](https://github.com/tuzin7x/softwareEditor/releases) e instalar por cima (o instalador aceita versão
-  mais antiga). Corrija o problema e publique uma versão de correção nova (ex.: `1.0.1`). Esse é o caminho
+  mais antiga). Corrija o problema e publique uma versão de correção nova (ex.: `0.9.1`). Esse é o caminho
   recomendado.
 - **Para tirar a versão do ar:** na página da Release, **Edit** → marque *Set as a pre-release* (ela deixa de ser a
   "latest", e o link `releases/latest` volta para a anterior) ou **Delete**. Não reutilize o mesmo número: apagar a
@@ -118,8 +125,8 @@ Em **Settings**:
    `GITHUB_TOKEN` do próprio repositório).
 3. **Actions → General → Workflow permissions**: *Read repository contents permission* (o workflow de Release pede
    a escrita só para o job de publicar).
-4. Opcional: **Releases → Enable release immutability**, para que arquivos de uma Release publicada não possam ser
-   trocados depois.
+4. **Releases → Enable release immutability** (recomendado), para que arquivos e tag de uma Release publicada não
+   possam ser trocados depois. O workflow é compatível: ele anexa os arquivos **antes** de publicar o rascunho.
 
 ## Perguntas rápidas
 

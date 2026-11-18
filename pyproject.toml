@@ -2,7 +2,7 @@
 name = "mobilia-studio"
 # A versão vem de mobilia/__init__.py (__version__): é a fonte única (ver docs/RELEASES.md).
 dynamic = ["version"]
-description = "Decoração virtual cinematográfica em vídeo a partir de uma única foto, 100% local (GPU NVIDIA)."
+description = "7xAi: redesenho de ambientes por IA a partir de uma foto (local, GPU NVIDIA) e Lead Finder para o mercado imobiliário."
 requires-python = ">=3.13"
 readme = "README.md"
 

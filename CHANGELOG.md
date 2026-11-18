@@ -12,28 +12,20 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
 
 ## [Não publicado]
 
-### Novidades
+_Nada ainda. Itens novos entram aqui e passam para a seção da próxima versão quando ela for publicada._
 
-- Sistema de Releases oficiais: cada versão aprovada ganha uma página em *Releases* com o instalador
-  (`7xAI-Setup-vX.Y.Z.exe`), o portátil (`7xAI-Portable-vX.Y.Z.exe`), o `SHA256SUMS.txt` e as notas da versão.
-- A versão do programa tem uma fonte única (`mobilia/__init__.py`), usada pelo executável, pelo instalador e pela
-  tag da Release.
+## [0.9.0] - RASCUNHO (aguardando aprovação do dono)
 
-### Removido
-
-- Publicação de *prereleases* por `[release]` na mensagem do commit ou pelo disparo manual "publicar": builds de
-  desenvolvimento agora geram só artefatos no GitHub Actions.
-
-## [1.0.0] - RASCUNHO (aguardando aprovação do dono)
-
-> **RASCUNHO — não publicar ainda.** Este texto descreve o produto como está hoje e precisa ser revisado e aprovado
-> pelo dono. Para publicar: ajuste o texto, troque o título por `## [1.0.0] - AAAA-MM-DD` (data da publicação),
-> apague este aviso e mude `__version__` para `"1.0.0"` em `mobilia/__init__.py`, tudo no mesmo PR para a `main`.
-> O workflow de Release se recusa a publicar enquanto a palavra RASCUNHO estiver nesta seção.
+> **RASCUNHO — não publicar ainda.** Primeira versão oficial proposta: **0.9.0** (estável da série 0.x, e não
+> 1.0.0), porque o produto funciona de ponta a ponta mas tem limitações de qualidade conhecidas (abaixo) e o app
+> completo ainda não foi aberto num Windows de verdade. Para publicar: rode os testes manuais do dono no Windows,
+> ajuste o texto, troque o título por `## [0.9.0] - AAAA-MM-DD` (data da publicação) e apague este aviso, num PR
+> para a `main`. O `__version__` em `mobilia/__init__.py` já é `0.9.0`. O workflow de Release se recusa a publicar
+> enquanto a palavra RASCUNHO estiver nesta seção.
 
 ### Novidades
 
-- **Redesenho de ambientes por IA**, a partir de uma única foto, com até 4 versões por pedido:
+- **AI Studio — redesenho de ambientes por IA** a partir de uma única foto, com até 4 versões por pedido:
   - **Mudar estilo:** mesma sala e mesma arquitetura, com móveis e decoração em outro estilo;
   - **Reforma completa:** troca também pisos, revestimentos e acabamentos;
   - **Redesign simples:** mudança leve, que mantém a sala reconhecível;
@@ -51,23 +43,36 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
   16:9 (1920×1080) ou 9:16 (1080×1920, para Reels e Stories).
 - **Modos legados de vídeo de montagem** (botão "Avançado"): modo A (móveis 3D entram numa foto vazia) e modo B
   (a foto mobiliada vira sala vazia e os móveis da própria foto entram um a um).
+- **Lead Finder** (nova aba): pesquisa de imobiliárias em fontes autorizadas (OpenStreetMap/Overpass, base aberta
+  de CNPJ da Receita importada localmente, BrasilAPI e, com chave própria do usuário, Google Places API), CRM local
+  (SQLite) com histórico, lembretes e lista de "não contatar", pontuação de 0 a 100, painel, exportação CSV e
+  mensagem revisável aberta no WhatsApp (`wa.me`), **sem envio automático**.
+- Janela principal com módulos (abas de primeiro nível) registrados automaticamente; o selo "Processado no seu
+  computador" só aparece nas abas que não usam a internet.
 - Instalador para Windows com atalho na Área de Trabalho e versão portátil de arquivo único. O motor de IA é
   baixado e instalado no primeiro uso.
-- Ponto de extensão para módulos opcionais na janela principal (abas de primeiro nível).
-- **7xAi Lead Finder** (módulo de prospecção de imobiliárias): **pendente de integração**. Só entra nesta lista se
-  o Pull Request #1 for integrado antes da publicação; caso contrário, remova este item.
+- Releases oficiais com instalador, portátil, `SHA256SUMS.txt` e notas da versão; versão com fonte única
+  (`mobilia/__init__.py`).
 
 ### Desempenho
 
-- Cerca de 8 a 11 s por imagem numa RTX 5070 Laptop de 8 GB, com os codificadores de texto na CPU para caber em
-  8 GB de memória de vídeo.
+- Cerca de 8 a 11 s por imagem numa RTX 5070 Laptop de 8 GB, medidos num teste isolado do motor (codificadores de
+  texto na CPU para caber em 8 GB de memória de vídeo). O app completo ainda não foi medido no Windows.
 - Executável leve (só a interface); o motor pesado fica fora do instalador e é reaproveitado entre atualizações.
 
 ### Notas importantes de atualização
 
-- Requisitos: Windows 10 ou 11 de 64 bits. Placa NVIDIA com 8 GB de memória de vídeo recomendada.
-- No primeiro uso o 7xAi baixa o motor de IA (vários GB, uma única vez) para `%LOCALAPPDATA%\MobiliaStudio`.
-  Quem já tinha uma versão de teste instalada reaproveita esse motor.
+- Requisitos: Windows 10 ou 11 de 64 bits. Placa NVIDIA com 8 GB de memória de vídeo recomendada (sem GPU NVIDIA
+  funciona em modo CPU, muito mais lento).
+- No primeiro uso o 7xAi baixa e instala o motor de IA uma única vez (~12 GB: bibliotecas com CUDA e ~8 GB de
+  modelos, dos quais ~7,5 GB são do redesenho) em `%LOCALAPPDATA%\MobiliaStudio`. Quem já tinha uma versão de
+  teste instalada reaproveita esse motor.
+- O AI Studio roda no computador do usuário; as fotos não são enviadas para a internet. O Lead Finder consulta
+  serviços on-line (e o Google Places é pago, com chave e limites definidos pelo usuário).
 - O instalador ainda não tem assinatura digital paga: o Windows pode mostrar "O Windows protegeu o computador".
   Clique em **Mais informações → Executar assim mesmo**.
-- Tudo roda no computador do usuário; as fotos não são enviadas para a internet.
+- **Limitações conhecidas desta versão:** "Editar área" às vezes deixa uma mancha oval em vez do móvel novo; a
+  proteção de janelas e portas falha em aberturas pequenas ou cobertas; "Mudar estilo" muda pouco em salas já
+  decoradas; "Reforma completa" mantém a disposição original dos móveis; "Mobiliar ambiente vazio" às vezes cria
+  vigas no teto ou erra a escala; o vídeo antes e depois coloca faixas laterais em fotos 4:3. No Lead Finder, o
+  Google Places e a variação de mensagem por IA foram testados só com respostas gravadas (sem chave real).
