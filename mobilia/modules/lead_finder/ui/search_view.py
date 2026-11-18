@@ -217,9 +217,13 @@ class SearchView(QWidget):
     # --------------------------------------------------------------------------------- municípios
     def load_municipalities(self) -> None:
         uf = self.muni_uf.currentData()
+        # a lista (autocompletar e validação) é sempre da UF selecionada: a da UF anterior sai antes de consultar
+        self.muni_model.setStringList([])
+        self._muni_list_uf = ""
         cached = geo.cached_municipalities(self.ctx.cache_dir, uf)
         if cached:
             self.muni_model.setStringList(cached)
+            self._muni_list_uf = uf
             self.muni_hint.setText(f"{len(cached)} municípios ({uf}) — lista oficial do IBGE")
             return
         self.muni_hint.setText("Carregando a lista oficial de municípios (IBGE)…")
@@ -227,6 +231,7 @@ class SearchView(QWidget):
         def done(names):
             if self.muni_uf.currentData() == uf:
                 self.muni_model.setStringList(names)
+                self._muni_list_uf = uf if names else ""
                 self.muni_hint.setText(f"{len(names)} municípios ({uf}) — lista oficial do IBGE")
 
         def fail(e):
@@ -239,8 +244,9 @@ class SearchView(QWidget):
         name = self.muni_input.text().strip()
         if not name:
             return
-        known = self.muni_model.stringList()
-        official = geo.match_municipality(name, known) if known else name.title()
+        # só valida contra a lista oficial se ela for desta UF; sem lista, aceita o nome digitado (como digitado)
+        known = self.muni_model.stringList() if getattr(self, "_muni_list_uf", "") == uf else []
+        official = geo.match_municipality(name, known) if known else " ".join(name.split())
         if known and not official:
             self.muni_hint.setText(f"“{name}” não está na lista oficial de {uf}.")
             return
@@ -345,6 +351,9 @@ class SearchView(QWidget):
             return
         sources = {sid: box_src[1] for sid, box_src in self.source_rows.items()}
         if "google_places" in q.sources:
+            if not self.ctx.begin_paid("search"):
+                return
+            self._paid = True
             self.ctx.db.call(lambda s: s.usage_month("google_places")[0],
                              on_done=lambda used: self._confirm_and_run(q, sources, used))
         else:
@@ -358,6 +367,7 @@ class SearchView(QWidget):
                               f"{est.note}.\nUso no mês: {used} de {cap} requisições.\n\nContinuar?",
                               QMessageBox.Yes | QMessageBox.No, self)
             if box.exec() != QMessageBox.Yes:
+                self._release_paid()
                 return
         self._run(q, sources, used)
 
@@ -459,6 +469,13 @@ class SearchView(QWidget):
 
     def _reset_buttons(self) -> None:
         self.btn_search.setEnabled(True); self.btn_cancel.setEnabled(False)
+        self._release_paid()
+
+    def _release_paid(self) -> None:
+        # chamado depois que os registros de uso já foram enfileirados para o banco (mesma fila, em ordem)
+        if getattr(self, "_paid", False):
+            self._paid = False
+            self.ctx.end_paid("search")
 
     def on_show(self) -> None:
         if not self.custom_keywords:

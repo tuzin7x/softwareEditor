@@ -545,3 +545,131 @@ def test_migration_v4_backfills_secondary_phone(tmp_path):
     st = s.ingest([L("osm", "node/7", "Nome Diferente", phone="19 3200-0002", city="Outra")])
     assert st["consolidados"] == 1
     s.close()
+
+
+# #################################################################################### rodada 3 da revisão
+
+# ============================================== 13. exportação respeita as decisões manuais de WhatsApp
+
+def test_export_uses_manual_whatsapp_confirmation(store):
+    store.ingest([L(phone="19 99900-0001")])                              # só OSM, celular em phone
+    lid = store.page()[0][0]["id"]
+    assert store.export_rows()[0][0]["whatsapp"] == ""
+    store.set_whatsapp(lid, "confirmado")
+    assert store.export_rows()[0][0]["whatsapp"] == "(19) 99900-0001"     # antes: vazio
+
+
+def test_export_honours_no_whatsapp(store):
+    store.ingest([L(phone="19 3200-0001", whatsapp="19 99900-0001")])
+    lid = store.page()[0][0]["id"]
+    assert store.export_rows()[0][0]["whatsapp"] == "(19) 99900-0001"
+    store.set_whatsapp(lid, "sem_whatsapp")
+    assert store.export_rows()[0][0]["whatsapp"] == ""                   # antes: continuava exportado
+
+
+def test_export_keeps_google_only_number_out_even_if_confirmed(store):
+    store.ingest([L("google_places", "ChIJX0000000001", "Só Google", phone="+55 21 99999-0002", city="Rio", uf="RJ")])
+    lid = store.page()[0][0]["id"]
+    store.set_whatsapp(lid, "confirmado")
+    row = store.export_rows()[0][0]
+    assert row["whatsapp"] == "" and "99999" not in str(row)
+
+
+# ============================================== 14. supressão também em atualizações e consolidações
+
+def test_suppressed_phone_does_not_revive_through_existing_record(store):
+    """Cenário da revisão: Alfa excluída com "não contatar"; o registro OSM já existente de Beta passa a trazer o
+    telefone suprimido de Alfa. Beta não pode ficar com esse número como WhatsApp."""
+    store.ingest([L(ref="node/1", name="Alfa", phone="19 99900-0001"),
+                  L(ref="node/2", name="Beta", phone="19 99900-0002", city="Santos")])
+    ids = {r["name"]: r["id"] for r in store.page()[0]}
+    store.delete_lead(ids["Alfa"], do_not_contact=True)
+    store.ingest([L(ref="node/2", name="Beta", phone="19 99900-0001", city="Santos")])
+    beta = store.get(ids["Beta"])
+    assert beta["status"] == "nao_contatado" and beta["wa_number"] != "+5519999000001"   # antes: igual
+
+
+def test_suppressed_cnpj_on_existing_record_is_ignored(store):
+    store.ingest([L("cnpj_aberto", "11222333000181", "Alfa", cnpj="11222333000181"),
+                  L(ref="node/2", name="Beta", phone="19 99900-0002", city="Santos")])
+    ids = {r["name"]: r["id"] for r in store.page()[0]}
+    store.delete_lead(ids["Alfa"], do_not_contact=True)
+    st = store.ingest([L(ref="node/2", name="Beta", phone="19 99900-0002", city="Santos", cnpj="11222333000181")])
+    assert st["ignorados_nao_contatar"] == 1 and store.get(ids["Beta"])["cnpj"] == ""
+
+
+def test_suppressed_number_cannot_be_confirmed_manually(store):
+    store.ingest([L(ref="node/1", name="Alfa", phone="19 99900-0001"),
+                  L(ref="node/2", name="Beta", phone="19 3200-0002", phone2="19 99900-0003", city="Santos")])
+    ids = {r["name"]: r["id"] for r in store.page()[0]}
+    store.delete_lead(ids["Alfa"], do_not_contact=True)
+    store.con.execute("UPDATE lead_sources SET payload=json_set(payload, '$.phone2', '19 99900-0001') "
+                      "WHERE source_ref='node/2'")
+    store.con.commit()
+    store.ingest([L(ref="node/2", name="Beta", phone="19 3200-0002", phone2="19 99900-0003", city="Santos")])
+    assert "+5519999000001" not in store.whatsapp_candidates(ids["Beta"])
+    with pytest.raises((PermissionError, ValueError)):
+        store.set_whatsapp(ids["Beta"], "confirmado", "19 99900-0001")
+
+
+def test_dnc_lead_itself_keeps_updating(store):
+    store.ingest([L(phone="19 99900-0001")])
+    lid = store.page()[0][0]["id"]
+    store.set_status(lid, "nao_contatar")
+    st = store.ingest([L(phone="19 99900-0001", address="Rua Nova")])
+    assert st["atualizados"] == 1 and store.get(lid)["address"] == "Rua Nova"
+
+
+# ============================================== 15. limite mensal compartilhado entre pesquisa e Place Details
+
+def test_paid_operations_are_exclusive(page, qapp, transport, no_modal):
+    page.ctx.settings.google_enabled = True
+    page.ctx.secrets.set("google_places", "AIzaFAKEKEY0000000000000")
+    db(page, lambda s: s.ingest([L("google_places", "ChIJTESTE0000001", "Alfa", phone="19 99900-0001")]))
+    lid = db(page, lambda s: s.page()[0][0]["id"])
+    assert page.ctx.begin_paid("search")                                  # pesquisa paga em andamento
+    view = page.views["leads"]
+    view.refresh_google(lid)
+    wait_until(qapp, lambda: False, 0.4)
+    assert transport.requests == [] and view.bg_task is None             # antes: Place Details era enviado
+    page.ctx.end_paid("search")
+    transport.add("GET", r"places\.googleapis\.com/v1/places/", (200, {"id": "ChIJTESTE0000001",
+                                                                        "displayName": {"text": "Alfa"}}))
+    view.refresh_google(lid)
+    assert wait_until(qapp, lambda: view.bg_task is not None and view.bg_task.finished.is_set())
+    assert wait_until(qapp, lambda: not getattr(page.ctx, "_paid_owner", ""))   # reserva liberada no fim
+    assert len(transport.requests) == 1
+
+
+def test_search_releases_paid_reservation(page, qapp, transport, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.No)    # usuário recusa a consulta paga
+    page.ctx.settings.google_enabled = True
+    page.ctx.secrets.set("google_places", "AIzaFAKEKEY0000000000000")
+    view = page.views["search"]
+    view.refresh_sources()
+    assert wait_until(qapp, lambda: view.source_rows["google_places"][0].isEnabled())
+    view.source_rows["google_places"][0].setChecked(True)
+    view.source_rows["osm"][0].setChecked(False)
+    view.start()
+    assert wait_until(qapp, lambda: not getattr(page.ctx, "_paid_owner", "x"))
+    assert transport.requests == []
+
+
+# ============================================== 16. lista de municípios sempre da UF selecionada
+
+def test_municipality_list_follows_selected_uf(page, qapp, transport):
+    import json as _json
+    cache = page.ctx.cache_dir; cache.mkdir(parents=True, exist_ok=True)
+    (cache / "ibge_SP.json").write_text(_json.dumps(["Campinas", "Santos"]), encoding="utf-8")
+    transport.add("GET", r"servicodados\.ibge\.gov\.br", OSError("sem internet"))
+    view = page.views["search"]
+    view.scope.set_value("municipios", emit=True)
+    view.muni_uf.setCurrentIndex(view.muni_uf.findData("SP"))
+    view.load_municipalities()
+    assert view.muni_model.stringList() == ["Campinas", "Santos"]
+    view.muni_uf.setCurrentIndex(view.muni_uf.findData("RJ"))           # RJ sem cache e sem internet
+    assert wait_until(qapp, lambda: "Sem a lista" in view.muni_hint.text())
+    assert view.muni_model.stringList() == []                            # antes: continuava a lista de SP
+    view.muni_input.setText("Rio de Janeiro"); view.add_municipality()
+    assert [view.muni_list.item(i).text() for i in range(view.muni_list.count())] == ["Rio de Janeiro - RJ"]

@@ -229,16 +229,18 @@ class LeadsView(QWidget):
             b.setEnabled(bool(n) and not busy)
 
     # ------------------------------------------------------------------------------ ações em lote
-    def _start_bg(self, fn, label: str, on_item, on_done) -> None:
+    def _start_bg(self, fn, label: str, on_item, on_done, on_finish=None) -> bool:
         if self.bg_task is not None and self.bg_task.running():
             self.ctx.status("Aguarde a tarefa em andamento terminar.")
-            return
+            return False
         self.ctx.status(label)
         self.btn_cancel_bg.show()
 
         def finish(*_a):
             self.btn_cancel_bg.hide()
             self._update_selection_buttons()
+            if on_finish is not None:
+                on_finish()
 
         def done(res):
             finish(); on_done(res)
@@ -251,6 +253,7 @@ class LeadsView(QWidget):
         self.bg_task = self.ctx.run(fn, on_item=on_item, on_done=done, on_error=fail, on_cancel=cancelled,
                                     on_progress=lambda f, m: self.ctx.status(m) if m else None)
         self._update_selection_buttons()
+        return True
 
     def _cancel_bg(self) -> None:
         if self.bg_task is not None:
@@ -319,37 +322,52 @@ class LeadsView(QWidget):
             refs, used = res
             if not refs:
                 return
-            src = self.ctx.sources()["google_places"]
-            ok, why = src.availability()
-            if not ok:
-                QMessageBox.information(self, "Google Places", why)
+            if not self.ctx.begin_paid("refresh"):
                 return
-            cap = self.ctx.settings.google_monthly_request_cap
-            if used + len(refs) > cap:
-                QMessageBox.information(self, "Google Places",
-                                        f"Limite mensal atingido ({used} de {cap} requisições). "
-                                        "Ajuste o limite em Configurações.")
-                return
-            price = self.ctx.settings.google_price_per_1000_usd
-
-            def work(task):
-                out = []
-                for ref in refs:
-                    task.check()
-                    task.emit(("usage", 1))
-                    lead = src.details(ref, task)
-                    if lead is not None:
-                        out.append(lead)
-                return out
-
-            def item(it):
-                if it[0] == "usage":
-                    self.ctx.db.call(lambda s: s.record_usage("google_places", it[1], it[1] * price / 1000))
-
-            def done(leads):
-                self.ctx.db.call(lambda s: s.ingest(leads), on_done=lambda _r: self.ctx.leads_changed.emit())
-            self._start_bg(work, "Atualizando dados pelo Google (Place Details, consulta paga)…", item, done)
+            try:
+                self._google_refresh(lead_id, refs, used)
+            except Exception:
+                self.ctx.end_paid("refresh")
+                raise
         self.ctx.db.call(lambda s: (s.google_refs(lead_id), s.usage_month("google_places")[0]), on_done=go)
+
+    def _google_refresh(self, lead_id: int, refs, used: int) -> None:
+        """Roda com a reserva de operação paga já obtida; libera a reserva em qualquer saída."""
+        release = lambda *_a: self.ctx.end_paid("refresh")  # noqa: E731
+        src = self.ctx.sources()["google_places"]
+        ok, why = src.availability()
+        if not ok:
+            release()
+            QMessageBox.information(self, "Google Places", why)
+            return
+        cap = self.ctx.settings.google_monthly_request_cap
+        if used + len(refs) > cap:
+            release()
+            QMessageBox.information(self, "Google Places",
+                                    f"Limite mensal atingido ({used} de {cap} requisições). "
+                                    "Ajuste o limite em Configurações.")
+            return
+        price = self.ctx.settings.google_price_per_1000_usd
+
+        def work(task):
+            out = []
+            for ref in refs:
+                task.check()
+                task.emit(("usage", 1))
+                lead = src.details(ref, task)
+                if lead is not None:
+                    out.append(lead)
+            return out
+
+        def item(it):
+            if it[0] == "usage":
+                self.ctx.db.call(lambda s: s.record_usage("google_places", it[1], it[1] * price / 1000))
+
+        def done(leads):
+            self.ctx.db.call(lambda s: s.ingest(leads), on_done=lambda _r: self.ctx.leads_changed.emit())
+        if not self._start_bg(work, "Atualizando dados pelo Google (Place Details, consulta paga)…", item, done,
+                              on_finish=release):
+            release()
 
     def _rescore_selected(self) -> None:
         ids = self.selected_ids()

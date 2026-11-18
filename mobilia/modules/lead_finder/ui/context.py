@@ -58,6 +58,20 @@ class AppContext(QObject):
         except Exception:  # noqa: BLE001 - janela sem barra de status (uso isolado)
             pass
 
+    # ------------------------------------------------- operações pagas (Google): uma de cada vez
+    def begin_paid(self, owner: str) -> bool:
+        """Reserva exclusiva para operações pagas. Pesquisa e "Atualizar dados do Google" não rodam juntas:
+        assim o limite mensal lido do banco já inclui tudo o que foi enviado antes. Só a thread da interface usa."""
+        if getattr(self, "_paid_owner", ""):
+            self.status("Outra operação paga do Google está em andamento; aguarde ela terminar.")
+            return False
+        self._paid_owner = owner
+        return True
+
+    def end_paid(self, owner: str) -> None:
+        if getattr(self, "_paid_owner", "") == owner:
+            self._paid_owner = ""
+
     def run(self, fn, name: str = "lead-finder-task", **callbacks) -> Task:
         task = Task(fn, self.dispatcher, name=name, **callbacks)
         self.tasks = [t for t in self.tasks if t.running()]

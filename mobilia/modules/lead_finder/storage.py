@@ -170,6 +170,16 @@ class Store:
                 return True
         return False
 
+    def _phone_suppressed(self, e164: str) -> bool:
+        return bool(e164) and self.con.execute("SELECT 1 FROM suppression WHERE kind='phone' AND value=?",
+                                               (e164,)).fetchone() is not None
+
+    def _strip_suppressed_phones(self, lead: Lead) -> Lead:
+        from dataclasses import replace
+        clean = {k: "" for k in ("phone", "phone2", "whatsapp")
+                 if getattr(lead, k) and self._phone_suppressed(ph.normalize(getattr(lead, k)).e164)}
+        return replace(lead, **clean) if clean else lead
+
     def _suppress_lead(self, row, reason: str) -> None:
         at = now_iso()
         vals = [("cnpj", row["cnpj"]), ("phone", row["phone_e164"]), ("phone", row["wa_number"])]
@@ -195,9 +205,16 @@ class Store:
             for lead in leads:
                 info = self._keys(lead)
                 lead_id = self._find(lead, info)
-                if lead_id is None and self._suppressed(info["cnpj"], info["phones"], info["domain"]):
-                    stats["ignorados_nao_contatar"] += 1
-                    continue
+                if self._suppressed(info["cnpj"], info["phones"], info["domain"]):
+                    target = self.con.execute("SELECT status FROM leads WHERE id=?", (lead_id,)).fetchone() \
+                        if lead_id is not None else None
+                    if target is None or self._suppressed(info["cnpj"], [], info["domain"]):
+                        # empresa nova, ou o mesmo CNPJ/site de quem pediu para não ser contatado: ignorada
+                        stats["ignorados_nao_contatar"] += 1
+                        continue
+                    if target["status"] != DO_NOT_CONTACT:
+                        # registro de outra empresa contatável trazendo um telefone bloqueado: o número não entra
+                        lead = self._strip_suppressed_phones(lead)
                 pol = source_policy(lead.source)
                 expires = _days_from_now(pol.store_days) if pol.store_days else ""
                 created = lead_id is None
@@ -283,6 +300,12 @@ class Store:
         wa_src = ph.normalize(merged.get("whatsapp", ""))
         wa_user = cur["wa_user"]
         wa_user_num = ph.normalize(cur["wa_user_number"])
+        # número da lista de não contato nunca vira WhatsApp de uma empresa contatável (segue visível como telefone)
+        blocked = (lambda e: False) if cur["status"] == DO_NOT_CONTACT else self._phone_suppressed
+        if blocked(wa_user_num.e164):
+            wa_user_num = ph.normalize("")
+        if blocked(wa_src.e164):
+            wa_src = ph.normalize("")
         if wa_user == WA_NONE:
             wa_num, wa_status = "", WA_NONE
         elif wa_user == WA_CONFIRMED and wa_user_num.valid:      # o número que a pessoa confirmou, exatamente
@@ -290,7 +313,7 @@ class Store:
         elif wa_src.valid:
             wa_num, wa_status = wa_src.e164, WA_CONFIRMED
         else:
-            mobile = p1 if p1.kind == ph.MOBILE else p2 if p2.kind == ph.MOBILE else None
+            mobile = next((p for p in (p1, p2) if p.kind == ph.MOBILE and not blocked(p.e164)), None)
             wa_num, wa_status = (mobile.e164, WA_LIKELY) if mobile else ("", WA_UNKNOWN)
         domain = dedupe.domain_of(merged.get("website", ""))
         vals = {k: merged.get(k, "") for k in LEAD_FIELDS}
@@ -523,11 +546,13 @@ class Store:
                                                               row["phone2"], row["whatsapp"]) if x}
                     if info.e164 not in known:
                         raise ValueError("Escolha um dos telefones da empresa.")
+                    if row["status"] != DO_NOT_CONTACT and self._phone_suppressed(info.e164):
+                        raise PermissionError("Este número está na lista de não contato.")
                     confirmed = info.e164
                 else:
                     for cand in (row["wa_number"], row["phone_e164"], row["phone2"]):
                         info = ph.normalize(cand)
-                        if info.valid:
+                        if info.valid and (row["status"] == DO_NOT_CONTACT or not self._phone_suppressed(info.e164)):
                             confirmed = info.e164
                             break
                     if not confirmed:
@@ -543,7 +568,8 @@ class Store:
         out: list[str] = []
         for cand in (row["wa_number"], row["whatsapp"], row["phone_e164"], row["phone"], row["phone2"]):
             info = ph.normalize(cand)
-            if info.valid and info.kind != ph.SERVICE and info.e164 not in out:
+            if info.valid and info.e164 not in out and (row["status"] == DO_NOT_CONTACT
+                                                        or not self._phone_suppressed(info.e164)):
                 out.append(info.e164)
         return out
 
@@ -737,7 +763,7 @@ class Store:
             for s, _, _ in ok:
                 if source_policy(s).attribution:
                     attributions.add(source_policy(s).attribution)
-            wa = ph.normalize(merged.get("whatsapp", ""))
+            wa = self._export_whatsapp(row, merged)
             note = ""
             if blocked:
                 note = ("dados do Google não exportáveis pelos termos de uso; place_id: "
@@ -748,7 +774,7 @@ class Store:
                 "cidade": merged.get("city", ""), "uf": merged.get("uf", ""), "cep": merged.get("cep", ""),
                 "telefone": ph.normalize(merged.get("phone", "")).national if merged.get("phone") else "",
                 "telefone2": ph.normalize(merged.get("phone2", "")).national if merged.get("phone2") else "",
-                "whatsapp": wa.national if wa.valid else "", "site": merged.get("website", ""),
+                "whatsapp": wa, "site": merged.get("website", ""),
                 "cnpj": merged.get("cnpj", ""), "status": STATUS_LABEL.get(row["status"], row["status"]),
                 "prioridade": PRIORITY_LABEL.get(max(row["priority"], row["priority_user"]), ""),
                 "pontuacao": "" if row["score"] is None else row["score"],
@@ -791,6 +817,20 @@ class Store:
             "overdue": c.execute("SELECT count(*) FROM reminders r JOIN leads l ON l.id=r.lead_id WHERE r.done=0 AND "
                                  "r.due_at <= ? AND l.status != ?", (now_iso(), DO_NOT_CONTACT)).fetchone()[0],
         }
+
+    @staticmethod
+    def _export_whatsapp(row, merged: dict) -> str:
+        """WhatsApp exportado = decisão manual quando existe; senão o informado pela fonte exportável.
+
+        "Não tem WhatsApp" não exporta nada. "Confirmado" exporta o número confirmado, mas só se esse número
+        também veio de uma fonte exportável (um número cuja única origem é o Google continua fora do CSV)."""
+        if row["wa_user"] == WA_NONE:
+            return ""
+        if row["wa_user"] == WA_CONFIRMED and row["wa_user_number"]:
+            exportable = {ph.normalize(merged.get(k, "")).e164 for k in ("whatsapp", "phone", "phone2")} - {""}
+            return ph.normalize(row["wa_user_number"]).national if row["wa_user_number"] in exportable else ""
+        wa = ph.normalize(merged.get("whatsapp", ""))
+        return wa.national if wa.valid else ""
 
     def _source_counts(self) -> dict:
         out: dict = {}
