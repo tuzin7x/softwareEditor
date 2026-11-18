@@ -327,12 +327,15 @@ def refine_openings(rgb: np.ndarray, groups: np.ndarray, seg_fn, labels=None, id
 
 
 def _repair_openings(eng, img: np.ndarray, new: np.ndarray, lock: np.ndarray, control, room_key: str, seed: int,
-                     steps: int, has_windows: bool) -> tuple[np.ndarray, dict]:
+                     steps: int, has_windows: bool, keep_out: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
     """Refaz como parede lisa as janelas/portas/cortinas que o gerador inventou (``new``): pré-preenche a área
-    com o entorno (Telea) e gera só ali, com a profundidade da foto inteira guiando o plano da parede."""
+    com o entorno (Telea) e gera só ali, com a profundidade da foto inteira guiando o plano da parede.
+    ``keep_out`` (o teto da foto): fica fora do reparo — "parede lisa" pintada no teto deixava uma faixa escura."""
     H, W = new.shape
     diag = float(np.hypot(H, W))
     m = cv2.dilate(new.astype(np.uint8), AL._disk(int(0.02 * diag))).astype(bool) & ~lock
+    if keep_out is not None:
+        m &= ~np.asarray(keep_out, bool)
     if not m.any():
         return img, {}
     pre = cv2.inpaint(img, m.astype(np.uint8) * 255, max(3, int(0.01 * diag)), cv2.INPAINT_TELEA)
@@ -453,7 +456,10 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     struct_depth = None
     gen_base = base
     if fp.structural and gr is not None and depth is not None:
-        hole = S.movable_mask(gr, (W, H), fixtures=not an.open_kitchen) & ~lock
+        # só os móveis soltos saem: armários, bancadas, estantes, louças e eletrodomésticos são a estrutura de uma
+        # cozinha/banheiro (e da cozinha integrada de uma sala) — sem eles a "sala vazia" virava outro cômodo,
+        # com outra câmera, e a cozinha integrada sumia
+        hole = S.movable_mask(gr, (W, H), fixtures=False) & ~lock
         if hole.mean() > 0.01:
             dz = cv2.resize(np.asarray(depth, np.float32), (W, H), interpolation=cv2.INTER_NEAREST)
             struct_depth = S.structural_depth(dz, hole, gr)
@@ -495,6 +501,7 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
         eng.embeddings(prompts)
     tag = f"{fp.key}_{st_key or evento}"
     do_ceiling = fp.keep_ceiling and gr is not None
+    ceil_f = AL.lock_mask(gr, ("ceiling",), (Wf, Hf)) if do_ceiling else None
     checks = m > n or do_repair or do_ceiling
     span = 0.85 if checks else 1.0
     cand_dir = out / "candidatos" if m > n else out
@@ -551,11 +558,12 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
             t0 = time.perf_counter()
             for j, k in enumerate(order):
                 prog("geracao", 0.88 + 0.06 * j / len(order), "Conferindo janelas e portas")
+                lost_src = None
                 new = AL.new_openings(groups_of(k), open_f | lock_f, (Wf, Hf), source_groups=gr)
                 if new.any():
                     prog("geracao", 0.88 + 0.06 * (j + 0.5) / len(order), "Corrigindo uma janela inventada")
                     fixed, info = _repair_openings(eng, images[k], new, lock_f, control_f, room_key, seeds[k],
-                                                   steps, an.windows)
+                                                   steps, an.windows, keep_out=ceil_f)
                     if info:
                         # a versão antes do reparo fica em candidatos/ (conferência), com a área refeita
                         info["antes_do_reparo"] = _save(images[k], out / "candidatos" / f"{tag}_{k + 1}_sem_reparo.jpg")
@@ -564,8 +572,10 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
                             fixed, _ = AL.lock_openings(fixed, base_f, lock_f)
                         images[k] = fixed
                         repairs[str(k)] = info
+                        lost_src = gen_groups[k]
+                        gen_groups[k] = None          # a imagem mudou: o teto é conferido de novo
                 # janela/cortina da foto que sumiu (virou parede, tijolo, armário): a original volta
-                lost = AL.missing_openings(groups_of(k), free_f, (Wf, Hf))
+                lost = AL.missing_openings(lost_src if lost_src is not None else groups_of(k), free_f, (Wf, Hf))
                 if lost.any():
                     images[k], _ = AL.lock_openings(images[k], base_f, lost)
                     repairs.setdefault(str(k), {})["aberturas_perdidas"] = round(float(lost.mean()), 4)

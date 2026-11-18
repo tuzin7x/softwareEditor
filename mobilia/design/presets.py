@@ -275,8 +275,10 @@ FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
     # profundidade ESTRUTURAL (sala sem móveis) e a área dos móveis pré-preenchida com o entorno: com a da foto
     # mobiliada o mesmo sofá voltava no mesmo lugar. 0,9 (e não 1): o resto da foto que fica no ponto de partida
     # segura a câmera e a perspectiva (com ruído puro a sala às vezes "girava" para uma vista frontal); a caixa da
-    # sala guia até 60% do caminho: paredes, janelas e câmera ficam, os móveis são novos e em outra disposição
-    FunctionPreset("reforma", "Reforma completa", strength=0.9, control_scale=0.6, control_end=0.6,
+    # sala guia a meio peso até 45% do caminho (mais forte, a sala vazia do mapa puxava uma sala quase vazia):
+    # paredes, janelas e câmera ficam, os móveis são novos e em outra disposição. Armários, bancadas e louças
+    # ficam no mapa (são a estrutura da cozinha/banheiro)
+    FunctionPreset("reforma", "Reforma completa", strength=0.9, control_scale=0.5, control_end=0.45,
                    guidance=2.2, structural=True, tone_ab=0.12),
     FunctionPreset("redesign_simples", "Redesign simples", strength=0.45, control_scale=0.8, control_end=1.0,
                    guidance=1.5, keep_layout=True, fixed=APPLIANCES, keep_ceiling=True),

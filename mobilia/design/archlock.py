@@ -365,8 +365,9 @@ def paste_ceiling(generated: np.ndarray, original: np.ndarray, mask: np.ndarray,
 def ceiling_keep_mask(src_groups: np.ndarray, gen_groups: np.ndarray, size: tuple[int, int],
                       lock: np.ndarray | None = None, edge_frac: float = 0.006, clear_frac: float = 0.03
                       ) -> np.ndarray:
-    """Onde o teto da foto volta: teto na foto (sem a faixa junto da parede), menos onde a imagem gerada tem
-    luminária, móvel ou armário (um pendente novo não perde o fio) e menos a trava das aberturas."""
+    """Onde o teto da foto volta: teto na foto e na imagem gerada (sem a faixa junto da parede), menos onde a
+    imagem gerada tem luminária, móvel ou armário (um pendente novo não perde o fio) e menos a trava das
+    aberturas."""
     W, H = size
     ceil = lock_mask(src_groups, ("ceiling",), (W, H))
     if not ceil.any():
@@ -378,7 +379,10 @@ def ceiling_keep_mask(src_groups: np.ndarray, gen_groups: np.ndarray, size: tupl
         g = cv2.resize(g, (W, H), interpolation=cv2.INTER_NEAREST)
     busy = np.isin(g, [GROUP_IDS["ceiling_fixture"], GROUP_IDS["furniture"], GROUP_IDS["fixture"]])
     busy = cv2.dilate(busy.astype(np.uint8), _disk(max(1, int(clear_frac * diag)))).astype(bool)
-    out = ceil & ~busy
+    # só onde a imagem gerada também tem teto: se a parede gerada sobe um pouco mais, colar o teto por cima dela
+    # deixava um degrau na junção (vigas e sancas são segmentadas como teto e saem)
+    gen_ceil = cv2.erode((g == GROUP_IDS["ceiling"]).astype(np.uint8), _disk(max(1, int(edge_frac * diag))))
+    out = ceil & ~busy & (gen_ceil > 0)
     if lock is not None:
         out &= ~np.asarray(lock, bool)
     return clean_mask(out, min_frac=0.002)

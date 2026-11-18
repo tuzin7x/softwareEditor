@@ -867,6 +867,10 @@ def test_ceiling_keep_mask_spares_new_pendant_lights():
     gen[0:25, 45:55] = GROUP_IDS["ceiling_fixture"]                 # um pendente novo
     m = AL.ceiling_keep_mask(src, gen, (100, 100))
     assert m[10, 20] and not m[10, 50] and not m[29, 20]
+    gen2 = gen.copy()
+    gen2[15:30] = WALL                                              # a parede gerada sobe mais: lá não cola
+    m2 = AL.ceiling_keep_mask(src, gen2, (100, 100))
+    assert m2[5, 20] and not m2[20, 20]
 
 
 def test_refine_openings_finds_window_behind_glass():
@@ -939,3 +943,35 @@ def test_movable_mask_keeps_open_kitchen_fixtures():
     assert S.movable_mask(g, grow_frac=0)[20, 60] and S.movable_mask(g, grow_frac=0)[40, 10]
     keep = S.movable_mask(g, grow_frac=0, fixtures=False)
     assert not keep[20, 60] and keep[40, 10]
+
+
+def test_repair_stays_off_the_ceiling(tmp_path):
+    rgb, g, depth, _ = _room()
+    eng = FakeEngine()
+
+    def gen_groups(img):                                   # janela inventada que encosta no teto
+        out = np.full(img.shape[:2], WALL, np.uint8)
+        h, w = out.shape
+        out[: h // 6] = CEIL
+        out[0:int(h * 0.45), int(w * 0.05):int(w * 0.3)] = WIN
+        return out
+
+    api.redesign(rgb, "mobiliar", "moderno", "sala", n=1, seed=2, out_dir=tmp_path, engine=eng, depth=depth,
+                 groups=g, long_side=256, rank_fn=gen_groups)
+    rep_call = eng.calls[1]
+    H, W = rep_call["mask"].shape
+    assert rep_call["mask"][int(H * 0.3), int(W * 0.15)] and not rep_call["mask"][2, int(W * 0.15)]
+
+
+def test_kitchen_reforma_keeps_cabinets_in_the_structural_depth(tmp_path):
+    z, z_sofa, g, sofa = _plane_room(240, 320)
+    g = g.copy()
+    g[sofa] = GROUP_IDS["fixture"]                                  # bancada/armário em vez de sofá
+    rgb = np.full((240, 320, 3), 200, np.uint8)
+    eng = FakeEngine()
+    api.redesign(rgb, "reforma", "industrial", "cozinha", n=1, seed=1, out_dir=tmp_path, engine=eng,
+                 depth=z_sofa, groups=g, long_side=320, repair=False, auto_empty=False)
+    c = eng.calls[0]
+    H, W = c["shape"][:2]
+    yy, xx = int(0.54 * H), int(0.45 * W)
+    assert abs(c["control"][yy, xx] - api.depth_control(z_sofa, (W, H))[yy, xx]) < 0.05

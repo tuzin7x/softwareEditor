@@ -744,10 +744,14 @@ ambientes e eventos ficam em `mobilia/design/presets.py`. A interface tem uma c�
 
 ```
 foto ─► tamanho de trabalho (lado maior 1024 na GPU / 768 na CPU, múltiplos de 64)
-     ─► análise local: profundidade → mapa de controle; segmentação → janelas/portas (+ teto no "Mobiliar")
+     ─► análise local: profundidade → mapa de controle (na "Reforma", a da sala sem os móveis); segmentação →
+        janelas/portas (janelas atrás de vidro procuradas de novo num recorte ampliado)
      ─► difusão local guiada pela profundidade (pipeline em cache, N sementes, paleta do estilo girando)
      ─► trava da arquitetura (design/archlock.py): aberturas originais por cima, rampa suave, casamento de cor
-     ─► escolha automática (design/quality.py): gera candidatos a mais e descarta sala vazia ou janela inventada
+     ─► conferência: janela inventada numa parede lisa refeita, janela/cortina que sumiu de volta, teto original
+        de volta (sem vigas e sancas inventadas)
+     ─► escolha automática (design/quality.py): gera candidatos a mais e descarta sala vazia, janela inventada ou
+        perdida e móvel fora de escala
      ─► <saída>/<nome>_<i>.jpg + antes.jpg + design.json
 ```
 
@@ -756,6 +760,8 @@ foto ─► tamanho de trabalho (lado maior 1024 na GPU / 768 na CPU, múltiplos
 | `design/presets.py` | funções, estilos, ambientes, eventos e textos de geração |
 | `design/engine.py` | carrega o pipeline uma vez. Na GPU de 8 GB, os codificadores de texto ficam na CPU (cerca de 8 a 11 s por imagem numa RTX 5070 Laptop) |
 | `design/api.py` | `redesign`, `edit_area` (só a área pintada muda; o resto é pixel a pixel a foto) e `text_to_design` |
+| `design/structure.py` | profundidade estrutural: os móveis saem do mapa e o buraco vira piso, teto e paredes ("Reforma" e "Editar área") |
+| `design/glossary.py` | texto livre do usuário em português → inglês, o idioma do gerador (glossário de decoração, sem rede) |
 | `design/upscale.py` | "Ampliar 4K": ampliação ×4 em blocos sobrepostos, reduzida para 3840 px |
 | `video/showcase.py` | "Vídeo antes e depois", descrito abaixo |
 
@@ -766,7 +772,8 @@ Detalhes do vídeo antes e depois:
   - uma linha vertical revela a primeira versão;
   - *crossfades* entre as versões;
   - rótulos "Antes" e "Depois" e a marca 7xAi.
-- **Formatos:** 16:9 (1920×1080) ou 9:16 (1080×1920).
+- **Formatos:** 16:9 (1920×1080) ou 9:16 (1080×1920). O quadro é sempre preenchido pela foto, sem barras: uma foto
+  4:3 no 16:9 é recortada e a câmera percorre devagar a altura que ficou de fora.
 - **Codificação:** H.264 yuv420p.
 
 CLI: `design`, `ampliar` (também `upscale`) e `showcase`, todos com `--json` para eventos de progresso. A
