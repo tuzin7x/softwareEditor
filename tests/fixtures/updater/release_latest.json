@@ -1,0 +1,35 @@
+{
+ "url": "https://api.github.com/repos/tuzin7x/softwareEditor/releases/1",
+ "html_url": "https://github.com/tuzin7x/softwareEditor/releases/tag/v9.9.1",
+ "tag_name": "v9.9.1",
+ "name": "7xAi v9.9.1",
+ "draft": false,
+ "prerelease": false,
+ "published_at": "2026-12-01T12:00:00Z",
+ "assets": [
+  {
+   "name": "7xAI-Setup-v9.9.1.exe",
+   "browser_download_url": "https://github.com/tuzin7x/softwareEditor/releases/download/v9.9.1/7xAI-Setup-v9.9.1.exe",
+   "size": 2048,
+   "content_type": "application/octet-stream"
+  },
+  {
+   "name": "7xAI-Portable-v9.9.1.exe",
+   "browser_download_url": "https://github.com/tuzin7x/softwareEditor/releases/download/v9.9.1/7xAI-Portable-v9.9.1.exe",
+   "size": 1024,
+   "content_type": "application/octet-stream"
+  },
+  {
+   "name": "SHA256SUMS.txt",
+   "browser_download_url": "https://github.com/tuzin7x/softwareEditor/releases/download/v9.9.1/SHA256SUMS.txt",
+   "size": 200,
+   "content_type": "application/octet-stream"
+  },
+  {
+   "name": "evil.exe",
+   "browser_download_url": "https://evil.example.com/evil.exe",
+   "size": 1
+  }
+ ],
+ "body": "# 7xAi v9.9.1\n\n**Data:** 2026-12-01 · **Versão:** 9.9.1\n\n## Downloads\n\n| Arquivo | Para quem | Tamanho |\n|---|---|---|\n| `7xAI-Setup-v9.9.1.exe` | Instalador | 70 MB |\n\n## Novidades\n\n- Atualização automática dentro do app.\n- <script>alert(1)</script> texto ![img](https://example.com/x.png)\n\n## Correções\n\n- Nada nesta versão.\n\n## Verificação de integridade (SHA-256)\n\n| Arquivo | SHA-256 |\n|---|---|\n| `x` | `abc` |\n"
+}

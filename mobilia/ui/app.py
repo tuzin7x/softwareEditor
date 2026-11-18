@@ -31,6 +31,7 @@ from .design_widgets import (FUNCTION_INFO, FUNCTION_ORDER, STYLE_HINTS, BeforeA
 from .legacy import StageList
 from .modules import ModuleHost
 from .runner import CliResult, CliTask, HardwareProbe
+from .updater_dialog import attach_updater
 from .widgets import (PHOTO_FILTER, DropZone, ImageView, StatusBar, StepHeader, human_size, on_click, paint_chip,
                       rule, tracked_label)
 
@@ -360,6 +361,8 @@ class MainWindow(QMainWindow):
 
         sb = StatusBar(); self.setStatusBar(sb); sb.setSizeGripEnabled(False); self.sb = sb
         sb.addPermanentWidget(QLabel(f"{APP_NAME}  {__version__}"))
+        # atualização automática (GitHub Releases): só no executável; ver updater_dialog.py
+        self.updater = attach_updater(self, sb, busy=lambda: self.design.busy() or self.side.busy())
         sb.showMessage("Detectando GPU…")
         self.probe = HardwareProbe(self); self.probe.done.connect(self._on_hardware)
         self.go(self.P_PHOTO)

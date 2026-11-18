@@ -3,7 +3,7 @@
 Lê o ``PYZ-00.toc`` da pasta de trabalho do PyInstaller (``--workpath``) e confirma que:
 
 * todos os módulos de ``mobilia/modules/`` (ex.: o Lead Finder, com ``ui`` e ``sources``) estão no executável;
-* o registro de módulos e a interface estão lá;
+* o registro de módulos, a interface e a atualização automática (``mobilia.ui.updater``) estão lá;
 * nenhuma biblioteca pesada do motor entrou (o ``.exe`` leva só a interface).
 
 Uso::
@@ -19,7 +19,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_CORE = ("mobilia.ui.app", "mobilia.ui.modules", "mobilia.modules")
+REQUIRED_CORE = ("mobilia.ui.app", "mobilia.ui.modules", "mobilia.modules", "mobilia.ui.updater",
+                 "mobilia.ui.updater_dialog")
 FORBIDDEN_TOP = ("torch", "torchvision", "numpy", "scipy", "cv2", "PIL", "bpy", "transformers", "diffusers",
                  "accelerate", "huggingface_hub", "safetensors", "kornia", "imageio_ffmpeg")
 _NAME = re.compile(r"\(\s*'([A-Za-z_][\w.]*)'\s*,")

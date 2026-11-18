@@ -34,6 +34,7 @@ excludes = ["torch", "torchvision", "numpy", "scipy", "cv2", "bpy", "transformer
 a = Analysis([str(ROOT / "packaging" / "launcher.py")], pathex=[str(ROOT)], datas=datas,
              hiddenimports=["mobilia.ui.app", "mobilia.ui.legacy", "mobilia.ui.design_widgets", "mobilia.ui.widgets",
                             "mobilia.ui.setup_dialog", "mobilia.bootstrap", "mobilia.ui.modules", "mobilia.modules",
+                            "mobilia.ui.updater", "mobilia.ui.updater_dialog",  # atualização automática
                             *collect_submodules("mobilia.modules"),  # módulos opcionais (abas)
                             "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"],
              excludes=excludes, noarchive=False)
