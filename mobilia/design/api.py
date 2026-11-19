@@ -408,14 +408,20 @@ def _refine(eng, img: np.ndarray, size2: tuple[int, int], depth, prompt, seed: i
 
 
 def _green_mask(rgb: np.ndarray) -> np.ndarray:
-    """Verde de vegetação já presente na foto (crescido um pouco): fica fora da busca pela árvore de Natal."""
+    """Verde de vegetação e aglomerados de brilho quente com cara de árvore acesa (a fachada ensolarada da foto
+    de Stafford) já presentes na foto, crescidos um pouco: ficam fora da busca pela árvore de Natal."""
+    from .quality import lit_tree
+
     hsv = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2HSV)
     m = (hsv[..., 0] >= 33) & (hsv[..., 0] <= 95) & (hsv[..., 1] >= 50) & (hsv[..., 2] >= 20)
+    m |= lit_tree(rgb, return_mask=True)[1]          # só os aglomerados "de árvore acesa" que já estavam lá
     r = max(1, int(0.01 * np.hypot(*m.shape)))
     return cv2.dilate(m.astype(np.uint8), AL._disk(r)).astype(bool)
 
 
-TREE_MIN_SCORE = 0.5       # abaixo disto a versão de Natal "não tem árvore" e ganha uma, colocada à mão
+# abaixo disto a versão de Natal "não tem árvore" e ganha uma, colocada à mão. Baixo de propósito: com uma
+# arvorezinha já lá (nota ~0,4 no teste em CPU) uma segunda árvore grande seria pior que nenhuma
+TREE_MIN_SCORE = 0.3
 TREE_FREE_MIN = 0.75       # fração do lugar da árvore que precisa ser parede/piso livre
 
 

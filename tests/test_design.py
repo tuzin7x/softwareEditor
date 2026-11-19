@@ -1731,3 +1731,20 @@ def test_edit_area_removes_whole_old_object_and_uses_its_footprint(tmp_path, roo
     painted = rep["recorte"]
     assert gen.mean() < 0.14                                           # nasce na pegada da mesa, não no retângulo
     assert painted and res.images[0].shape == rgb.shape
+
+
+def test_lit_tree_detects_fully_lit_tree_and_honours_exclusion():
+    import cv2
+    from mobilia.design.quality import lit_tree, tree_score
+
+    img = np.full((240, 320, 3), (70, 60, 55), np.uint8)
+    rng = np.random.default_rng(0)
+    for _ in range(700):                                               # pisca-pisca dourado num cone alto
+        y = int(rng.integers(40, 210)); half = int(6 + (y - 40) * 0.25)
+        x = int(rng.integers(200 - half, 200 + half))
+        cv2.circle(img, (x, y), 1, (255, 200, 90), -1)
+    assert lit_tree(img) > 0.8 and tree_score(img)["arvore"] > 0.8
+    sc, m = lit_tree(img, return_mask=True)
+    assert m.any() and lit_tree(img, exclude=cv2.dilate(m.astype(np.uint8), np.ones((9, 9))) > 0) == 0.0
+    lamp = np.full((240, 320, 3), (70, 60, 55), np.uint8); cv2.circle(lamp, (100, 100), 12, (255, 210, 120), -1)
+    assert lit_tree(lamp) == 0.0                                       # luminária: brilho só, não árvore
