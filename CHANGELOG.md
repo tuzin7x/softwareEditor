@@ -12,51 +12,7 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
 
 ## [Não publicado]
 
-### Novidades
-
-- **Atualização automática dentro do app** (gratuita, pelo GitHub Releases): ao abrir, o 7xAi procura em segundo
-  plano (no máximo uma vez por dia) a última versão estável e mostra "Nova versão X.Y.Z disponível" com as notas,
-  e os botões **Atualizar agora**, **Depois** e **Pular esta versão**. "Atualizar agora" baixa o instalador oficial
-  com barra de progresso e opção de cancelar, confere o SHA-256 com o `SHA256SUMS.txt`, instala em silêncio e
-  reabre o 7xAi. No portátil, baixa o novo `.exe` (conferido) ao lado do atual. Botão **Atualizações** na barra de
-  status: procurar agora, ligar/desligar a consulta automática e ver todas as versões.
-
-### Correções
-
-- **Editar área**: só o objeto antigo (segmentado, crescido ~1%) sai, nunca o móvel vizinho que o retângulo pegou
-  (o braço do sofá ficava borrado); a geração parte da foto sem o objeto antigo, não de um borrão da área inteira; o
-  objeto novo entra opaco (sem a "mesa translúcida") e pedacinhos soltos não são colados.
-- **Natal**: a árvore ganhou lugar no prompt (num canto, diante de parede lisa, repetida no fim) e, na GPU, o Natal
-  gera 2 candidatos a mais e escolhe os que têm árvore.
-- **Mobiliar**: pedaço de móvel cortado pela borda da foto perde pontos na escolha entre candidatos (e entrou no
-  negativo).
-- **Lead Finder (OpenStreetMap)**: a consulta da cidade vai em pedaços pequenos e troca sozinha entre os servidores
-  públicos da Overpass quando um falha (502/504/403); a mensagem não manda mais "conferir a chave" (a Overpass não
-  tem chave) e o User-Agent é descritivo.
-
-### Desempenho
-
-- Com os modelos já baixados, o MoGe e o OneFormer carregam só do disco (sem consultar a internet a cada trabalho):
-  numa rede com IPv6 lento cada consulta custava ~42 s (um trabalho caiu de 201 s para 88 s no teste).
-- Conexões HTTPS do app (Lead Finder, atualização, downloads) tentam IPv4 primeiro, com tempo curto por endereço.
-- Plano de memória calibrado com o pico medido numa placa de 8 GB (5,8 GB na geração a 1024 px): sem offload para
-  a RAM; refino leve (até 1280 px, sem CFG) só quando a estimativa cabe.
-
-### Notas importantes de atualização
-
-- A atualização só usa HTTPS e hosts do GitHub, exige o SHA-256 publicado e nunca toca nos dados do usuário
-  (`%LOCALAPPDATA%\MobiliaStudio`: motor, modelos, trabalhos, Lead Finder). Pré-lançamentos nunca são oferecidos.
-- O instalador ganhou o parâmetro `/AUTOUPDATE` (usado só pela atualização automática) para reabrir o 7xAi no fim.
-  A primeira versão com este recurso ainda precisa ser instalada à mão; as seguintes chegam pelo próprio app.
-
-## [0.9.0] - RASCUNHO (aguardando aprovação do dono)
-
-> **RASCUNHO — não publicar ainda.** Primeira versão oficial proposta: **0.9.0** (estável da série 0.x, e não
-> 1.0.0), porque o produto funciona de ponta a ponta mas tem limitações de qualidade conhecidas (abaixo) e o app
-> completo ainda não foi aberto num Windows de verdade. Para publicar: rode os testes manuais do dono no Windows,
-> ajuste o texto, troque o título por `## [0.9.0] - AAAA-MM-DD` (data da publicação) e apague este aviso, num PR
-> para a `main`. O `__version__` em `mobilia/__init__.py` já é `0.9.0`. O workflow de Release se recusa a publicar
-> enquanto a palavra RASCUNHO estiver nesta seção.
+## [0.9.0] - 2026-11-19
 
 ### Novidades
 
@@ -88,12 +44,23 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
   baixado e instalado no primeiro uso.
 - Releases oficiais com instalador, portátil, `SHA256SUMS.txt` e notas da versão; versão com fonte única
   (`mobilia/__init__.py`).
+- **Atualização automática dentro do app** (gratuita, pelo GitHub Releases): ao abrir, o 7xAi procura em segundo
+  plano (no máximo uma vez por dia) a última versão estável e mostra "Nova versão X.Y.Z disponível" com as notas,
+  e os botões **Atualizar agora**, **Depois** e **Pular esta versão**. "Atualizar agora" baixa o instalador oficial
+  com barra de progresso e opção de cancelar, confere o SHA-256 com o `SHA256SUMS.txt`, instala em silêncio e
+  reabre o 7xAi. No portátil, baixa o novo `.exe` (conferido) ao lado do atual. Botão **Atualizações** na barra de
+  status: procurar agora, ligar/desligar a consulta automática e ver todas as versões.
 
 ### Desempenho
 
 - Cerca de 8 a 11 s por imagem numa RTX 5070 Laptop de 8 GB, medidos num teste isolado do motor (codificadores de
   texto na CPU para caber em 8 GB de memória de vídeo). O app completo ainda não foi medido no Windows.
 - Executável leve (só a interface); o motor pesado fica fora do instalador e é reaproveitado entre atualizações.
+- Com os modelos já baixados, o MoGe e o OneFormer carregam só do disco (sem consultar a internet a cada trabalho):
+  numa rede com IPv6 lento cada consulta custava ~42 s (um trabalho caiu de 201 s para 88 s no teste).
+- Conexões HTTPS do app (Lead Finder, atualização, downloads) tentam IPv4 primeiro, com tempo curto por endereço.
+- Plano de memória calibrado com o pico medido numa placa de 8 GB (5,8 GB na geração a 1024 px): sem offload para
+  a RAM; refino leve (até 1280 px, sem CFG) só quando a estimativa cabe.
 
 ### Notas importantes de atualização
 
@@ -106,8 +73,21 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
   serviços on-line (e o Google Places é pago, com chave e limites definidos pelo usuário).
 - O instalador ainda não tem assinatura digital paga: o Windows pode mostrar "O Windows protegeu o computador".
   Clique em **Mais informações → Executar assim mesmo**.
-- **Limitações conhecidas desta versão:** "Editar área" às vezes deixa uma mancha oval em vez do móvel novo; a
-  proteção de janelas e portas falha em aberturas pequenas ou cobertas; "Mudar estilo" muda pouco em salas já
-  decoradas; "Reforma completa" mantém a disposição original dos móveis; "Mobiliar ambiente vazio" às vezes cria
-  vigas no teto ou erra a escala; o vídeo antes e depois coloca faixas laterais em fotos 4:3. No Lead Finder, o
-  Google Places e a variação de mensagem por IA foram testados só com respostas gravadas (sem chave real).
+- **Limitações conhecidas desta versão:** "Editar área" ainda pode deixar restos do objeto antigo ou uma mancha no piso; a árvore em "Decoração de evento → Natal" nem sempre aparece; "Mobiliar" às vezes deixa um móvel cortado na borda; numa placa de 8 GB a passada de detalhe fica desligada (imagens a 1024 px, use "Ampliar 4K"); a busca no OpenStreetMap depende de servidores públicos e pode demorar ou falhar em parte. Google Places e a variação de mensagem por IA foram testados só com respostas gravadas. Correções chegam pela atualização automática.
+- A atualização só usa HTTPS e hosts do GitHub, exige o SHA-256 publicado e nunca toca nos dados do usuário
+  (`%LOCALAPPDATA%\MobiliaStudio`: motor, modelos, trabalhos, Lead Finder). Pré-lançamentos nunca são oferecidos.
+- O instalador ganhou o parâmetro `/AUTOUPDATE` (usado só pela atualização automática) para reabrir o 7xAi no fim.
+  A primeira versão com este recurso ainda precisa ser instalada à mão; as seguintes chegam pelo próprio app.
+
+### Correções
+
+- **Editar área**: só o objeto antigo (segmentado, crescido ~1%) sai, nunca o móvel vizinho que o retângulo pegou
+  (o braço do sofá ficava borrado); a geração parte da foto sem o objeto antigo, não de um borrão da área inteira; o
+  objeto novo entra opaco (sem a "mesa translúcida") e pedacinhos soltos não são colados.
+- **Natal**: a árvore ganhou lugar no prompt (num canto, diante de parede lisa, repetida no fim) e, na GPU, o Natal
+  gera 2 candidatos a mais e escolhe os que têm árvore.
+- **Mobiliar**: pedaço de móvel cortado pela borda da foto perde pontos na escolha entre candidatos (e entrou no
+  negativo).
+- **Lead Finder (OpenStreetMap)**: a consulta da cidade vai em pedaços pequenos e troca sozinha entre os servidores
+  públicos da Overpass quando um falha (502/504/403); a mensagem não manda mais "conferir a chave" (a Overpass não
+  tem chave) e o User-Agent é descritivo.

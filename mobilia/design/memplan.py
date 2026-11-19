@@ -17,7 +17,7 @@ chamada (``torch.cuda.max_memory_allocated``) foi 5813 MB, com codificadores de 
 ativações ~280 MB por megapixel por item do lote (×1,1 de folga) + contexto CUDA (~400 MB, fora do alocador do torch
 e dentro do orçamento, que é medido como o ``nvidia-smi``). Geração a 1024×768 com CFG: ~5,86 GB no alocador
 (~6,26 GB no total) — sem offload numa placa de 8 GB. Refino: o de 1536 px transbordava (7,6–7,9 GB) e fica só para
-placas de 12 GB ou mais; numa placa de 8 GB só um refino LEVE (1280 ou 1152 px, sem CFG) e só se a estimativa couber
+placas de 12 GB ou mais; numa placa de 8 GB, sem refino (o teste real a 1280 px passou de 8 GB de pico)
 no orçamento com folga — senão desligado (registrado nas ``notes``). O ``engine`` ainda confere o tempo por passo
 da passada de detalhe e desliga o refino das versões seguintes se ele indicar *sysmem fallback*
 (``refine_spilled``).
@@ -38,7 +38,7 @@ SAFETY = 1.10              # fragmentação do alocador (sobre as ativações)
 BUDGET_CAP_8GB_MB = 7168   # "cabe em ~7 GB": teto explícito da classe de 8 GB
 TE_FP32_RAM_MB = 3600      # codificadores de texto (CLIP-L + bigG) em fp32 na CPU
 REFINE_SIDES = (1536, 1408, 1280, 1152)
-REFINE_SIDES_TIGHT = (1280, 1152)   # placas < 12 GB: refino leve ou nenhum (o de 1536 transbordava no teste real)
+REFINE_SIDES_TIGHT: tuple[int, ...] = ()   # placas < 12 GB: sem refino (no teste real a 1280 px o pico passou de 8 GB)
 REFINE_HEADROOM_MB = 400  # o refino deixa esta folga a mais (a estimativa de ativações não é medida aqui)
 SPILL_FACTOR = 3.0         # passo do refino N× mais lento (por megapixel) que o da geração = memória do sistema
 
@@ -88,7 +88,7 @@ def plan(device: str, vram_total_mb: int | None = None, vram_free_mb: int | None
 
     GPU: orçamento = min(total − reserva, livre agora − 256, 7 GB se a placa tem até 8 GB). A geração é a 1024 px
     se couber (senão offload). A passada de detalhe usa o maior lado de ``REFINE_SIDES`` que cabe no orçamento sem
-    CFG (lote 1) — numa placa de 8 GB no máximo 1280 px (``REFINE_SIDES_TIGHT``); só placas folgadas (≥ 12 GB)
+    CFG (lote 1) — numa placa de 8 GB nenhum (``REFINE_SIDES_TIGHT`` vazio); só placas folgadas (≥ 12 GB)
     refinam a 1536 com CFG. O OneFormer da
     conferência fica fora da GPU durante a geração sempre que o orçamento for apertado. Estimativas calibradas
     com o pico medido (ver o cabeçalho do módulo)."""

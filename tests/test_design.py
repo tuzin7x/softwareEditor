@@ -4,6 +4,7 @@ Garantias: presets completos (funções, 12+ estilos, ambientes) e prompts coere
 do Lightning perto da pedida; trava da arquitetura (janelas/portas originais por cima, rampa sem halo); "Editar
 área" pixel-idêntico fora da máscara; escolha entre candidatos; contrato da CLI ``design`` (eventos JSON)."""
 from __future__ import annotations
+import dataclasses
 
 import json
 from pathlib import Path
@@ -991,11 +992,12 @@ def test_memory_plan_8gb_laptop_fits_in_7gb():
     fora da GPU, codificadores de texto em bf16 — nada passa de ~7 GB (o refino a 1536 com CFG transbordava)."""
     p = MP.plan("cuda", vram_total_mb=8188, vram_free_mb=7600, ram_free_mb=650)
     assert p.gen_long_side == 1024 and not p.offload
-    assert p.refine and p.refine_long_side == 1280 and not p.refine_cfg
-    assert p.peak_gen_mb <= 7168 and p.peak_refine_mb <= 7168 and p.budget_mb <= 7168
+    # teste real (a45fe5c): o refino a 1280 px passou de 8 GB de pico -> placas < 12 GB ficam sem refino
+    assert not p.refine and p.refine_long_side == 0
+    assert p.peak_gen_mb <= 7168 and p.budget_mb <= 7168
     assert p.seg_off_gpu and p.te_dtype == "bfloat16"
     # o caso que transbordou no teste (1536 px) nunca é escolhido numa placa de 8 GB
-    assert max(MP.REFINE_SIDES_TIGHT) <= 1280
+    assert MP.REFINE_SIDES_TIGHT == ()
     big = MP.plan("cuda", 12288, 11800, 16000)
     assert big.refine_long_side == 1536 and big.refine_cfg and big.te_dtype == "float32"
     small = MP.plan("cuda", 6144, 5800, 16000)
@@ -1015,10 +1017,7 @@ def test_memory_plan_calibrated_to_measured_peak():
     assert abs(est - MP.MEASURED_GEN_PEAK_MB) / MP.MEASURED_GEN_PEAK_MB < 0.05
     nb = MP.plan("cuda", vram_total_mb=8188, vram_free_mb=7013, ram_free_mb=650)    # números do teste real
     assert nb.budget_mb == 6757 and not nb.offload and nb.peak_gen_mb <= nb.budget_mb
-    assert nb.refine and nb.refine_long_side <= 1280 and not nb.refine_cfg
-    assert nb.peak_refine_mb <= nb.budget_mb - MP.REFINE_HEADROOM_MB
-    # refino leve sem CFG tem MENOS ativações que a geração com CFG que coube de verdade
-    assert MP.peak_mb(1280, 960, cfg=False) < MP.peak_mb(1024, 768, cfg=True)
+    assert not nb.refine and nb.refine_long_side == 0
     tight = MP.plan("cuda", 8188, 6600, 8000)
     assert not tight.offload and not tight.refine and any("sem folga" in x for x in tight.notes)
 
@@ -1051,7 +1050,9 @@ class TimedEngine(FakeEngine):
 
 def test_redesign_uses_memory_plan_on_gpu(tmp_path, monkeypatch):
     rgb, g, depth, _ = _room(960, 640)
-    plan8 = MP.plan("cuda", 8188, 7600, 650)
+    # plano com refino leve forçado (o caminho do refino continua válido para placas maiores)
+    plan8 = dataclasses.replace(MP.plan("cuda", 8188, 7600, 650), refine=True, refine_long_side=1280,
+                                refine_cfg=False, peak_refine_mb=6000)
     eng = TimedEngine(plan8, refine_s=0.6)
     monkeypatch.setattr(api, "_refine_spilled", lambda e: MP.refine_spilled(
         e.log[-2]["s_por_passo"], np.prod(e.log[-2]["tamanho"]), e.log[-1]["s_por_passo"], np.prod(e.log[-1]["tamanho"])))

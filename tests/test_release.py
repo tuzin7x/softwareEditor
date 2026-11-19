@@ -133,12 +133,12 @@ def test_check_refuses_draft_and_empty_sections(tmp_path):
         rn.check("1.2.0", _fake_repo(tmp_path / "b", "1.2.0", empty))
 
 
-def test_real_changelog_has_unreleased_and_draft_first_version(tmp_path):
+def test_real_changelog_has_unreleased_and_published_first_version(tmp_path):
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "## [Não publicado]" in text
     assert rn.code_version() == "0.9.0", "a primeira versão oficial proposta é a 0.9.0"
     sec = rn.find_section(text, "0.9.0")
-    assert sec is not None and sec.is_draft, "a 0.9.0 continua rascunho até o dono aprovar"
+    assert sec is not None and not sec.is_draft, "a 0.9.0 foi aprovada pelo dono e sai como primeira versão oficial"
     for item in ("Mudar estilo", "Reforma completa", "Redesign simples", "Mobiliar ambiente vazio", "Editar área",
                  "Fachada", "Decoração de evento", "Texto para ambiente", "Ampliar 4K", "Vídeo antes e depois",
                  "Lead Finder"):
@@ -146,8 +146,7 @@ def test_real_changelog_has_unreleased_and_draft_first_version(tmp_path):
     root = tmp_path / "r"
     root.mkdir()
     shutil.copy(ROOT / "CHANGELOG.md", _fake_repo(root, "0.9.0") / "CHANGELOG.md")
-    with pytest.raises(rn.ReleaseError, match="RASCUNHO"):        # o workflow se recusa a publicar o rascunho
-        rn.check("0.9.0", root)
+    assert rn.check("0.9.0", root).heading.startswith("## [0.9.0] - 20")   # pronta para o workflow publicar
     with pytest.raises(rn.ReleaseError):                          # e não existe uma 1.0.0 para publicar
         rn.check("1.0.0", root)
 
