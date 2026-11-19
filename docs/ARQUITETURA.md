@@ -763,6 +763,8 @@ foto ─► tamanho de trabalho (lado maior 1024 na GPU / 768 na CPU, múltiplos
 | `design/structure.py` | profundidade estrutural: os móveis saem do mapa e o buraco vira piso, teto e paredes ("Reforma" e "Editar área") |
 | `design/glossary.py` | texto livre do usuário em português → inglês, o idioma do gerador (glossário de decoração, sem rede) |
 | `design/upscale.py` | "Ampliar 4K": ampliação ×4 em blocos sobrepostos, reduzida para 3840 px |
+| `design/enhance.py` | "Melhorar foto": tom local base/detalhe (filtro guiado), balanço de branco pelo teto/paredes, verticais (LSD + RANSAC do ponto de fuga + homografia K·R·K⁻¹ com recorte), céu procedural só no rótulo "sky", ruído/nitidez e remoção de objetos pintados (removedor de objetos em recortes) |
+| `design/listing.py` | "Exportar para anúncio" (2048 px/4K, selo "Imagem ilustrativa") e o "Lote" (`design-lote`) |
 | `video/showcase.py` | "Vídeo antes e depois", descrito abaixo |
 
 Detalhes do vídeo antes e depois:

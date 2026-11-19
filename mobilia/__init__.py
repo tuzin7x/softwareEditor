@@ -13,5 +13,5 @@ import os as _os
 # cada carga online: os pesos .bin do instalador bastam (o worker já define isto; a CLI direta também precisa)
 _os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 APP_NAME = "7xAi"

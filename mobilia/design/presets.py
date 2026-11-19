@@ -274,6 +274,8 @@ class FunctionPreset:
     # tom: quanto a exposição/cor da imagem gerada é puxada para a da foto (0 = nada). Troca de estilo precisa de
     # pouca âncora na cor (senão escandinavo e moderno saem com a mesma cor da foto)
     tone_ab: float = 0.35
+    # False: a função não usa o gerador (processamento de foto: "Melhorar foto", ``enhance.py``)
+    generative: bool = True
 
 
 APPLIANCES = ("refrigerator", "stove", "oven", "dishwasher", "microwave")
@@ -317,7 +319,15 @@ FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
                    repair=False),
     FunctionPreset("texto", "Texto para ambiente", strength=1.0, control_scale=0.0, control_end=0.0, guidance=2.0,
                    lock=(), needs_photo=False, repair=False),
+    # edição de foto de anúncio (exposição, branco, verticais, céu, nitidez, remover objetos): nada é gerado e a
+    # arquitetura nunca muda (``enhance.py``)
+    FunctionPreset("melhorar", "Melhorar foto", strength=0.0, control_scale=0.0, control_end=0.0, lock=(),
+                   furnish=False, repair=False, generative=False),
 )}
+
+# funções em que a imagem final mostra móveis/decoração que não existem: o "Exportar para anúncio" põe o selo
+# "Imagem ilustrativa" por padrão (o "Melhorar foto" só corrige a foto real: sem selo)
+ILLUSTRATIVE = ("mudar_estilo", "reforma", "redesign_simples", "mobiliar", "editar_area", "fachada", "evento", "texto")
 
 # funções que, numa foto de ambiente vazio, viram "Mobiliar" (mudar o estilo de uma sala vazia devolvia uma sala
 # vazia com um vaso: exatamente o que o usuário odiou)
@@ -341,10 +351,35 @@ NEGATIVE_CEILING = ("ceiling beams, exposed beams, coffered ceiling, tray ceilin
                     "round ceiling cove, new ceiling structure")
 NEGATIVE_SCALE = "oversized furniture, giant sofa, huge coffee table, furniture out of scale"
 SCALE_CUE = "realistic proportions, furniture correctly scaled to the room"
+# composição com folga nas bordas: os móveis novos ficam inteiros dentro do quadro (poltrona cortada no canto, GPU)
+FRAME_CUE = "all furniture fully inside the frame, clear floor space near the image edges"
 NEGATIVE_EMPTY = "empty room, unfurnished, bare floor, sparse, single vase, lonely object in the middle of the room"
 # "Editar área": uma sala inteira dentro do retângulo (o defeito visto na GPU) e móveis que ninguém pediu
 EDIT_NEGATIVE_ROOM = ("entire room, room interior view, miniature room, room inside a room, collage, picture in "
                       "picture, frame within frame, new window, wall corner")
+# formas pedidas: "mesa redonda" saiu em gota na GPU (0.9.0). A forma vira uma frase própria logo depois do objeto
+# (o CLIP pesa o começo) e forma irregular vai para o negativo
+SHAPES: tuple[tuple[str, str], ...] = (
+    ("round", "perfectly round circular shape, geometric circle seen in perspective"),
+    ("circular", "perfectly round circular shape, geometric circle seen in perspective"),
+    ("oval", "regular oval shape, smooth symmetric ellipse"),
+    ("square", "square shape with straight edges and right angles"),
+    ("rectangular", "rectangular shape with straight parallel edges"),
+)
+NEGATIVE_SHAPE = "irregular shape, blob, amorphous, teardrop shape, drop shape, melted, deformed, asymmetrical"
+
+
+def shape_cue(text: str) -> str:
+    """Frase de forma para o objeto pedido (texto já em inglês), ou "" sem forma citada."""
+    import re
+
+    t = (text or "").lower()
+    for word, cue in SHAPES:
+        if re.search(rf"\b{word}\b", t):
+            return cue
+    return ""
+
+
 EDIT_OTHER_OBJECTS = ("sofa", "armchair", "bed", "dining table", "floor lamp", "bookshelf", "television", "curtains")
 OPEN_KITCHEN = "open-plan kitchen with its cabinets and appliances kept in place"
 
@@ -367,7 +402,8 @@ def _norm(key: str, table: dict, kind: str) -> str:
          "jantar": "sala_jantar", "aniversário": "aniversario", "chá_de_bebê": "cha_de_bebe",
          "redesign": "redesign_simples", "reforma_completa": "reforma", "editar": "editar_area",
          "mobiliar_ambiente_vazio": "mobiliar", "texto_para_ambiente": "texto", "decoracao_de_evento": "evento",
-         "decoração_de_evento": "evento"}.get(k, k)
+         "decoração_de_evento": "evento", "melhorar_foto": "melhorar", "melhorar_a_foto": "melhorar",
+         "enhance": "melhorar"}.get(k, k)
     if k not in table:
         raise ValueError(f"{kind} inválido: {key!r} (opções: {', '.join(table)})")
     return k
@@ -449,6 +485,9 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
         adj = st.prompt.split(",")[0].replace(" interior design", "").strip() if st else ""
         if extra:
             parts[0] = f"a {extra}"
+            shape = shape_cue(extra)
+            if shape:
+                parts.insert(1, shape)
             parts.append(f"a single {adj + ' style ' if adj else ''}{extra} as the only new object, "
                          f"placed in the existing {r['en']}")
             parts.append("realistic scale, natural contact shadows on the floor, lighting and perspective matching "
@@ -463,7 +502,7 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             parts.append(f"realistic scale, natural contact shadows, matching lighting and perspective, {tail}")
             neg.append(EDIT_NEGATIVE_ROOM)
         neg.append("empty floor, bare area, blank space, smudge, blurry patch, seam, visible border, "
-                   "mismatched lighting, floating object, oversized")
+                   "mismatched lighting, floating object, oversized, " + NEGATIVE_SHAPE)
     else:
         adj = st.prompt.split(",")[0].replace(" interior design", "").strip() + " " if st else ""
         lead = {"mobiliar": f"photo of a fully furnished {adj}{r['en']}",
@@ -478,6 +517,8 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             parts.append(OPEN_KITCHEN)
         if f.furnish:
             parts.append(SCALE_CUE)
+        if f.key == "mobiliar":
+            parts.append(FRAME_CUE)
         parts.append(tail)
         if f.furnish:
             neg.append(NEGATIVE_EMPTY)
@@ -485,8 +526,8 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             neg.append(NEGATIVE_OPENINGS)
         if f.key == "mobiliar":     # o volume é da sala vazia: nada de arquitetura nova
             # e nada de móvel cortado pela borda do quadro (um pedaço sem sentido no canto, visto na GPU)
-            neg.append("furniture cut off by the frame edge, cropped furniture fragment, fireplace, radiator, "
-                       "column, new wall, built-in niche")
+            neg.append("furniture cut off by the frame edge, cropped furniture fragment, partial armchair at the "
+                       "image border, chair cut in half, fireplace, radiator, column, new wall, built-in niche")
         if f.keep_ceiling:
             neg.append(NEGATIVE_CEILING)
         if f.furnish:
@@ -589,8 +630,9 @@ def catalog() -> dict:
             "eventos": {k: e["label"] for k, e in EVENTS.items()}}
 
 
-__all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "WET", "APPLIANCES", "EMPTY_TO_STAGING", "EMPTY_FURNITURE_FRAC",
+__all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "ILLUSTRATIVE", "WET", "APPLIANCES", "EMPTY_TO_STAGING", "EMPTY_FURNITURE_FRAC",
            "NEGATIVE_OPENINGS", "OPEN_KITCHEN", "Style", "FunctionPreset", "DesignPrompt", "QualityProfile",
            "function", "style", "room", "norm_room", "norm_style", "norm_event", "build_prompt", "with_overrides",
            "quality_profile", "work_size", "catalog", "NEGATIVE_BASE", "NEGATIVE_EMPTY", "NEGATIVE_CEILING",
-           "NEGATIVE_SCALE", "SCALE_CUE", "EDIT_NEGATIVE_ROOM", "EDIT_OTHER_OBJECTS", "NEGATIVE_EVENT", "infer_room", "norm_aspect"]
+           "NEGATIVE_SCALE", "SCALE_CUE", "EDIT_NEGATIVE_ROOM", "EDIT_OTHER_OBJECTS", "shape_cue",
+           "NEGATIVE_SHAPE", "FRAME_CUE", "NEGATIVE_EVENT", "infer_room", "norm_aspect"]

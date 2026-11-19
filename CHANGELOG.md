@@ -12,6 +12,43 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
 
 ## [Não publicado]
 
+## [0.9.1] - RASCUNHO
+
+### Novidades
+
+- **Melhorar foto** (nova função, primeira da lista): edição de foto de anúncio sem mudar nada do imóvel, com
+  cada ajuste podendo ser desligado:
+  - **Luz e janelas (HDR natural):** exposição automática e mapeamento de tom local — as sombras sobem e as janelas
+    claras descem, sem halo e sem cara de filtro (foto já boa quase não muda);
+  - **Balanço de branco:** tira o amarelado da lâmpada e o azulado da sombra usando o teto e as paredes claras
+    como referência, com limite (parede bege continua bege);
+  - **Endireitar verticais:** paredes, portas e armários ficam retos (correção de perspectiva com recorte
+    automático); com pouca confiança a foto não é mexida;
+  - **Céu azul:** céu nublado ou estourado de fachadas e varandas vira um céu azul limpo (céus próprios, gerados
+    pelo 7xAi), com borda refinada e brilho casado; nada fora do céu muda;
+  - **Nitidez e menos ruído**, saída na resolução da foto (ou em 4K com "Entregar em 4K");
+  - **Remover objetos:** pinte na foto o que deve sumir (fios, lixo, objetos pessoais).
+- **Lote:** escolha várias fotos de um imóvel, aplique a mesma função (ex.: Melhorar foto) e acompanhe foto a foto;
+  as imagens prontas vão para uma pasta com o nome do imóvel (linha de comando: `design-lote`).
+- **Exportar para anúncio:** JPEG pronto para WhatsApp e portais (2048 px ou 4K), com o selo discreto
+  "Imagem ilustrativa" ligado por padrão nas funções de redesenho e desligado no Melhorar foto
+  (linha de comando: `exportar`).
+
+### Correções
+
+- **Editar área:** o móvel antigo sai inteiro, com pés finos e base (mesmo a parte que a pincelada não cobriu), e
+  o novo nasce no lugar e na escala do antigo; onde o antigo estava e o novo não cobre, a textura do tapete/piso é
+  refeita (sem o borrão cinza). A forma pedida é respeitada ("mesa redonda" sai redonda, não em gota).
+- **Decoração de Natal:** versão sem árvore ganha uma árvore de verdade num canto livre do piso (sem janela, porta
+  ou móvel na frente); árvore toda acesa passa a ser reconhecida (nada de segunda árvore).
+- **Mobiliar:** móvel cortado na borda da foto pesa o dobro na escolha das versões, o pedido ao gerador reforça
+  móveis inteiros dentro do quadro e, se ainda sobrar um cortado, mais duas versões entram na disputa.
+
+### Notas importantes de atualização
+
+- O "Melhorar foto" roda em segundos mesmo sem placa de vídeo; só a troca do céu e a remoção de objetos usam IA.
+  O céu é trocado apenas onde a IA reconhece céu aberto (fachadas, varandas): a vista pela janela fica como está.
+
 ## [0.9.0] - 2026-11-19
 
 ### Novidades

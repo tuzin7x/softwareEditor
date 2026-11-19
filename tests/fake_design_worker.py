@@ -8,6 +8,8 @@ Imita o protocolo JSON de ``mobilia.cli``:
   ``MOBILIA_FAKE_DESIGN_SRC=<pasta>``: copia as imagens dessa pasta (capturas de tela com imagens reais).
 - ``upscale --image --out``: grava a imagem ampliada (2x, rápido) e ``done`` com ``size``.
 - ``showcase --before --after a b ... --out --format``: grava um MP4 minúsculo e ``done``.
+- ``design-lote --fotos ... --out-dir``: ``item`` por foto (``falhar`` no nome do arquivo -> erro nela) e ``done``.
+- ``exportar --images ... --out-dir``: copia as imagens como ``*_anuncio.jpg`` e ``done`` (rotulo, lado).
 - qualquer outro comando: ``tests/fake_worker.py`` (modo legado e ``hardware``).
 """
 import json
@@ -79,6 +81,8 @@ def design(argv) -> int:
         before = None
     if funcao == "editar_area":
         assert Path(a["--mask"]).is_file(), "máscara ausente"
+    if funcao == "melhorar" and "--mask" in a:
+        assert Path(a["--mask"]).is_file(), "máscara de remoção ausente"
     outs, tag = [], "_".join(x for x in (funcao, a.get("--evento") or estilo) if x)
     for i in range(n):
         _emit(event="progress", stage="geracao", fraction=round(0.15 + 0.8 * i / n, 3),
@@ -142,6 +146,52 @@ def showcase(argv) -> int:
     return 0
 
 
+def design_batch(argv) -> int:
+    from PIL import Image
+
+    a, multi = _parse(argv)
+    out = Path(a["--out-dir"]); out.mkdir(parents=True, exist_ok=True)
+    (out / "args.json").write_text(json.dumps(["design-lote"] + argv, ensure_ascii=False), encoding="utf-8")
+    fotos = multi["--fotos"]
+    funcao = a.get("--funcao", "melhorar")
+    outs, itens = [], []
+    slow = "devagar" in a.get("--imovel", "")
+    for i, f in enumerate(fotos):
+        _emit(event="item", index=i, total=len(fotos), photo=f, status="processando")
+        _emit(event="progress", stage="lote", fraction=round(i / len(fotos), 3), message=f"Foto {i + 1}")
+        time.sleep(1.0 if slow else 0.03)
+        if "falhar" in Path(f).name:
+            _emit(event="item", index=i, total=len(fotos), photo=f, status="erro", message="foto ilegível")
+            itens.append({"photo": f, "status": "erro"})
+            continue
+        p = out / f"{Path(f).stem}_{funcao}.jpg"
+        im = Image.open(f).convert("RGB"); im.thumbnail((256, 256)); im.save(p, quality=90)
+        outs.append(str(p)); itens.append({"photo": f, "status": "pronto", "outputs": [str(p)]})
+        _emit(event="item", index=i, total=len(fotos), photo=f, status="pronto", outputs=[str(p)])
+    anuncio = []
+    if "--exportar" in a:
+        (out / "anuncio").mkdir(exist_ok=True)
+        for o in outs:
+            d = out / "anuncio" / (Path(o).stem + "_anuncio.jpg"); shutil.copyfile(o, d); anuncio.append(str(d))
+    if not outs:
+        _emit(event="error", message="Nenhuma foto do lote foi processada", detail="")
+        return 1
+    _emit(event="done", outputs=outs, output=outs[0], folder=str(out), itens=itens, anuncio=anuncio, funcao=funcao)
+    return 0
+
+
+def export(argv) -> int:
+    a, multi = _parse(argv)
+    out = Path(a["--out-dir"]); out.mkdir(parents=True, exist_ok=True)
+    assert a.get("--lado") in ("2048", "4k"), a.get("--lado")
+    outs = []
+    for im in multi["--images"]:
+        d = out / (Path(im).stem + "_anuncio.jpg"); shutil.copyfile(im, d); outs.append(str(d))
+    (out / "exportar_args.json").write_text(json.dumps(argv), encoding="utf-8")
+    _emit(event="done", outputs=outs, output=outs[0], folder=str(out), rotulo="--rotulo" in a, lado=a["--lado"])
+    return 0
+
+
 def main(argv):
     cmd = argv[0] if argv else ""
     if cmd == "design":
@@ -150,6 +200,10 @@ def main(argv):
         return upscale(argv[1:])
     if cmd == "showcase":
         return showcase(argv[1:])
+    if cmd == "design-lote":
+        return design_batch(argv[1:])
+    if cmd == "exportar":
+        return export(argv[1:])
     import fake_worker
     return fake_worker.main(argv)
 

@@ -46,7 +46,7 @@ TAGLINE = "Redesenho de ambientes por IA, a partir de uma única foto"
 CATALOG: dict[str, dict[str, str]] = {
     "funcoes": {"mudar_estilo": "Mudar estilo", "reforma": "Reforma completa", "redesign_simples": "Redesign simples",
                 "mobiliar": "Mobiliar ambiente vazio", "editar_area": "Editar área", "fachada": "Fachada",
-                "evento": "Decoração de evento", "texto": "Texto para ambiente"},
+                "evento": "Decoração de evento", "texto": "Texto para ambiente", "melhorar": "Melhorar foto"},
     "estilos": {"moderno": "Moderno", "contemporaneo": "Contemporâneo", "escandinavo": "Escandinavo",
                 "minimalista": "Minimalista", "industrial": "Industrial", "classico": "Clássico", "luxo": "Luxo",
                 "boho": "Boho", "japandi": "Japandi", "rustico": "Rústico", "costeiro": "Costeiro",
@@ -67,6 +67,20 @@ VIDEO_FORMATS = {"16x9": ("Horizontal 16:9", "1920 × 1080 · YouTube, TV e apre
 DESIGN_STAGES = [("preparo", "Preparando a foto"), ("analise", "Analisando o ambiente"),
                  ("geracao", "Gerando as versões"), ("final", "Finalizando")]
 TEXT_STAGES = [("preparo", "Preparando"), ("geracao", "Gerando as versões"), ("final", "Finalizando")]
+ENHANCE_STAGES = [("preparo", "Preparando a foto"), ("analise", "Melhorando a foto"), ("final", "Finalizando")]
+# "Melhorar foto": etapas que o usuário pode desligar (chave -> (rótulo, dica)); todas ligadas por padrão
+ENHANCE_STEPS: dict[str, tuple[str, str]] = {
+    "exposicao": ("Luz e janelas (HDR natural)", "Clareia as sombras e recupera as janelas, sem cara de filtro."),
+    "branco": ("Balanço de branco", "Tira o amarelado da lâmpada e o azulado da sombra (teto e paredes brancos)."),
+    "verticais": ("Endireitar verticais", "Paredes, portas e armários retos; recorta um pouco as bordas."),
+    "ceu": ("Céu azul", "Troca céu nublado ou estourado por um céu azul limpo (fachadas e varandas)."),
+    "nitidez": ("Nitidez e menos ruído", "Detalhe mais definido e menos granulado de celular."),
+}
+ENHANCE_FLAGS = tuple(f"sem_{k}" for k in ENHANCE_STEPS) + ("ampliar_4k",)
+# funções que podem rodar em lote (as que precisam de pintura ou não usam foto ficam fora)
+BATCH_FUNCS = ("melhorar", "mudar_estilo", "redesign_simples", "reforma", "mobiliar", "fachada")
+EXPORT_SIDES = {"2048": "2048 px (WhatsApp e portais)", "4k": "4K (3840 px)"}
+ILLUSTRATIVE = {k for k in CATALOG["funcoes"] if k != "melhorar"}   # == presets.ILLUSTRATIVE (tests/test_ui.py)
 
 
 # =============================================================================================== pedido
@@ -88,6 +102,7 @@ class DesignRequest:
     formato: str = "paisagem"
     quality: str = "final"
     seed: int | None = None
+    opcoes: tuple = ()                # "Melhorar foto": etapas desligadas (``sem_ceu``...) e ``ampliar_4k``
 
     def validate(self) -> "DesignRequest":
         def check(cond, msg):
@@ -111,6 +126,10 @@ class DesignRequest:
             check(isinstance(self.photo, str) and Path(self.photo).is_file(), "Escolha a foto do ambiente.")
         if self.funcao == "editar_area":
             check(isinstance(self.mask, str) and Path(self.mask).is_file(), "Pinte a área a editar.")
+        if self.funcao == "melhorar" and self.mask is not None:
+            check(isinstance(self.mask, str) and Path(self.mask).is_file(), "Máscara de remoção inválida.")
+        check(isinstance(self.opcoes, (tuple, list)) and all(o in ENHANCE_FLAGS for o in self.opcoes),
+              f"Opções inválidas: {self.opcoes!r}")
         if self.funcao == "evento":
             check(self.evento is not None, "Escolha o evento.")
         return self
@@ -126,8 +145,10 @@ class DesignRequest:
             a += ["--estilo", self.estilo]
         if self.evento:
             a += ["--evento", self.evento]
-        if self.mask and self.funcao == "editar_area":
+        if self.mask and self.funcao in ("editar_area", "melhorar"):
             a += ["--mask", self.mask]
+        if self.funcao == "melhorar":
+            a += ["--" + o.replace("_", "-") for o in self.opcoes]
         if self.funcao == "texto":
             a += ["--formato", self.formato]
         if self.prompt.strip():
@@ -153,6 +174,60 @@ class DesignOutcome:
     @property
     def folder(self) -> str:
         return str(Path(self.outputs[0]).parent) if self.outputs else self.request.out_dir
+
+
+def export_args(images: list[str], out_dir: str, lado: str, rotulo: bool) -> list[str]:
+    if lado not in EXPORT_SIDES:
+        raise ValueError(f"Tamanho inválido: {lado!r}")
+    if not images or not all(isinstance(i, str) for i in images):
+        raise ValueError("Nada para exportar.")
+    return ["--images", *images, "--out-dir", str(out_dir), "--lado", lado,
+            "--rotulo" if rotulo else "--sem-rotulo", "--json"]
+
+
+@dataclass
+class BatchRequest:
+    """Pedido de lote (``mobilia.cli design-lote``): várias fotos do mesmo imóvel, a mesma função."""
+
+    photos: list
+    imovel: str
+    funcao: str
+    out_dir: str
+    estilo: str | None = None
+    ambiente: str = "sala"
+    opcoes: tuple = ()
+    exportar: str | None = None        # None | "2048" | "4k"
+    rotulo: bool = False
+
+    def validate(self) -> "BatchRequest":
+        if not isinstance(self.photos, list) or not self.photos or not all(
+                isinstance(p, str) and Path(p).is_file() for p in self.photos):
+            raise ValueError("Adicione as fotos do imóvel.")
+        if self.funcao not in BATCH_FUNCS:
+            raise ValueError(f"Função inválida para lote: {self.funcao!r}")
+        if self.funcao != "melhorar" and self.estilo not in CATALOG["estilos"]:
+            raise ValueError("Escolha um estilo.")
+        if self.ambiente not in CATALOG["ambientes"]:
+            raise ValueError(f"Ambiente inválido: {self.ambiente!r}")
+        if not all(o in ENHANCE_FLAGS for o in self.opcoes):
+            raise ValueError(f"Opções inválidas: {self.opcoes!r}")
+        if self.exportar is not None and self.exportar not in EXPORT_SIDES:
+            raise ValueError(f"Tamanho inválido: {self.exportar!r}")
+        if not isinstance(self.out_dir, str) or not self.out_dir:
+            raise ValueError("Pasta de saída inválida")
+        return self
+
+    def args(self) -> list[str]:
+        self.validate()
+        a = ["--fotos", *self.photos, "--imovel", self.imovel or "", "--funcao", self.funcao,
+             "--ambiente", self.ambiente, "--out-dir", self.out_dir]
+        if self.funcao != "melhorar":
+            a += ["--estilo", self.estilo]
+        else:
+            a += ["--" + o.replace("_", "-") for o in self.opcoes]
+        if self.exportar:
+            a += ["--exportar", self.exportar, "--rotulo" if self.rotulo else "--sem-rotulo"]
+        return a + ["--json"]
 
 
 def upscale_args(image: str, out: str) -> list[str]:
@@ -300,8 +375,8 @@ class Page(QFrame):
 # =============================================================================================== janela
 
 class MainWindow(QMainWindow):
-    P_PHOTO, P_FUNC, P_STYLE, P_PROGRESS, P_RESULTS, P_EDIT, P_VIDEO = range(7)
-    L_DROP, L_TEXT, L_PROGRESS, L_RESULT, L_MASK = range(5)
+    P_PHOTO, P_FUNC, P_STYLE, P_PROGRESS, P_RESULTS, P_EDIT, P_VIDEO, P_ENHANCE, P_BATCH = range(9)
+    L_DROP, L_TEXT, L_PROGRESS, L_RESULT, L_MASK, L_BATCH = range(6)
     COMPACT_BELOW = 790
 
     def __init__(self):
@@ -334,6 +409,13 @@ class MainWindow(QMainWindow):
         self.side = CliTask(self)
         self.side.progress.connect(self._on_side_progress)
         self.side.finished.connect(self._on_side_finished)
+        self.batch = CliTask(self)                     # lote (várias fotos de um imóvel)
+        self.batch.progress.connect(self._on_batch_progress)
+        self.batch.item.connect(self._on_batch_item)
+        self.batch.finished.connect(self._on_batch_finished)
+        self.batch_photos: list[str] = []
+        self.batch_result: CliResult | None = None
+        self.mask_mode = "editar"                      # editar | remover (o pincel do "Melhorar foto")
         self.timer = QTimer(self); self.timer.timeout.connect(self._tick)
 
         self.modules = ModuleHost(self)                # módulos opcionais (mobilia/modules); sem eles, nada muda
@@ -351,18 +433,19 @@ class MainWindow(QMainWindow):
         self.left.addWidget(self._build_progress_stage())
         self.left.addWidget(self._build_result_stage())
         self.left.addWidget(self._build_mask_stage())
+        self.left.addWidget(self._build_batch_stage())
         body.addWidget(self.left, 1)
         self.right = QStackedWidget(); self.right.setFixedWidth(424)
         self.pages: list[Page] = []
         for build in (self._page_photo, self._page_function, self._page_style, self._page_progress,
-                      self._page_results, self._page_edit, self._page_video):
+                      self._page_results, self._page_edit, self._page_video, self._page_enhance, self._page_batch):
             pg = build(); self.pages.append(pg); self.right.addWidget(pg)
         body.addWidget(self.right)
 
         sb = StatusBar(); self.setStatusBar(sb); sb.setSizeGripEnabled(False); self.sb = sb
         sb.addPermanentWidget(QLabel(f"{APP_NAME}  {__version__}"))
         # atualização automática (GitHub Releases): só no executável; ver updater_dialog.py
-        self.updater = attach_updater(self, sb, jobs=(self.design, self.side))
+        self.updater = attach_updater(self, sb, jobs=(self.design, self.side, self.batch))
         sb.showMessage("Detectando GPU…")
         self.probe = HardwareProbe(self); self.probe.done.connect(self._on_hardware)
         self.go(self.P_PHOTO)
@@ -444,12 +527,53 @@ class MainWindow(QMainWindow):
         card, lay = self._stage()
         head = QHBoxLayout()
         t = tracked_label("EDITAR ÁREA"); t.setStyleSheet(f"color: {theme.ACCENT_HI};")
+        self.mask_title = t
         self.mask_name = QLabel(""); self.mask_name.setObjectName("caption")
         head.addWidget(t); head.addStretch(1); head.addWidget(self.mask_name)
-        self.mask = MaskEditor(); self.mask.changed.connect(self._update_edit_ready)
+        self.mask = MaskEditor(); self.mask.changed.connect(self._on_mask_changed)
         cap = QLabel("Pinte sobre o que quer trocar. Fora da área pintada, a imagem fica idêntica.")
-        cap.setObjectName("stagecap"); cap.setAlignment(Qt.AlignCenter)
+        cap.setObjectName("stagecap"); cap.setAlignment(Qt.AlignCenter); cap.setWordWrap(True)
+        self.mask_cap = cap
         lay.addLayout(head); lay.addWidget(self.mask, 1); lay.addWidget(cap)
+        return card
+
+    def _set_mask_mode(self, mode: str) -> None:
+        """O mesmo editor de máscara serve à "Editar área" (o que trocar) e ao "Melhorar foto" (o que apagar)."""
+        self.mask_mode = mode
+        if mode == "remover":
+            self.mask_title.setText("REMOVER OBJETOS (OPCIONAL)")
+            self.mask_cap.setText("Pinte o que deve sumir da foto (fios, lixo, objetos pessoais). Sem pintura, "
+                                  "nada é removido.")
+        else:
+            self.mask_title.setText("EDITAR ÁREA")
+            self.mask_cap.setText("Pinte sobre o que quer trocar. Fora da área pintada, a imagem fica idêntica.")
+
+    def _on_mask_changed(self) -> None:
+        if self.mask_mode == "remover":
+            self._update_enhance_ready()
+        else:
+            self._update_edit_ready()
+
+    def _build_batch_stage(self) -> QWidget:
+        from PySide6.QtWidgets import QListWidget
+
+        card, lay = self._stage()
+        head = QHBoxLayout()
+        t = tracked_label("FOTOS DO IMÓVEL"); t.setStyleSheet(f"color: {theme.ACCENT_HI};")
+        self.batch_caption = QLabel(""); self.batch_caption.setObjectName("caption")
+        head.addWidget(t); head.addStretch(1); head.addWidget(self.batch_caption)
+        self.batch_list = QListWidget(); self.batch_list.setObjectName("batchlist")
+        self.batch_list.setViewMode(QListWidget.IconMode); self.batch_list.setIconSize(QSize(176, 118))
+        self.batch_list.setResizeMode(QListWidget.Adjust); self.batch_list.setMovement(QListWidget.Static)
+        self.batch_list.setSpacing(8); self.batch_list.setWordWrap(True)
+        self.batch_list.setStyleSheet(
+            f"QListWidget#batchlist {{ background: transparent; border: none; color: {theme.TEXT_2}; }}"
+            f"QListWidget#batchlist::item {{ border-radius: 8px; padding: 4px; }}"
+            f"QListWidget#batchlist::item:selected {{ background: {theme.SELECTED_BG}; color: {theme.TEXT}; }}")
+        self.batch_list.itemDoubleClicked.connect(lambda it: self.open_url(it.data(Qt.UserRole)) if it.data(Qt.UserRole) else None)
+        cap = QLabel("Cada foto mostra o resultado assim que fica pronta. Dois cliques abrem a imagem.")
+        cap.setObjectName("stagecap"); cap.setAlignment(Qt.AlignCenter); cap.setWordWrap(True)
+        lay.addLayout(head); lay.addWidget(self.batch_list, 1); lay.addWidget(cap)
         return card
 
     # --- páginas do painel direito
@@ -473,6 +597,12 @@ class MainWindow(QMainWindow):
         on_click(self.btn_text_mode, self.choose_function, "texto")
         pg.body.addWidget(nt); pg.body.addSpacing(8); pg.body.addWidget(nb); pg.body.addSpacing(12)
         pg.body.addWidget(self.btn_text_mode)
+        pg.body.addSpacing(18); pg.body.addWidget(_section("VÁRIAS FOTOS DO MESMO IMÓVEL?")); pg.body.addSpacing(8)
+        self.btn_batch_mode = _button("Lote: processar várias fotos", "photo", "outline", theme.ACCENT_HI)
+        self.btn_batch_mode.setToolTip("Escolha as fotos de um imóvel e aplique a mesma função em todas "
+                                       "(ex.: Melhorar foto). As saídas vão para uma pasta com o nome do imóvel.")
+        on_click(self.btn_batch_mode, self.go, self.P_BATCH)
+        pg.body.addWidget(self.btn_batch_mode)
         pg.body.addStretch(1)
         self.photo_ready = QLabel(""); self.photo_ready.setObjectName("hint"); self.photo_ready.setAlignment(Qt.AlignCenter)
         self.btn_photo_next = _button("Continuar", kind="primary")
@@ -643,8 +773,13 @@ class MainWindow(QMainWindow):
         on_click(self.btn_video, self.go, self.P_VIDEO)
         self.btn_folder = _button("Abrir pasta", "folder")
         on_click(self.btn_folder, self.open_folder)
+        self.btn_export = _button("Exportar para anúncio", "export")
+        self.btn_export.setToolTip("JPEG pronto para WhatsApp e portais (2048 px ou 4K), com o selo "
+                                   "“Imagem ilustrativa” opcional.")
+        on_click(self.btn_export, self.export_listing)
         for i, w in enumerate((self.btn_edit, self.btn_upscale, self.btn_video, self.btn_folder)):
             grid.addWidget(w, i // 2, i % 2)
+        grid.addWidget(self.btn_export, 2, 0, 1, 2)
         b.addLayout(grid)
         # trabalho de ação em andamento / concluído (ampliar, vídeo)
         b.addSpacing(16)
@@ -768,6 +903,114 @@ class MainWindow(QMainWindow):
         self.select_video_format("16x9")
         return pg
 
+    def _enhance_checks(self, lay, prefix: str) -> dict[str, QCheckBox]:
+        checks = {}
+        for key, (label, tip) in ENHANCE_STEPS.items():
+            c = QCheckBox(label); c.setChecked(True); c.setToolTip(tip)
+            c.setAccessibleName(f"{prefix} {label}")
+            lay.addWidget(c); checks[key] = c
+        return checks
+
+    def _page_enhance(self) -> Page:
+        pg = Page()
+        pg.head.addWidget(StepHeader("03", "MELHORAR FOTO")); pg.head.addSpacing(12)
+        b = pg.body
+        intro = QLabel("Correções de fotógrafo profissional, sem mudar nada do imóvel: luz, cor, linhas retas, céu e "
+                       "nitidez. Desmarque o que não quiser.")
+        intro.setObjectName("body"); intro.setWordWrap(True)
+        b.addWidget(intro); b.addSpacing(16)
+        b.addWidget(_section("AJUSTES")); b.addSpacing(8)
+        box = QVBoxLayout(); box.setSpacing(6)
+        self.enhance_checks = self._enhance_checks(box, "Melhorar:")
+        self.chk_enh_4k = QCheckBox("Entregar em 4K (3840 px)")
+        self.chk_enh_4k.setToolTip("Amplia o resultado com o “Ampliar 4K”. Mais lento; para WhatsApp, 2048 px bastam.")
+        box.addWidget(self.chk_enh_4k)
+        b.addLayout(box)
+        b.addSpacing(16); b.addWidget(rule()); b.addSpacing(14)
+        b.addWidget(_section("REMOVER OBJETOS (OPCIONAL)")); b.addSpacing(8)
+        rh = QLabel("Pinte na foto ao lado o que deve sumir."); rh.setObjectName("hint"); rh.setWordWrap(True)
+        b.addWidget(rh); b.addSpacing(8)
+        self.enh_tool = Segmented([("pincel", "Pincel"), ("borracha", "Borracha")], "pincel")
+        self.enh_tool.changed.connect(self.set_tool)
+        b.addWidget(self.enh_tool); b.addSpacing(10)
+        srow = QHBoxLayout(); srow.setSpacing(12)
+        sl = QLabel("Tamanho"); sl.setObjectName("muted")
+        self.enh_brush = QSlider(Qt.Horizontal); self.enh_brush.setRange(8, 200); self.enh_brush.setValue(32)
+        self.enh_brush.valueChanged.connect(lambda v: self.mask.set_brush(int(v)))
+        srow.addWidget(sl); srow.addWidget(self.enh_brush, 1)
+        b.addLayout(srow); b.addSpacing(8)
+        urow = QHBoxLayout(); urow.setSpacing(8)
+        self.btn_enh_undo = _button("Desfazer", "undo"); on_click(self.btn_enh_undo, self.mask.undo)
+        self.btn_enh_clear = _button("Limpar", "trash"); on_click(self.btn_enh_clear, self.mask.clear)
+        urow.addWidget(self.btn_enh_undo, 1); urow.addWidget(self.btn_enh_clear, 1)
+        b.addLayout(urow)
+        b.addStretch(1)
+        self.enhance_ready = QLabel(""); self.enhance_ready.setObjectName("hint")
+        self.enhance_ready.setAlignment(Qt.AlignCenter); self.enhance_ready.setWordWrap(True)
+        self.btn_enhance = _button("Melhorar foto", "sparkle", "primary", theme.ON_ACCENT)
+        on_click(self.btn_enhance, self.generate_enhance)
+        self.btn_enh_back = _button("Trocar a função", "back", "ghost")
+        on_click(self.btn_enh_back, self.leave_enhance)
+        pg.foot.addWidget(self.enhance_ready); pg.foot.addWidget(self.btn_enhance); pg.foot.addWidget(self.btn_enh_back)
+        return pg
+
+    def _page_batch(self) -> Page:
+        from PySide6.QtWidgets import QLineEdit
+
+        pg = Page()
+        pg.head.addWidget(StepHeader("01", "LOTE DE FOTOS")); pg.head.addSpacing(12)
+        b = pg.body
+        intro = QLabel("Todas as fotos de um imóvel de uma vez, com a mesma função. As imagens prontas vão para "
+                       "uma pasta com o nome do imóvel.")
+        intro.setObjectName("body"); intro.setWordWrap(True)
+        b.addWidget(intro); b.addSpacing(14)
+        b.addWidget(_section("IMÓVEL")); b.addSpacing(8)
+        self.batch_name = QLineEdit(); self.batch_name.setPlaceholderText("Ex.: Apto 302 - Rua das Flores")
+        b.addWidget(self.batch_name); b.addSpacing(10)
+        frow = QHBoxLayout(); frow.setSpacing(8)
+        self.btn_batch_add = _button("Adicionar fotos…", "photo"); on_click(self.btn_batch_add, self.choose_batch_photos)
+        self.btn_batch_clear = _button("Limpar", "trash"); on_click(self.btn_batch_clear, self.clear_batch)
+        frow.addWidget(self.btn_batch_add, 2); frow.addWidget(self.btn_batch_clear, 1)
+        b.addLayout(frow); b.addSpacing(14)
+        b.addWidget(_section("FUNÇÃO")); b.addSpacing(8)
+        self.batch_func = QComboBox(); self.batch_func.setView(QListView())
+        for k in BATCH_FUNCS:
+            self.batch_func.addItem(CATALOG["funcoes"][k], k)
+        self.batch_func.currentIndexChanged.connect(lambda *_a: self._update_batch_page())
+        b.addWidget(self.batch_func); b.addSpacing(8)
+        self.batch_style = QComboBox(); self.batch_style.setView(QListView())
+        for k, lab in CATALOG["estilos"].items():
+            self.batch_style.addItem(lab, k)
+        self.batch_room = QComboBox(); self.batch_room.setView(QListView())
+        for k, lab in CATALOG["ambientes"].items():
+            if k != "fachada":
+                self.batch_room.addItem(lab, k)
+        self.batch_gen_box = QWidget(); gl = QHBoxLayout(self.batch_gen_box); gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(8); gl.addWidget(self.batch_room, 1); gl.addWidget(self.batch_style, 1)
+        b.addWidget(self.batch_gen_box)
+        self.batch_enh_box = QWidget(); el = QVBoxLayout(self.batch_enh_box); el.setContentsMargins(0, 0, 0, 0)
+        el.setSpacing(4)
+        self.batch_checks = self._enhance_checks(el, "Lote:")
+        b.addWidget(self.batch_enh_box); b.addSpacing(12)
+        self.chk_batch_export = QCheckBox("Exportar para anúncio (JPEG 2048 px)"); self.chk_batch_export.setChecked(True)
+        self.chk_batch_label = QCheckBox("Selo “Imagem ilustrativa”")
+        self.chk_batch_export.toggled.connect(lambda *_a: self._update_batch_page())
+        b.addWidget(self.chk_batch_export); b.addWidget(self.chk_batch_label)
+        b.addSpacing(12)
+        self.batch_bar = QProgressBar(); self.batch_bar.setRange(0, 1000); self.batch_bar.setTextVisible(False)
+        self.batch_msg = QLabel(""); self.batch_msg.setObjectName("hint"); self.batch_msg.setWordWrap(True)
+        b.addWidget(self.batch_bar); b.addWidget(self.batch_msg)
+        b.addStretch(1)
+        self.btn_batch_run = _button("Processar fotos", "sparkle", "primary", theme.ON_ACCENT)
+        on_click(self.btn_batch_run, self.run_batch)
+        arow = QHBoxLayout(); arow.setSpacing(8)
+        self.btn_batch_cancel = _button("Cancelar", kind="danger"); on_click(self.btn_batch_cancel, self.cancel_batch)
+        self.btn_batch_folder = _button("Abrir pasta", "folder"); on_click(self.btn_batch_folder, self.open_batch_folder)
+        arow.addWidget(self.btn_batch_cancel, 1); arow.addWidget(self.btn_batch_folder, 1)
+        self.btn_batch_back = _button("Voltar", "back", "ghost"); on_click(self.btn_batch_back, self.go, self.P_PHOTO)
+        pg.foot.addWidget(self.btn_batch_run); pg.foot.addLayout(arow); pg.foot.addWidget(self.btn_batch_back)
+        return pg
+
     def _set_pct(self, frac: float) -> None:
         self.pct.setText(f'<span style="font-size:60px; font-weight:300;">{frac * 100:.0f}</span>'
                          f'<span style="font-size:34px; font-weight:300; color:{theme.ACCENT};">%</span>')
@@ -823,6 +1066,8 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Página inválida: {page!r}")
         if self.design.busy() and page != self.P_PROGRESS:
             page = self.P_PROGRESS
+        if self.batch.busy() and page != self.P_BATCH:
+            page = self.P_BATCH
         if page in (self.P_RESULTS, self.P_VIDEO) and self.result is None:
             page = self.P_STYLE if self.funcao else self.P_FUNC
         if page == self.P_STYLE and not self.funcao:
@@ -831,16 +1076,29 @@ class MainWindow(QMainWindow):
             page = self.P_PHOTO
         if page == self.P_STYLE and self.funcao == "editar_area":
             page = self.P_EDIT
+        if page == self.P_STYLE and self.funcao == "melhorar":
+            page = self.P_ENHANCE
         if page == self.P_EDIT and not self.edit_base:
             page = self.P_FUNC
+        if page == self.P_ENHANCE and not self.photo_path:
+            page = self.P_PHOTO
         if page != self.right.currentIndex():
             self.statusBar().clearMessage()          # nada de "Geração cancelada" velho em outra tela
         self.right.setCurrentIndex(page)
+        if page == self.P_ENHANCE:
+            self._enter_enhance()
+        elif page == self.P_EDIT and self.mask_mode != "editar":
+            self._set_mask_mode("editar")
+            if self.edit_base:
+                self.mask.set_image(self.edit_base)
         if page == self.P_PROGRESS:
             self.left.setCurrentIndex(self.L_PROGRESS)
+        elif page == self.P_BATCH:
+            self.left.setCurrentIndex(self.L_BATCH)
+            self._update_batch_page()
         elif page in (self.P_RESULTS, self.P_VIDEO):
             self.left.setCurrentIndex(self.L_RESULT)
-        elif page == self.P_EDIT:
+        elif page in (self.P_EDIT, self.P_ENHANCE):
             self.left.setCurrentIndex(self.L_MASK)
         elif self.funcao == "texto" and page == self.P_STYLE or (page == self.P_FUNC and not self.photo_path):
             self.left.setCurrentIndex(self.L_TEXT if self.funcao == "texto" else self.L_DROP)
@@ -860,7 +1118,7 @@ class MainWindow(QMainWindow):
     def _update_stepper(self) -> None:
         page = self.page()
         cur = {self.P_PHOTO: 0, self.P_FUNC: 1, self.P_STYLE: 2, self.P_EDIT: 2, self.P_PROGRESS: 3,
-               self.P_RESULTS: 4, self.P_VIDEO: 4}[page]
+               self.P_RESULTS: 4, self.P_VIDEO: 4, self.P_ENHANCE: 2, self.P_BATCH: 0}[page]
         reach = {0, 1}
         if self.funcao and (self.funcao not in NEEDS_PHOTO or self.photo_path):
             reach.add(2)
@@ -915,6 +1173,7 @@ class MainWindow(QMainWindow):
                                  "Importe uma foto, ou crie um ambiente a partir de um texto.")
 
     def new_photo(self) -> None:
+        self._enhance_photo = None
         self.photo_path = None
         self.result = None
         self.funcao = None
@@ -955,6 +1214,10 @@ class MainWindow(QMainWindow):
             self.ambiente = "sala"
         if key == "editar_area":
             self.start_edit(self.photo_path, back=self.P_FUNC)
+            return
+        if key == "melhorar":
+            self._enhance_photo = None            # foto nova no pincel (máscara limpa)
+            self.go(self.P_ENHANCE)
             return
         self.go(self.P_STYLE)
 
@@ -1072,7 +1335,10 @@ class MainWindow(QMainWindow):
 
     def generate(self) -> None:
         """Gera as versões com as escolhas da tela (sem parâmetros: nada do sinal do botão entra no pedido)."""
-        if self.design.busy() or not self.funcao or self.funcao == "editar_area":
+        if self.design.busy() or self.batch.busy() or not self.funcao or self.funcao == "editar_area":
+            return
+        if self.funcao == "melhorar":
+            self.generate_enhance()
             return
         try:
             req = self.build_request().validate()
@@ -1089,6 +1355,8 @@ class MainWindow(QMainWindow):
         req = DesignRequest(**{**r.__dict__, "seed": None, "out_dir": self._new_out_dir(Path(r.out_dir).name.split("_", 3)[-1])})
         if r.funcao == "editar_area":
             self._back_page = self.P_EDIT
+        elif r.funcao == "melhorar":
+            self._back_page = self.P_ENHANCE
         self.submit(req)
 
     def submit(self, req: DesignRequest) -> None:
@@ -1096,14 +1364,16 @@ class MainWindow(QMainWindow):
         self.last_request = req
         self.variants.reset(req.n)
         texto = req.funcao == "texto"
-        self.stages.set_stages(TEXT_STAGES if texto else DESIGN_STAGES)
+        self.stages.set_stages(TEXT_STAGES if texto else ENHANCE_STAGES if req.funcao == "melhorar" else DESIGN_STAGES)
         self.stages.reset()
         self.bar.setValue(0); self._set_pct(0.0); self.msg.setText("Iniciando o motor…")
         self.elapsed.setText("")
         n = req.n
-        what = CATALOG["eventos"][req.evento] if req.evento else (CATALOG["estilos"].get(req.estilo or "", "")
-                                                                  if req.funcao != "editar_area" else "Área pintada")
-        self.progress_title.setText("GERANDO A VERSÃO" if n == 1 else f"GERANDO {n} VERSÕES")
+        what = CATALOG["eventos"][req.evento] if req.evento else (
+            "Área pintada" if req.funcao == "editar_area" else "Luz, cor e linhas" if req.funcao == "melhorar"
+            else CATALOG["estilos"].get(req.estilo or "", ""))
+        self.progress_title.setText("MELHORANDO A FOTO" if req.funcao == "melhorar" else
+                                    "GERANDO A VERSÃO" if n == 1 else f"GERANDO {n} VERSÕES")
         self.progress_summary.setText(f"{CATALOG['funcoes'][req.funcao]}  ·  {what}  ·  "
                                       f"{CATALOG['ambientes'][req.ambiente]}")
         self.grid_caption.setText(f"0 de {n} prontas")
@@ -1188,6 +1458,8 @@ class MainWindow(QMainWindow):
         req = r.request
         if req.funcao == "editar_area":
             title = "Área editada"
+        elif req.funcao == "melhorar":
+            title = "Foto melhorada"
         elif req.funcao == "evento":
             title = CATALOG["eventos"][req.evento]
         else:
@@ -1238,7 +1510,12 @@ class MainWindow(QMainWindow):
                                   if not has or self.result.before else
                                   "Sem foto original (criado do texto): não há “antes” para o vídeo.")
         self.btn_edit.setEnabled(has)
-        self.btn_again.setEnabled(has and not self.design.busy())
+        self.btn_export.setEnabled(has and not busy)
+        melhorar = has and self.result.request.funcao == "melhorar"
+        self.btn_again.setEnabled(has and not self.design.busy() and not melhorar)
+        self.btn_again.setToolTip("O “Melhorar foto” dá sempre o mesmo resultado: mude os ajustes em “Outro ajuste”."
+                                  if melhorar else "Mesmas escolhas, outras sementes: versões diferentes.")
+        self.btn_restyle.setText("  Outro ajuste" if melhorar else "  Outro estilo")
         up = self.upscaled.get(self.selected_output() or "")
         self.btn_upscale.setText("  4K pronto" if up else "  Ampliar 4K")
         self.btn_save.setText("  Salvar imagem 4K…" if up else "  Salvar imagem…")
@@ -1343,6 +1620,247 @@ class MainWindow(QMainWindow):
         self._back_page = self.P_EDIT
         self.submit(req)
 
+    # --- melhorar foto
+    def _enter_enhance(self) -> None:
+        """Pincel de remoção sobre a foto atual (a máscara pintada continua se a foto é a mesma)."""
+        same = self.mask_mode == "remover" and getattr(self, "_enhance_photo", None) == self.photo_path
+        self._set_mask_mode("remover")
+        if not same and self.photo_path:
+            if self.mask.set_image(self.photo_path):
+                self._enhance_photo = self.photo_path
+                self.mask_name.setText(Path(self.photo_path).name)
+        self.mask.set_brush(int(self.enh_brush.value()))
+        self.mask.set_erasing(self.enh_tool.value() == "borracha")
+        self._update_enhance_ready()
+
+    def leave_enhance(self) -> None:
+        self.go(self.P_FUNC)
+
+    def enhance_options(self) -> tuple:
+        opts = tuple(f"sem_{k}" for k, c in self.enhance_checks.items() if not c.isChecked())
+        return opts + (("ampliar_4k",) if self.chk_enh_4k.isChecked() else ())
+
+    def _update_enhance_ready(self) -> None:
+        has = self.mask.has_mask()
+        busy = self.design.busy() or self.batch.busy()
+        self.btn_enhance.setEnabled(bool(self.photo_path) and not busy)
+        self.btn_enh_undo.setEnabled(self.mask.can_undo())
+        self.btn_enh_clear.setEnabled(has)
+        self.btn_enhance.setText("  Melhorar e remover objetos" if has else "  Melhorar foto")
+        self.enhance_ready.setText("A área pintada será apagada antes dos ajustes." if has else
+                                   "Pronto. Leva segundos (o céu e a remoção usam IA).")
+
+    def generate_enhance(self) -> None:
+        if self.design.busy() or self.batch.busy() or not self.photo_path:
+            return
+        out_dir = self._new_out_dir("melhorar")
+        mask_path = None
+        if self.mask_mode == "remover" and self.mask.has_mask():
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            mask_path = str(Path(out_dir) / "remover.png")
+            if not self.mask.save_mask(mask_path):
+                self.warn("Não foi possível gravar a máscara.")
+                return
+        req = DesignRequest(funcao="melhorar", estilo=None, ambiente=self.ambiente if self.ambiente in
+                            CATALOG["ambientes"] else "sala", n=1, out_dir=out_dir, photo=self.photo_path,
+                            mask=mask_path, opcoes=self.enhance_options())
+        try:
+            req.validate()
+        except ValueError as e:
+            self.warn(str(e))
+            return
+        self._back_page = self.P_ENHANCE
+        self.submit(req)
+
+    # --- exportar para anúncio
+    def ask_export_options(self, label_default: bool) -> tuple[str, bool] | None:
+        """Tamanho (2048 px / 4K) e selo "Imagem ilustrativa" (padrão: ligado no redesenho, desligado no
+        "Melhorar foto"). ``None`` = cancelado."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+
+        dlg = QDialog(self); dlg.setWindowTitle("Exportar para anúncio")
+        lay = QVBoxLayout(dlg); lay.setSpacing(10)
+        lay.addWidget(_section("TAMANHO"))
+        seg = Segmented(list(EXPORT_SIDES.items()), "2048")
+        lay.addWidget(seg)
+        chk = QCheckBox("Selo discreto “Imagem ilustrativa”"); chk.setChecked(label_default)
+        chk.setToolTip("Recomendado quando a foto mostra móveis ou decoração criados por IA.")
+        lay.addWidget(chk)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return str(seg.value()), chk.isChecked()
+
+    def export_listing(self) -> None:
+        src = self.selected_output()
+        if not src or self.side.busy() or self.result is None:
+            return
+        src = self.upscaled.get(src, src)
+        func = self.result.funcao or self.result.request.funcao
+        opt = self.ask_export_options(func in ILLUSTRATIVE)
+        if not opt:
+            return
+        lado, rotulo = opt
+        try:
+            args = export_args([src], str(Path(self.result.folder) / "anuncio"), lado, rotulo)
+        except ValueError as e:
+            self.warn(str(e))
+            return
+        self._start_side("exportar", args, "Exportando para o anúncio")
+
+    # --- lote
+    def choose_batch_photos(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(self, "Fotos do imóvel", str(Path.home()), PHOTO_FILTER)
+        if files:
+            self.add_batch_photos(list(files))
+
+    def add_batch_photos(self, paths: list[str]) -> int:
+        from PySide6.QtGui import QIcon, QPixmap
+        from PySide6.QtWidgets import QListWidgetItem
+
+        if self.batch.busy():
+            return 0
+        k = 0
+        for p in paths:
+            if not isinstance(p, str) or not Path(p).is_file() or p in self.batch_photos:
+                continue
+            self.batch_photos.append(p)
+            it = QListWidgetItem(QIcon(cover_pixmap(QPixmap(p), 176, 118, 6, 2.0)), f"{Path(p).name}\nna fila")
+            it.setToolTip(p)
+            self.batch_list.addItem(it)
+            k += 1
+        self.batch_result = None
+        self._update_batch_page()
+        return k
+
+    def clear_batch(self) -> None:
+        if self.batch.busy():
+            return
+        self.batch_photos = []
+        self.batch_list.clear()
+        self.batch_result = None
+        self.batch_bar.setValue(0); self.batch_msg.setText("")
+        self._update_batch_page()
+
+    def _update_batch_page(self) -> None:
+        func = self.batch_func.currentData()
+        self.batch_gen_box.setVisible(func != "melhorar")
+        self.batch_room.setVisible(func not in ("melhorar", "fachada"))
+        self.batch_enh_box.setVisible(func == "melhorar")
+        if getattr(self, "_batch_func_prev", None) != func:
+            self._batch_func_prev = func
+            self.chk_batch_label.setChecked(func in ILLUSTRATIVE)
+        self.chk_batch_label.setEnabled(self.chk_batch_export.isChecked())
+        busy = self.batch.busy()
+        n = len(self.batch_photos)
+        self.btn_batch_run.setText(f"  Processar {n} {'foto' if n == 1 else 'fotos'}" if n else "  Processar fotos")
+        self.btn_batch_run.setEnabled(n > 0 and not busy and not self.design.busy())
+        self.btn_batch_add.setEnabled(not busy); self.btn_batch_clear.setEnabled(not busy and n > 0)
+        self.batch_func.setEnabled(not busy)
+        self.btn_batch_cancel.setVisible(busy)
+        done = self.batch_result is not None and bool(self.batch_result.done.get("folder"))
+        self.btn_batch_folder.setVisible(done)
+        self.batch_caption.setText(f"{n} {'foto' if n == 1 else 'fotos'}" if n else "")
+        if not busy and not done and not self.batch_msg.text():
+            self.batch_msg.setText("Adicione as fotos do imóvel." if not n else "")
+
+    @staticmethod
+    def _safe_folder(name: str) -> str:
+        import re
+
+        s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", name or "")
+        s = re.sub(r"\s+", " ", s).strip(" .")
+        return s[:80]
+
+    def batch_request(self) -> BatchRequest:
+        name = self.batch_name.text().strip()
+        folder = self._safe_folder(name) or f"Imóvel {datetime.now().strftime('%Y-%m-%d %H%M')}"
+        base = runtime.runtime_paths().jobs_dir
+        d = base / folder
+        k = 2
+        while d.exists():
+            d = base / f"{folder} ({k})"; k += 1
+        func = self.batch_func.currentData()
+        opts = tuple(f"sem_{key}" for key, c in self.batch_checks.items() if not c.isChecked())
+        return BatchRequest(photos=list(self.batch_photos), imovel=name, funcao=func, out_dir=str(d),
+                            estilo=self.batch_style.currentData(),
+                            ambiente="fachada" if func == "fachada" else self.batch_room.currentData(),
+                            opcoes=opts if func == "melhorar" else (),
+                            exportar="2048" if self.chk_batch_export.isChecked() else None,
+                            rotulo=self.chk_batch_label.isChecked())
+
+    def run_batch(self) -> None:
+        if self.batch.busy() or self.design.busy() or not self.batch_photos:
+            return
+        try:
+            req = self.batch_request().validate()
+        except ValueError as e:
+            self.warn(str(e))
+            return
+        self.batch_out = req.out_dir
+        self.batch_result = None
+        for i in range(self.batch_list.count()):
+            it = self.batch_list.item(i)
+            it.setText(f"{Path(self.batch_photos[i]).name}\nna fila"); it.setData(Qt.UserRole, None)
+        self.batch_bar.setValue(0); self.batch_msg.setText("Iniciando o motor…")
+        self.batch.start("design-lote", req.args())
+        self._update_batch_page()
+
+    def cancel_batch(self) -> None:
+        if self.batch.busy():
+            self.batch_msg.setText("Cancelando…")
+            self.batch.cancel()
+
+    def _on_batch_progress(self, stage: str, frac: float, message: str) -> None:
+        self.batch_bar.setValue(int(frac * 1000))
+        if message:
+            self.batch_msg.setText(message)
+
+    def _on_batch_item(self, ev: dict) -> None:
+        from PySide6.QtGui import QIcon, QPixmap
+
+        try:
+            i = int(ev.get("index"))
+        except (TypeError, ValueError):
+            return
+        it = self.batch_list.item(i)
+        if it is None:
+            return
+        name = Path(str(ev.get("photo") or "")).name
+        st = ev.get("status")
+        if st == "processando":
+            it.setText(f"{name}\nprocessando…")
+        elif st == "pronto":
+            outs = [o for o in (ev.get("outputs") or []) if isinstance(o, str) and Path(o).is_file()]
+            it.setText(f"{name}\npronta")
+            if outs:
+                it.setIcon(QIcon(cover_pixmap(QPixmap(outs[0]), 176, 118, 6, 2.0)))
+                it.setData(Qt.UserRole, outs[0])
+        elif st == "erro":
+            it.setText(f"{name}\nerro: {str(ev.get('message') or '')[:60]}")
+
+    def _on_batch_finished(self, res: CliResult) -> None:
+        self.batch_result = res
+        if res.status == "pronto":
+            itens = res.done.get("itens") or []
+            ok = sum(1 for i in itens if isinstance(i, dict) and i.get("status") == "pronto")
+            self.batch_bar.setValue(1000)
+            extra = "  ·  pasta “anuncio” pronta" if res.done.get("anuncio") else ""
+            self.batch_msg.setText(f"{ok} de {len(itens) or ok} fotos prontas{extra}.")
+            self.statusBar().showMessage(f"Lote pronto: {res.done.get('folder', '')}", 10000)
+        elif res.status == "cancelado":
+            self.batch_msg.setText("Lote cancelado.")
+        else:
+            self.batch_msg.setText("O lote falhou.")
+            self.show_error(res.error or "Erro desconhecido.", res.detail, title="Não foi possível processar o lote.")
+        self._update_batch_page()
+
+    def open_batch_folder(self) -> None:
+        if self.batch_result is not None and self.batch_result.done.get("folder"):
+            self.open_url(self.batch_result.done["folder"])
+
     # --- ampliar 4K / vídeo (trabalhos de ação)
     def upscale_selected(self) -> None:
         src = self.selected_output()
@@ -1445,6 +1963,10 @@ class MainWindow(QMainWindow):
                 dims = f"{size[0]} × {size[1]} px" if isinstance(size, (list, tuple)) and len(size) == 2 else ""
                 self._show_task_done("Imagem 4K pronta", out, "  ·  ".join(x for x in (Path(out).name, dims) if x))
                 self.btn_task_open.setText("  Abrir imagem")
+            elif res.kind == "exportar":
+                lab = "com selo “Imagem ilustrativa”" if res.done.get("rotulo") else "sem selo"
+                self._show_task_done("Pronto para o anúncio", out, "  ·  ".join((Path(out).name, lab)))
+                self.btn_task_open.setText("  Abrir imagem")
             else:
                 self.videos.append(out)
                 sz = human_size(Path(out).stat().st_size)
@@ -1459,7 +1981,7 @@ class MainWindow(QMainWindow):
             if res.status == "cancelado":
                 self.statusBar().showMessage("Cancelado.", 6000)
             else:
-                what = "ampliar a imagem" if res.kind == "upscale" else "gerar o vídeo"
+                what = {"upscale": "ampliar a imagem", "exportar": "exportar a imagem"}.get(res.kind, "gerar o vídeo")
                 self.show_error(res.error or "O motor terminou sem entregar o arquivo.", res.detail,
                                 title=f"Não foi possível {what}.")
         self._update_result_actions()

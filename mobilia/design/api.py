@@ -408,11 +408,108 @@ def _refine(eng, img: np.ndarray, size2: tuple[int, int], depth, prompt, seed: i
 
 
 def _green_mask(rgb: np.ndarray) -> np.ndarray:
-    """Verde de vegetação já presente na foto (crescido um pouco): fica fora da busca pela árvore de Natal."""
+    """Verde de vegetação e aglomerados de brilho quente com cara de árvore acesa (a fachada ensolarada da foto
+    de Stafford) já presentes na foto, crescidos um pouco: ficam fora da busca pela árvore de Natal."""
+    from .quality import lit_tree
+
     hsv = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2HSV)
     m = (hsv[..., 0] >= 33) & (hsv[..., 0] <= 95) & (hsv[..., 1] >= 50) & (hsv[..., 2] >= 20)
+    m |= lit_tree(rgb, return_mask=True)[1]          # só os aglomerados "de árvore acesa" que já estavam lá
     r = max(1, int(0.01 * np.hypot(*m.shape)))
     return cv2.dilate(m.astype(np.uint8), AL._disk(r)).astype(bool)
+
+
+# abaixo disto a versão de Natal "não tem árvore" e ganha uma, colocada à mão. Baixo de propósito: com uma
+# arvorezinha já lá (nota ~0,4 no teste em CPU) uma segunda árvore grande seria pior que nenhuma
+TREE_MIN_SCORE = 0.3
+TREE_FREE_MIN = 0.75       # fração do lugar da árvore que precisa ser parede/piso livre
+
+
+def tree_spot(groups: np.ndarray, size: tuple[int, int], lock: np.ndarray | None = None) -> np.ndarray | None:
+    """Lugar para a árvore de Natal: um canto de parede livre (parede/piso, sem janela, porta, móvel ou área
+    travada), apoiado no piso perto da parede do fundo, com ~45% da altura da foto. Devolve a silhueta (cone +
+    base com os presentes) ou ``None`` se não há canto livre. Os cantos (laterais) têm preferência: árvore no meio
+    da sala tampa a sala."""
+    W, H = size
+    g = np.asarray(groups)
+    if g.shape != (H, W):
+        g = cv2.resize(g, (W, H), interpolation=cv2.INTER_NEAREST)
+    floor = g == GROUP_IDS_["floor"]
+    free = np.isin(g, [GROUP_IDS_["floor"], GROUP_IDS_["wall"]])
+    if lock is not None:
+        lk = np.asarray(lock, bool)
+        if lk.shape != (H, W):
+            lk = cv2.resize(lk.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST) > 0
+        free &= ~lk
+    if floor.mean() < 0.03:
+        return None
+    ceil = g == GROUP_IDS_["ceiling"]
+    th = int(0.45 * H)
+    tw = int(0.42 * th)
+    best = None
+    for cx in sorted(range(int(0.12 * W), int(0.88 * W), max(4, W // 40)),
+                     key=lambda x: min(x, W - x)):                      # dos cantos para o meio
+        x0, x1 = max(0, cx - tw // 2), min(W, cx + tw // 2)
+        cols = floor[:, x0:x1]
+        rows = np.nonzero(cols.any(1))[0]
+        if not len(rows):
+            continue
+        # base: um pouco abaixo de onde o piso começa nesta faixa (a árvore fica junto da parede do fundo)
+        ytop_floor = int(np.percentile(np.argmax(cols, axis=0)[cols.any(0)], 50))
+        base = min(H - 1, ytop_floor + int(0.06 * H))
+        top = base - th
+        if top < 0:
+            continue
+        if ceil[top:base, x0:x1].mean() > 0.05:                          # bateria no teto: baixo demais
+            continue
+        f = float(free[top:base, x0:x1].mean())
+        side = 1.0 - min(cx, W - cx) / (0.5 * W)
+        sc = f + 0.15 * side
+        if f >= TREE_FREE_MIN and (best is None or sc > best[0]):
+            best = (sc, cx, base, top)
+    if best is None:
+        return None
+    _, cx, base, top = best
+    m = np.zeros((H, W), np.uint8)
+    cone = np.array([[cx, top], [cx - tw // 2, base - int(0.1 * th)], [cx + tw // 2, base - int(0.1 * th)]],
+                    np.int32)
+    cv2.fillPoly(m, [cone], 1)
+    cv2.rectangle(m, (cx - int(0.6 * tw), base - int(0.16 * th)), (cx + int(0.6 * tw), base), 1, -1)
+    return m.astype(bool)
+
+
+TREE_PROMPT = ("a tall green christmas tree standing on the floor, decorated with glowing warm fairy lights and red "
+               "and gold ornaments, a star on top, wrapped presents under the tree, realistic scale, photorealistic, "
+               "sharp focus, high detail, natural indoor lighting")
+TREE_NEGATIVE = ("empty corner, bare wall, houseplant, potted plant, window, door, furniture, sofa, blur, smudge, "
+                 "seam, visible border, floating tree, tiny tree, " + P.NEGATIVE_BASE)
+
+
+def _insert_tree(eng, img: np.ndarray, groups: np.ndarray, lock: np.ndarray | None, seed: int, steps: int,
+                 gen_size: tuple[int, int] | None = None) -> tuple[np.ndarray, dict]:
+    """Põe a árvore de Natal num canto livre (``tree_spot``) gerando só ali, com máscara suave — como a "Editar
+    área". Na GPU (0.9.0) nenhuma versão de Natal tinha árvore e uma tinha uma arvorezinha em cima do sofá."""
+    H, W = img.shape[:2]
+    spot = tree_spot(groups, (W, H), lock)
+    if spot is None:
+        return img, {"inserida": False, "motivo": "sem canto livre"}
+    gw, gh = gen_size or (W, H)
+    img_s = _resize(img, (gw, gh))
+    sp_s = cv2.resize(spot.astype(np.uint8), (gw, gh), interpolation=cv2.INTER_NEAREST).astype(bool)
+    dg = float(np.hypot(gw, gh))
+    weight = AL.feather_alpha(sp_s, max(4.0, 0.02 * dg), inside=0.5)
+    weight[sp_s & (cv2.erode(sp_s.astype(np.uint8), AL._disk(2)) > 0)] = 1.0
+    g = eng.generate(img_s, weight, None, P.DesignPrompt(TREE_PROMPT, TREE_NEGATIVE), int(seed) + 303, 1.0, steps,
+                     2.4, 0.0, 0.0, None)
+    g = _resize(_resize(g, (gw, gh)), (W, H))
+    dw = float(np.hypot(W, H))
+    region = cv2.dilate(spot.astype(np.uint8), AL._disk(max(2, int(0.012 * dw)))).astype(bool)
+    if lock is not None:
+        lk = np.asarray(lock, bool)
+        if lk.shape == region.shape:
+            region &= ~lk
+    out = AL.composite(img, g, AL.feather_alpha(region, max(3.0, 0.01 * dw), inside=1.0))
+    return out, {"inserida": True, "fracao": round(float(spot.mean()), 4)}
 
 
 def _refine_spilled(eng) -> bool:
@@ -432,7 +529,8 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
              groups=None, progress: Progress | None = None, device: str = "auto",
              overrides: dict | None = None, long_side: int | None = None, candidates: int | None = None,
              rank_fn=None, auto_empty: bool = True, repair: bool | None = None, refine: bool | None = None,
-             tone: bool = True, refine_glass: bool | None = None) -> DesignResult:
+             tone: bool = True, refine_glass: bool | None = None, tree_fix: bool = True,
+             retry_cut: bool = True) -> DesignResult:
     """Gera ``n`` versões redesenhadas do ambiente da foto.
 
     ``funcao``: mudar_estilo | reforma | redesign_simples | mobiliar | fachada | evento (para "Editar área" use
@@ -449,11 +547,14 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     abertura é refeita como parede. ``refine`` (``None`` = só na GPU, qualidade final): passada de detalhe a 1,5×.
     ``tone``: ancora exposição e balanço de branco na foto (quanto, por função: ``FunctionPreset.tone_ab``).
     ``refine_glass`` (``None`` = só quando a segmentação é feita aqui): janelas atrás de vidro (box, porta de vidro)
-    são procuradas de novo num recorte ampliado (``refine_openings``)."""
+    são procuradas de novo num recorte ampliado (``refine_openings``). ``tree_fix``: no Natal, a versão escolhida
+    sem árvore ganha uma num canto livre (``_insert_tree``). ``retry_cut``: no "Mobiliar" com candidatos extras, se uma
+    escolhida tem móvel cortado na borda, mais 2 sementes entram na disputa."""
     t_all = time.perf_counter()
     fp = P.with_overrides(P.function(funcao), **(overrides or {}))
-    if fp.key in ("editar_area", "texto"):
-        raise ValueError(f"Use {'edit_area' if fp.key == 'editar_area' else 'text_to_design'} para '{fp.label}'.")
+    if fp.key in ("editar_area", "texto", "melhorar"):
+        alt = {"editar_area": "edit_area", "texto": "text_to_design", "melhorar": "enhance.enhance"}[fp.key]
+        raise ValueError(f"Use {alt} para '{fp.label}'.")
     requested = fp.key
     room_key = "fachada" if fp.exterior else P.norm_room(ambiente)
     st_key = P.norm_style(estilo) if (estilo and not (fp.event and estilo in P.EVENTS)) else None
@@ -585,16 +686,18 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     paths, images = [], []
     lock_info: dict = {}
     t_gen = time.perf_counter()
-    for i, (sd, pr) in enumerate(zip(seeds, prompts)):
-        def cb(k, tot, i=i):
-            prog("geracao", (i + k / max(tot, 1)) / m * span, f"Gerando a versão {i + 1} de {m}")
+    def gen_one(i: int, sd: int, pr, total: int) -> tuple[str, np.ndarray]:
+        nonlocal spilled, lock_info
+
+        def cb(k, tot):
+            prog("geracao", min(1.0, (i + k / max(tot, 1)) / total) * span, f"Gerando a versão {i + 1} de {total}")
 
         cb(0, 1)
         img = eng.generate(gen_base, gen_mask, control, pr, sd, fp.strength, steps, fp.guidance,
                            fp.control_scale, fp.control_end, cb)
         img = _resize(img, (W, H))
         if do_refine and not spilled:
-            prog("geracao", (i + 1) / m * span, f"Refinando os detalhes da versão {i + 1}")
+            prog("geracao", min(1.0, (i + 1) / total) * span, f"Refinando os detalhes da versão {i + 1}")
             # na Reforma o refino não usa profundidade: a da foto traria os móveis antigos de volta e a da sala vazia
             # achataria os novos
             img = _refine(eng, img, (Wf, Hf), depth if struct_depth is None else None, pr, sd, ref_guidance)
@@ -611,9 +714,13 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
         if lock_f.any():
             img, lock_info = AL.lock_openings(img, base_f, lock_f)
         path = _save(img, cand_dir / f"{tag}_{i + 1}.jpg")
+        prog.emit({"event": "preview", "path": path, "index": i})
+        return path, img
+
+    for i, (sd, pr) in enumerate(zip(seeds, prompts)):
+        path, img = gen_one(i, sd, pr, m)
         paths.append(path)
         images.append(img)
-        prog.emit({"event": "preview", "path": path, "index": i})
     timings["geracao_s"] = round(time.perf_counter() - t_gen, 2)
     timings["por_imagem_s"] = round(timings["geracao_s"] / m, 2)
 
@@ -645,6 +752,27 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
                     notas[k].update({f"arvore_{a}": b for a, b in t.items()})
                     notas[k]["nota"] = round(notas[k]["nota"] + TREE_WEIGHT * t["arvore"], 4)
             order = sorted(range(m), key=lambda k: -notas[k]["nota"])[:n]
+            from .quality import CUT_RETRY
+
+            if fp.key == "mobiliar" and retry_cut and any(notas[k]["cortados"] > CUT_RETRY for k in order):
+                # móvel cortado na borda numa das escolhidas (poltrona/cadeiras cortadas na GPU): mais 2 sementes
+                prog("geracao", 0.87, "Gerando versões extras (móvel cortado na borda)")
+                if seg is not None and mplan.seg_off_gpu and hasattr(seg, "park"):
+                    seg.park()
+                for sd in _seeds(seeds[-1] + 1, 2):
+                    i = len(seeds)
+                    pr = P.build_prompt(fp.key, st_key, room_key, i, prompt, evento, windows=an.windows,
+                                        open_kitchen=an.open_kitchen)
+                    if hasattr(eng, "embeddings"):
+                        eng.embeddings([pr])
+                    path, img = gen_one(i, sd, pr, i + 1)
+                    seeds.append(sd); prompts.append(pr); paths.append(path); images.append(img)
+                    gen_groups.append(None)
+                    notas.append(score(groups_of(i), lock_f | keep_f, furnish=fp.furnish, source_openings=free_f,
+                                       source_furniture=src_furn))
+                m = len(seeds)
+                order = sorted(range(m), key=lambda k: -notas[k]["nota"])[:n]
+                timings["extras_por_corte"] = 2
             timings["escolha_s"] = round(time.perf_counter() - t0, 2)
         if do_repair:
             t0 = time.perf_counter()
@@ -674,6 +802,29 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
                     images[k], _ = AL.lock_openings(images[k], base_f, lost)
                     repairs.setdefault(str(k), {})["aberturas_perdidas"] = round(float(lost.mean()), 4)
             timings["reparo_s"] = round(time.perf_counter() - t0, 2)
+        if fp.event and evento == "natal" and tree_fix:
+            # a árvore é o que faz o Natal ser reconhecido: versão escolhida sem árvore ganha uma num canto livre
+            from .quality import tree_score
+
+            t0 = time.perf_counter()
+            photo_green = _green_mask(base_f)
+            for j, k in enumerate(order):
+                t = tree_score(images[k], exclude=photo_green | lock_f)
+                if t["arvore"] >= TREE_MIN_SCORE:
+                    continue
+                prog("geracao", 0.9 + 0.04 * j / len(order), "Colocando a árvore de Natal")
+                if seg is not None and mplan.seg_off_gpu and hasattr(seg, "park"):
+                    seg.park()
+                new_img, info = _insert_tree(eng, images[k], groups_of(k), lock_f, seeds[k], steps, gen_size=(W, H))
+                if info.get("inserida"):
+                    if lock_f.any():
+                        new_img, _ = AL.lock_openings(new_img, base_f, lock_f)
+                    info["arvore_antes"] = t["arvore"]
+                    info["arvore_depois"] = tree_score(new_img, exclude=photo_green | lock_f)["arvore"]
+                    images[k] = new_img
+                    gen_groups[k] = None
+                repairs.setdefault(str(k), {})["arvore"] = info
+            timings["arvore_s"] = round(time.perf_counter() - t0, 2)
         if do_ceiling:
             t0 = time.perf_counter()
             for j, k in enumerate(order):
@@ -791,8 +942,8 @@ def _objects(groups: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return np.isin(g, [GROUP_IDS_[k] for k in OBJECT_GROUPS])
 
 
-def _split_target(objs: np.ndarray, area: np.ndarray, inside: float = 0.6, ids: np.ndarray | None = None
-                  ) -> tuple[np.ndarray, np.ndarray]:
+def _split_target(objs: np.ndarray, area: np.ndarray, inside: float = 0.6, ids: np.ndarray | None = None,
+                  clip: bool = True) -> tuple[np.ndarray, np.ndarray]:
     """Objetos da foto -> (alvo, vizinhos). Alvo = o que está majoritariamente (``inside``) dentro da área pintada
     (a mesa que o usuário quer trocar); vizinhos = o que só encosta na área (o sofá e a poltrona que o retângulo
     pegou de raspão) — esses ficam intactos."""
@@ -815,17 +966,18 @@ def _split_target(objs: np.ndarray, area: np.ndarray, inside: float = 0.6, ids: 
     grow = AL._disk(r + 1)
     protect = cv2.dilate(protect.astype(np.uint8), grow).astype(bool) & o
     target = cv2.dilate(target.astype(np.uint8), grow).astype(bool) & o & ~protect
-    return target & a, protect
+    return (target & a if clip else target), protect
 
 
 def _object_only(g: np.ndarray, photo: np.ndarray, plate: np.ndarray, area: np.ndarray, old_obj: np.ndarray,
                  new_obj: np.ndarray, min_frac: float = 0.03, max_frac: float = 0.85,
-                 protect: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray | None, str]:
+                 protect: np.ndarray | None = None, leftover: list | None = None
+                 ) -> tuple[np.ndarray, np.ndarray | None, str]:
     """Só o OBJETO novo entra (com a sombra): numa área retangular o gerador refazia também o tapete/piso em volta
     e a borda do retângulo aparecia (o tapete estampado de fora contra um piso liso por dentro). Aqui, dentro da
     área: o objeto novo (segmentado na imagem gerada, crescido ~3% para a sombra de contato) entra por Poisson
     (a luz do piso em volta casa); onde estava o objeto antigo e o novo não cobre, entra a foto sem ele
-    (``plate``); o resto fica a FOTO. Objeto novo pequeno demais ou ocupando quase toda a área (troca de estilo
+    (``plate``; essa área vai em ``leftover``, se dado, para a passada de textura); o resto fica a FOTO. Objeto novo pequeno demais ou ocupando quase toda a área (troca de estilo
     de uma região, parede, piso) = a área inteira gerada, como antes. Devolve (imagem, peso da foto ou None, modo)."""
     a = np.asarray(area, bool)
     dw = float(np.hypot(*a.shape))
@@ -848,6 +1000,8 @@ def _object_only(g: np.ndarray, photo: np.ndarray, plate: np.ndarray, area: np.n
     a_old = AL.feather_alpha(old, max(2.0, 0.01 * dw), inside=0.5) if old.any() else np.zeros(a.shape, np.float32)
     if old.any():
         top = AL.composite(top, plate, a_old)
+        if leftover is not None:
+            leftover.append(old)
     # margem da sombra: Poisson MISTO (a estampa do tapete da foto continua por ela, só a luz/sombra do gerador
     # entra: sem o "halo" de piso liso em volta do objeto); o objeto em si: Poisson normal
     pasted = AL.poisson_blend(top, g, region, mixed=True)
@@ -900,11 +1054,107 @@ def _edit_prefill(img: np.ndarray, hole: np.ndarray, inpainter=None, auto: bool 
     return AL.composite(img, cv2.GaussianBlur(base, (0, 0), 0.01 * dw), hole.astype(np.float32)), "telea"
 
 
+EDIT_FOOTPRINT_MIN = 0.25  # objeto antigo cobrindo isto da área pintada: o novo nasce na pegada dele
+EDIT_FOOTPRINT_GROW = 0.03 # folga da pegada (× diagonal): o novo pode ser um pouco maior que o antigo
+EDIT_SAM_MIN = 0.002      # componentes do objeto antigo a partir desta fração do recorte vão ao SAM
+
+
+def _sam_complete(rgb: np.ndarray, obj: np.ndarray, allowed: np.ndarray, sam_fn) -> tuple[np.ndarray, int]:
+    """Completa o objeto antigo com o SAM 2.1 (caixa de cada parte, um pouco maior para BAIXO: pés finos e a base
+    cromada que a segmentação semântica deixa de fora e que apareciam embaixo do objeto novo na GPU). Das 3
+    máscaras do SAM fica a maior que cobre a parte segmentada (≥ 85%) sem passar de 3× o tamanho dela; tudo
+    limitado a ``allowed`` (a área pintada sem os móveis vizinhos). Devolve (máscara, quantas partes cresceram)."""
+    o = np.asarray(obj, bool)
+    H, W = o.shape
+    n, lab, st, _ = cv2.connectedComponentsWithStats(o.astype(np.uint8), connectivity=8)
+    comps, boxes = [], []
+    for k in range(1, n):
+        x, y, w, h, a = (int(v) for v in st[k])
+        if a < EDIT_SAM_MIN * H * W:
+            continue
+        mx, my = 0.04 * w + 2, 0.04 * h + 2
+        boxes.append([max(0.0, x - mx), max(0.0, y - my), min(W - 1.0, x + w + mx), min(H - 1.0, y + h + 0.12 * h + my)])
+        comps.append(lab == k)
+    if not boxes:
+        return o, 0
+    try:
+        probs = sam_fn(rgb, boxes)
+    except Exception:  # noqa: BLE001 - sem SAM (pesos ausentes): fica a segmentação
+        return o, 0
+    out, grown = o.copy(), 0
+    for c, pr in zip(comps, probs):
+        best = None
+        for m in np.asarray(pr):
+            m = m > 0.5
+            if m.shape != (H, W):
+                m = cv2.resize(m.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST) > 0
+            cov = float((m & c).sum()) / max(1.0, float(c.sum()))
+            if cov >= 0.85 and m.sum() <= 3.0 * c.sum() and (best is None or m.sum() > best.sum()):
+                best = m
+        if best is not None and (best & ~out).any():
+            out |= best & np.asarray(allowed, bool)
+            grown += 1
+    return out, grown
+
+
+def _round_request(prompt: str) -> bool:
+    from .glossary import to_english
+
+    cue = P.shape_cue(to_english(prompt or ""))
+    return "round" in cue or "oval" in cue
+
+
+def _ellipse_of(mask: np.ndarray) -> np.ndarray:
+    """Elipse inscrita no retângulo envolvente da máscara (vazia se a máscara é vazia)."""
+    m = np.asarray(mask, bool)
+    out = np.zeros(m.shape, np.uint8)
+    ys, xs = np.nonzero(m)
+    if len(xs):
+        cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
+        ax, ay = (xs.max() - xs.min()) / 2 + 1, (ys.max() - ys.min()) / 2 + 1
+        cv2.ellipse(out, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), 0, 0, 360, 1, -1)
+    return out.astype(bool)
+
+
+def _auto_sam(device: str):
+    from ..removal.instances import sam2_box_fn
+
+    return sam2_box_fn(device if device.startswith("cuda") else "cpu", offline=True)
+
+
+PLATE_REFINE_STRENGTH = 0.5     # textura nova sobre o preenchimento do removedor (a cor e o desenho ficam)
+PLATE_REFINE_MIN = 0.002        # sobra do objeto antigo (fração do recorte) a partir da qual vale a passada
+
+
+def _refine_plate(eng, img: np.ndarray, left: np.ndarray, control, room_key: str, seed: int, steps: int,
+                  fp) -> tuple[np.ndarray, dict]:
+    """Onde o objeto antigo estava e o novo não cobre, o removedor deixa um borrão liso (o "borrão cinza no
+    tapete" visto na GPU). Uma passada leve do gerador SÓ ali (força 0,5, máscara suave): o desenho e a cor do
+    preenchimento ficam, a textura do tapete/piso volta. Entra com rampa curta; fora da sobra nada muda."""
+    m = np.asarray(left, bool)
+    if float(m.mean()) < PLATE_REFINE_MIN:
+        return img, {}
+    dw = float(np.hypot(*m.shape))
+    md = cv2.dilate(m.astype(np.uint8), AL._disk(max(2, int(0.006 * dw)))).astype(bool)
+    weight = AL.feather_alpha(md, max(3.0, 0.012 * dw), inside=0.5)
+    r = P.ROOMS[room_key]
+    pr = P.DesignPrompt(f"seamless continuation of the surrounding floor and rug of the {r['en']}, same pattern, "
+                        "same colors, same texture and lighting, photorealistic, sharp focus, high detail",
+                        "furniture, table, object, blur, smudge, blurry patch, grey stain, seam, visible border, "
+                        + P.NEGATIVE_BASE)
+    g = eng.generate(img, weight, control, pr, int(seed) + 202, PLATE_REFINE_STRENGTH, steps, 1.8,
+                     fp.control_scale, fp.control_end, None)
+    g = _resize(g, (img.shape[1], img.shape[0]))
+    a = AL.feather_alpha(md, max(2.0, 0.006 * dw), inside=1.0)
+    return AL.composite(img, g, a), {"fracao": round(float(m.mean()), 4)}
+
+
 def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente: str = "sala", n: int = 4,
               seed: int | None = None, out_dir=None, quality: str = "final", engine: Generator | None = None,
               depth: np.ndarray | None = None, progress: Progress | None = None, device: str = "auto",
               overrides: dict | None = None, feather_px: float | None = None, grow_frac: float = 0.01,
-              inpainter=None, seg_fn=None, object_only: bool = True) -> DesignResult:
+              inpainter=None, seg_fn=None, object_only: bool = True, sam_fn=None,
+              refine_plate: bool = True) -> DesignResult:
     """Refaz só a área pintada pelo usuário (``mask``: PNG ou array, branco = editar), guiada por ``prompt`` (em
     português ou inglês: ``glossary.to_english``) e/ou ``estilo``.
 
@@ -919,7 +1169,11 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     Travas do teste na GPU (uma "mini-sala" inteira com sofá, cortina e janela dentro do retângulo, gerada a
     1024×768 para uma foto 3:2): o recorte e a geração têm a proporção da FOTO (``edit_crop_box``/``edit_gen_size``,
     nada esticado na volta), a profundidade do entorno guia (``control_scale`` do preset, igual na GPU e na CPU) e
-    o prompt é só do objeto pedido, com "sala inteira"/móveis não pedidos no negativo (``presets.build_prompt``)."""
+    o prompt é só do objeto pedido, com "sala inteira"/móveis não pedidos no negativo (``presets.build_prompt``).
+
+    0.9.1 (teste na GPU: base cromada da mesa antiga aparecendo e borrão cinza no tapete): o objeto antigo é
+    completado pelo SAM 2.1 (``sam_fn(rgb, caixas)``; ``None`` = o do disco quando o motor é o real) antes de sair,
+    e onde ele estava e o novo não cobre o gerador refaz a textura por cima do preenchimento (``refine_plate``)."""
     t_all = time.perf_counter()
     fp = P.with_overrides(P.function("editar_area"), **(overrides or {}))
     room_key = P.norm_room(ambiente)
@@ -959,12 +1213,14 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     t0 = time.perf_counter()
     prog("analise", 0.0, "Medindo a profundidade do ambiente")
     control = None
+    dcrop_raw = None
     if fp.control_scale > 0:
         if depth is None:
             depth = estimate_depth(rgb, dev)
         dfull = cv2.resize(np.asarray(depth, np.float32), (Wf, Hf), interpolation=cv2.INTER_NEAREST)
         dcrop = cv2.resize(dfull[y0:y1, x0:x1], (W, H), interpolation=cv2.INTER_NEAREST)
         # a profundidade do objeto antigo redesenharia a silhueta dele: dentro da área vale a do plano em volta
+        dcrop_raw = dcrop
         dcrop = S.structural_depth(dcrop, hole)
         control = depth_control(dcrop, (W, H))
     timings["analise_s"] = round(time.perf_counter() - t0, 2)
@@ -979,6 +1235,10 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     seg, sfn = None, seg_fn
     old_obj, plate, base, fill_kind = None, None, None, ""
     protect = None
+    sam_grown = 0
+    area_grown = 0
+    footprint = False
+    plate_refined: list = []
     modes: list[str] = []
     try:
         if object_only and (prompt or "").strip():
@@ -1002,13 +1262,43 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
                     ids = cv2.resize(lab0, (W, H), interpolation=cv2.INTER_NEAREST)
                 else:
                     g0 = sfn(crop_ref)
-                old_obj, protect = _split_target(_objects(g0, (W, H)), mw, ids=ids)
-                if old_obj.any():
+                old_full, protect = _split_target(_objects(g0, (W, H)), mw, ids=ids, clip=False)
+                keep = cv2.dilate(protect.astype(np.uint8), AL._disk(2)).astype(bool)
+                old_obj = old_full & mw
+                if old_full.any():
+                    sfn_sam = sam_fn if sam_fn is not None else (_auto_sam(dev) if engine is None else None)
+                    if sfn_sam is not None:
+                        old_full, sam_grown = _sam_complete(crop_ref, old_full, ~keep, sfn_sam)
+                    # o objeto antigo sai INTEIRO, mesmo a parte que a pincelada não cobriu (a perna cromada fora do
+                    # retângulo ficava na foto): a área cresce até ele, se o que falta não passa da metade dela
+                    og = cv2.dilate(old_full.astype(np.uint8), AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool)
+                    ext = og & ~mw & ~keep
+                    if ext.any() and ext.sum() <= 0.5 * mw.sum():
+                        mw = mw | ext
+                        ext_full = cv2.resize(ext.astype(np.uint8), (x1 - x0, y1 - y0),
+                                              interpolation=cv2.INTER_NEAREST).astype(bool)
+                        ue[y0:y1, x0:x1] |= ext_full
+                        area_grown = int(ext_full.sum())
+                    old_obj = old_full & mw
+                    # o objeto novo nasce na pegada do antigo (mesma escala e lugar), não no retângulo inteiro: com a
+                    # área toda o gerador enchia o retângulo (mesa enorme por cima da poltrona, colagem "area")
+                    if old_obj.sum() >= EDIT_FOOTPRINT_MIN * mw.sum():
+                        foot = cv2.dilate(old_obj.astype(np.uint8),
+                                          AL._disk(max(2, int(EDIT_FOOTPRINT_GROW * dw)))).astype(bool) & mw & ~keep
+                        if _round_request(prompt):
+                            # mesa redonda na pegada de uma quadrada saía quadrada (teste em CPU): a pegada vira a
+                            # elipse inscrita no retângulo dela (o círculo visto em perspectiva)
+                            foot = _ellipse_of(foot) & mw & ~keep
+                        weight = AL.feather_alpha(foot, max(4.0, 0.03 * dw), inside=0.5)
+                        weight[foot & (cv2.erode(foot.astype(np.uint8), AL._disk(2)) > 0)] = 1.0
+                        hole = weight > 0.5
+                        footprint = True
+                    ring = cv2.dilate(mw.astype(np.uint8), AL._disk(max(2, int(0.025 * dw)))).astype(bool) & ~mw
+                if old_obj is not None and old_obj.any():
                     # SÓ o objeto antigo sai (crescido um pouco para os pés finos e a sombra), nunca o móvel vizinho
                     # que o retângulo pegou: o removedor na área inteira deixava um borrão por cima do braço do sofá
-                    keep = cv2.dilate(protect.astype(np.uint8), AL._disk(2)).astype(bool)
                     od = cv2.dilate(old_obj.astype(np.uint8),
-                                    AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool) & hole & ~keep
+                                    AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool) & mw & ~keep
                     plate, fill_kind = _edit_prefill(crop_ref, od, inpainter, auto=engine is None, device=dev)
                     # a geração parte da foto SEM o objeto antigo (nítida no resto): a borda suave dos latentes
                     # mistura a foto de verdade, não um borrão
@@ -1020,6 +1310,13 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
         base, fill_kind = _edit_prefill(crop_ref, hole, inpainter, auto=engine is None, device=dev)
     if plate is None:
         plate = base
+    if area_grown:
+        alpha = AL.feather_alpha(ue, fr, inside=1.0)
+    if (area_grown or footprint) and control is not None and old_obj is not None and old_obj.any():
+        # a profundidade do objeto antigo INTEIRO sai do controle (a parte fora da pincelada original redesenhava a
+        # silhueta quadrada dele: "mesa redonda" saía quadrada no teste em CPU)
+        flat = hole | cv2.dilate(old_obj.astype(np.uint8), AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool)
+        control = depth_control(S.structural_depth(dcrop_raw, flat | mw), (W, H))
     t_gen = time.perf_counter()
     try:
         for i, (sd, pr) in enumerate(zip(seeds, prompts)):
@@ -1034,9 +1331,16 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
             g = _resize(g, (W, H))
             keep_photo, mode = None, "area"
             if sfn and old_obj is not None:
+                left: list = []
                 g, keep_photo, mode = _object_only(g, crop_ref, plate, mw, old_obj, _objects(sfn(g), (W, H)),
-                                                   protect=protect)
+                                                   protect=protect, leftover=left)
                 modes.append(mode)
+                if refine_plate and left and mode == "objeto":
+                    if seg is not None and hasattr(seg, "park"):
+                        seg.park()
+                    g, pinfo = _refine_plate(eng, g, left[0], control, room_key, sd, steps, fp)
+                    if pinfo:
+                        plate_refined.append(pinfo)
             if mode == "area":
                 g = _match_edge(g, crop_ref, mw, ring)    # sem halo: a luz da borda nova casa com a do entorno
             g = _resize(g, (x1 - x0, y1 - y0))
@@ -1062,6 +1366,8 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
            "proporcao": {"foto": round(Wf / Hf, 4), "recorte": round((x1 - x0) / (y1 - y0), 4),
                          "geracao": round(W / H, 4)},
            "margem_px": grow, "preenchimento": fill_kind, "colagem": modes or None,
+           "sam_partes": sam_grown, "textura_refeita": plate_refined or None, "area_crescida_px": area_grown,
+           "pegada_do_objeto_antigo": footprint,
            "tamanho_geracao": [W, H], "tamanho": [Wf, Hf], "sementes": seeds, "passos": steps,
            "preset": asdict(fp), "prompts": [asdict(p) for p in prompts], "saidas": outputs, "tempos": timings}
     report = out / "design.json"

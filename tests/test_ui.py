@@ -734,3 +734,173 @@ def test_theme_tokens_come_from_7x_intelligence_oklch_and_are_readable(app):
     for pm in (brand.app_icon_pixmap(16), brand.app_icon_pixmap(256), brand.lockup_pixmap(34)):
         img = pm.toImage()
         assert not pm.isNull() and any(img.pixelColor(x, img.height() // 2).alpha() > 200 for x in range(img.width()))
+
+
+# ================================================================================== 0.9.1: melhorar, exportar, lote
+
+def test_enhance_flow_with_options_and_removal(app, win):
+    win.load_photo(str(FX)); app.processEvents()
+    assert list(win.function_cards)[0] == "melhorar"
+    win.function_cards["melhorar"].click(); app.processEvents()
+    assert win.page() == win.P_ENHANCE and win.left.currentIndex() == win.L_MASK
+    assert win.mask_title.text().startswith("REMOVER OBJETOS") and win.btn_enhance.isEnabled()
+    assert all(c.isChecked() for c in win.enhance_checks.values()) and not win.chk_enh_4k.isChecked()
+    win.enhance_checks["ceu"].click(); win.enhance_checks["verticais"].click(); win.chk_enh_4k.click()
+    _paint(app, win.mask)
+    assert win.mask.has_mask() and "remover" in win.btn_enhance.text()
+    _shot(win, "9_melhorar")
+    win.btn_enhance.click(); app.processEvents()
+    assert _wait(app, lambda: win.page() == win.P_RESULTS), win.statusBar().currentMessage()
+    a = _args(win.last_request.out_dir)
+    _no_signal_leak(a)
+    assert _opt(a, "--funcao") == "melhorar" and _opt(a, "--n") == "1" and "--estilo" not in a
+    assert {"--sem-ceu", "--sem-verticais", "--ampliar-4k"} <= set(a) and "--sem-branco" not in a
+    assert Path(_opt(a, "--mask")).is_file()
+    assert win.result_title.text().startswith("Foto melhorada")
+    assert not win.btn_again.isEnabled() and "ajuste" in win.btn_restyle.text()
+    # "Outro ajuste" volta à página do melhorar com a pintura e as opções mantidas
+    win.btn_restyle.click(); app.processEvents()
+    assert win.page() == win.P_ENHANCE and win.mask.has_mask() and not win.enhance_checks["ceu"].isChecked()
+
+
+def test_enhance_without_mask_sends_no_mask(app, win):
+    win.load_photo(str(FX)); win.function_cards["melhorar"].click(); app.processEvents()
+    win.btn_enhance.click(); app.processEvents()
+    assert _wait(app, lambda: win.page() == win.P_RESULTS)
+    a = _args(win.last_request.out_dir)
+    assert "--mask" not in a and not any(x.startswith("--sem-") for x in a)
+
+
+def test_edit_area_after_enhance_uses_edit_mode(app, win):
+    win.load_photo(str(FX)); win.function_cards["melhorar"].click(); app.processEvents()
+    win.btn_enhance.click(); app.processEvents()
+    assert _wait(app, lambda: win.page() == win.P_RESULTS)
+    win.btn_edit.click(); app.processEvents()
+    assert win.page() == win.P_EDIT and win.mask_mode == "editar" and win.mask_title.text() == "EDITAR ÁREA"
+    assert not win.mask.has_mask()
+
+
+def test_export_for_listing_label_defaults(app, win):
+    r = _to_results(app, win, "mudar_estilo", "moderno", n=2)
+    seen = []
+    win.ask_export_options = lambda default: seen.append(default) or ("4k", default)
+    win.btn_export.click(); app.processEvents()
+    assert _wait(app, lambda: not win.side.busy())
+    ea = json.loads((Path(r.folder) / "anuncio" / "exportar_args.json").read_text())
+    _no_signal_leak(ea)
+    assert seen == [True] and _opt(ea, "--lado") == "4k" and "--rotulo" in ea
+    assert _opt(ea, "--images") == r.outputs[0]
+    assert win.task_title.text() == "Pronto para o anúncio" and "com selo" in win.task_msg.text()
+    # cancelado: nada acontece
+    win.ask_export_options = lambda default: None
+    win.btn_export.click(); app.processEvents()
+    assert not win.side.busy()
+
+
+def test_export_after_enhance_has_no_label_by_default(app, win):
+    win.load_photo(str(FX)); win.function_cards["melhorar"].click(); app.processEvents()
+    win.btn_enhance.click(); app.processEvents()
+    assert _wait(app, lambda: win.page() == win.P_RESULTS)
+    seen = []
+    win.ask_export_options = lambda default: seen.append(default) or ("2048", default)
+    win.btn_export.click(); app.processEvents()
+    assert _wait(app, lambda: not win.side.busy())
+    ea = json.loads((Path(win.result.folder) / "anuncio" / "exportar_args.json").read_text())
+    assert seen == [False] and "--sem-rotulo" in ea and _opt(ea, "--lado") == "2048"
+
+
+def test_export_dialog_returns_choices(app, win, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.Accepted)
+    assert win.ask_export_options(True) == ("2048", True)
+    assert win.ask_export_options(False) == ("2048", False)
+    monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.Rejected)
+    assert win.ask_export_options(True) is None
+
+
+def test_batch_flow(app, win, tmp_path):
+    import shutil
+    photos = []
+    for name in ("sala.jpg", "quarto.jpg", "falhar_cozinha.jpg"):
+        p = tmp_path / name; shutil.copyfile(FX, p); photos.append(str(p))
+    win.btn_batch_mode.click(); app.processEvents()
+    assert win.page() == win.P_BATCH and win.left.currentIndex() == win.L_BATCH
+    assert not win.btn_batch_run.isEnabled()
+    assert win.add_batch_photos(photos + [photos[0], str(tmp_path / "nao_existe.jpg")]) == 3
+    assert win.batch_list.count() == 3 and "3 fotos" in win.btn_batch_run.text()
+    assert win.batch_func.currentData() == "melhorar" and win.batch_enh_box.isVisibleTo(win)
+    assert not win.chk_batch_label.isChecked()           # melhorar: sem selo
+    win.batch_name.setText('Apto 302 / Rua "X"')
+    win.batch_checks["ceu"].click()
+    _shot(win, "10_lote")
+    win.btn_batch_run.click(); app.processEvents()
+    assert _wait(app, lambda: win.batch_result is not None)
+    a = _args(win.batch_out)
+    _no_signal_leak(a)
+    assert Path(win.batch_out).name == "Apto 302 Rua X"
+    assert a[a.index("--fotos") + 1: a.index("--imovel")] == photos
+    assert _opt(a, "--funcao") == "melhorar" and "--sem-ceu" in a and _opt(a, "--exportar") == "2048"
+    assert "--sem-rotulo" in a
+    assert "pronta" in win.batch_list.item(0).text() and "erro" in win.batch_list.item(2).text()
+    assert win.batch_list.item(0).data(Qt.UserRole) and "2 de 3" in win.batch_msg.text()
+    assert win.btn_batch_folder.isVisibleTo(win)
+    win.btn_batch_folder.click()
+    assert win.opened[-1] == win.batch_out
+    _shot(win, "10b_lote_pronto")
+
+
+def test_batch_redesign_function_sends_style_and_label(app, win, tmp_path):
+    win.go(win.P_BATCH)
+    win.add_batch_photos([str(FX)])
+    win.batch_func.setCurrentIndex(list(__import__("mobilia.ui.app", fromlist=["x"]).BATCH_FUNCS).index("mudar_estilo"))
+    app.processEvents()
+    assert win.batch_gen_box.isVisibleTo(win) and not win.batch_enh_box.isVisibleTo(win)
+    assert win.chk_batch_label.isChecked()
+    req = win.batch_request()
+    a = req.args()
+    assert _opt(a, "--funcao") == "mudar_estilo" and _opt(a, "--estilo") and "--rotulo" in a
+    assert not any(x.startswith("--sem-") and x != "--sem-rotulo" for x in a)
+
+
+def test_batch_request_validation(tmp_path):
+    from mobilia.ui.app import BatchRequest
+    ok = dict(photos=[str(FX)], imovel="x", funcao="melhorar", out_dir=str(tmp_path))
+    BatchRequest(**ok).validate()
+    for bad in (dict(photos=[]), dict(photos=[str(tmp_path / "nada.jpg")]), dict(funcao="editar_area"),
+                dict(funcao="mudar_estilo", estilo=None), dict(opcoes=(False,)), dict(exportar="8k")):
+        with pytest.raises(ValueError):
+            BatchRequest(**{**ok, **bad}).validate()
+
+
+def test_ui_illustrative_set_matches_engine():
+    spec = importlib.util.spec_from_file_location("_presets", ROOT / "mobilia/design/presets.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_presets"] = mod
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop("_presets", None)
+    from mobilia.ui.app import ILLUSTRATIVE
+    assert ILLUSTRATIVE == set(mod.ILLUSTRATIVE)
+
+
+def test_ui_arguments_for_new_commands_parse_with_the_real_cli(tmp_path):
+    from mobilia import cli
+    from mobilia.ui.app import BatchRequest, DesignRequest, export_args
+    seen = {}
+
+    def fake(cmd):
+        return lambda a: seen.setdefault(cmd, a) and 0
+    import unittest.mock as um
+    with um.patch.object(cli, "_cmd_design", fake("design")), um.patch.object(cli, "_cmd_design_batch", fake("lote")), \
+            um.patch.object(cli, "_cmd_export", fake("exportar")):
+        r = DesignRequest(funcao="melhorar", estilo=None, ambiente="sala", n=1, out_dir=str(tmp_path), photo=str(FX),
+                          opcoes=("sem_ceu", "ampliar_4k"))
+        cli.main(["design"] + r.args())
+        b = BatchRequest(photos=[str(FX)], imovel="Casa", funcao="melhorar", out_dir=str(tmp_path),
+                         opcoes=("sem_branco",), exportar="4k", rotulo=False)
+        cli.main(["design-lote"] + b.args())
+        cli.main(["exportar"] + export_args([str(FX)], str(tmp_path), "2048", True))
+    assert seen["design"].sem_ceu and seen["design"].ampliar_4k and not seen["design"].sem_branco
+    assert seen["lote"].sem_branco and seen["lote"].exportar == "4k" and seen["lote"].sem_rotulo
+    assert seen["exportar"].rotulo and seen["exportar"].lado == "2048"

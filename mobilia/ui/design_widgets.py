@@ -25,9 +25,11 @@ FUNCTION_INFO: dict[str, tuple[str, str]] = {
     "fachada": ("Fachada", "Nova cara para a frente da casa"),
     "evento": ("Decoração de evento", "Aniversário, casamento, Natal e mais"),
     "texto": ("Texto para ambiente", "Descreva e crie do zero, sem foto"),
+    "melhorar": ("Melhorar foto", "Luz, cor, verticais, céu e nitidez"),
 }
-FUNCTION_ORDER = ("mudar_estilo", "reforma", "redesign_simples", "mobiliar", "editar_area", "fachada", "evento",
-                  "texto")
+# "Melhorar foto" primeiro: é o serviço de todo dia (todas as fotos do anúncio passam por ele)
+FUNCTION_ORDER = ("melhorar", "mudar_estilo", "reforma", "redesign_simples", "mobiliar", "editar_area", "fachada",
+                  "evento", "texto")
 
 # paleta de cada estilo (só para o cartão: quatro amostras de material/cor)
 STYLE_SWATCHES: dict[str, tuple[str, str, str, str]] = {

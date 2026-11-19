@@ -24,8 +24,12 @@ NEW_OPENING_WEIGHT = 4.0
 MISSING_OPENING_WEIGHT = 3.0
 OVERSIZE_FRAC = 0.22         # um único móvel cobrindo mais que isto da imagem: fora de escala (sofá gigante)
 OVERSIZE_WEIGHT = 2.0
-CUT_WEIGHT = 1.5             # móvel novo cortado pela borda da foto (pedaço sem sentido no canto)
-CUT_MAX_FRAC = 0.06          # só pedaços: um móvel grande que sai do quadro é composição normal
+# móvel novo cortado pela borda da foto (pedaço sem sentido no canto). 1,5 não bastou: na GPU (0.9.0) ainda saíram
+# uma poltrona cortada embaixo à direita e cadeiras cortadas nas laterais — pesa o dobro e vale até 10% da imagem
+# (uma poltrona cortada perto da câmera passa de 6%)
+CUT_WEIGHT = 3.0
+CUT_MAX_FRAC = 0.10          # só pedaços: um móvel grande que sai do quadro (sofá em primeiro plano) é composição normal
+CUT_RETRY = 0.008            # "Mobiliar": escolhidos com mais que isto de móvel cortado -> gera mais candidatos
 TREE_WEIGHT = 3.0            # Natal: a árvore é o que faz a decoração ser reconhecida
 
 
@@ -135,7 +139,8 @@ def tree_score(rgb: np.ndarray, exclude: np.ndarray | None = None, long_side: in
     blob = cv2.morphologyEx(green.astype(np.uint8), cv2.MORPH_CLOSE, ker)
     n, lab, st, _ = cv2.connectedComponentsWithStats(blob, connectivity=8)
     if n <= 1:
-        return {"arvore": 0.0, "altura": 0.0, "area": 0.0, "luzes": 0.0}
+        lit = lit_tree(img, ex if exclude is not None else None)
+        return {"arvore": round(float(lit), 4), "altura": 0.0, "area": 0.0, "luzes": 0.0, "acesa": round(float(lit), 4)}
     best = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
     x, y, w, hh, area = (int(st[best, c]) for c in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP, cv2.CC_STAT_WIDTH,
                                                      cv2.CC_STAT_HEIGHT, cv2.CC_STAT_AREA))
@@ -147,8 +152,35 @@ def tree_score(rgb: np.ndarray, exclude: np.ndarray | None = None, long_side: in
     lights = float(warm.mean())
     if lights >= 0.004:
         sc += 0.25 * min(1.0, lights / 0.02)
-    return {"arvore": round(float(sc), 4), "altura": round(float(hf), 4), "area": round(float(af), 4),
-            "luzes": round(lights, 4)}
+    lit = lit_tree(img, ex if exclude is not None else None)
+    return {"arvore": round(float(max(sc, lit)), 4), "altura": round(float(hf), 4), "area": round(float(af), 4),
+            "luzes": round(lights, 4), "acesa": round(float(lit), 4)}
+
+
+def lit_tree(rgb: np.ndarray, exclude: np.ndarray | None = None, return_mask: bool = False):
+    """Árvore toda acesa (pisca-pisca dourado cobrindo o verde: o detector de verde não a via e uma segunda árvore
+    seria inserida ao lado): um aglomerado alto e estreito de pontinhos quentes e brilhantes. 0..1
+    (``return_mask``: (nota, máscara desses aglomerados))."""
+    img = np.asarray(rgb)
+    H = img.shape[0]
+    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.int32)
+    g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    peak = (g - cv2.GaussianBlur(g, (0, 0), 3)) > 18
+    sp = peak & (hsv[..., 0] <= 35) & (hsv[..., 2] >= 170)
+    if exclude is not None:              # janelas travadas e o que já brilhava na foto (fachada, luminárias)
+        sp &= ~np.asarray(exclude, bool)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(cv2.morphologyEx(sp.astype(np.uint8), cv2.MORPH_CLOSE, k))
+    best = 0.0
+    mask = np.zeros(sp.shape, bool)
+    for i in range(1, n):
+        h, w = int(st[i, cv2.CC_STAT_HEIGHT]), int(st[i, cv2.CC_STAT_WIDTH])
+        cnt = int(sp[lab == i].sum())
+        if h >= 0.35 * H and h >= 1.2 * w and w >= 0.08 * h and cnt >= 0.0015 * sp.size:
+            best = max(best, min(1.0, h / (0.5 * H)))
+            if return_mask:
+                mask |= lab == i
+    return (best, mask) if return_mask else best
 
 
 class Segmenter:
@@ -229,5 +261,5 @@ def rank(images: list[np.ndarray], lock: np.ndarray, device: str = "cpu", furnis
             seg.close()
 
 
-__all__ = ["score", "rank", "Segmenter", "tree_score", "cut_pieces", "FURNISHED_TARGET", "NEW_OPENING_WEIGHT",
+__all__ = ["score", "rank", "Segmenter", "tree_score", "lit_tree", "cut_pieces", "CUT_RETRY", "FURNISHED_TARGET", "NEW_OPENING_WEIGHT",
            "MISSING_OPENING_WEIGHT", "OVERSIZE_FRAC", "CUT_WEIGHT", "TREE_WEIGHT"]

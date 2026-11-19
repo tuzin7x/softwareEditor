@@ -548,6 +548,15 @@ def _draw_function(p: QPainter, kind: str, color: str) -> None:
         line(42, 8, 28, 26)
         path = QPainterPath(QPointF(28, 26)); path.cubicTo(24, 25, 21, 29, 21, 33); path.lineTo(19, 36)
         path.cubicTo(25, 36, 30, 32, 28, 26); p.drawPath(path)
+    elif kind == "melhorar":          # foto (moldura com montanha) + sol de exposição
+        rect(5, 12, 30, 26, 3)
+        path = QPainterPath(QPointF(8, 34)); path.lineTo(17, 24); path.lineTo(23, 30); path.lineTo(27, 26)
+        path.lineTo(32, 34); p.drawPath(path)
+        p.drawEllipse(QPointF(37, 11), 4.0, 4.0)
+        p.setPen(_pen(soft, 1.4, Qt.RoundCap))
+        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0), (0.7, -0.7), (0.7, 0.7), (-0.7, 0.7), (-0.7, -0.7)):
+            line(37 + 6.2 * dx, 11 + 6.2 * dy, 37 + 8.6 * dx, 11 + 8.6 * dy)
+        return
     elif kind == "fachada":
         _draw_room(p, "fachada", color)
         return
