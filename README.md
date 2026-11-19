@@ -39,6 +39,7 @@ mesma janela:
 
 | Função | O que faz |
 |---|---|
+| Melhorar foto | edição de foto de anúncio sem mudar o imóvel: luz e janelas (HDR natural), balanço de branco, verticais retas, céu azul, nitidez e remoção de objetos pintados |
 | Mudar estilo | mesma sala e mesma arquitetura, com móveis e decoração em outro estilo |
 | Reforma completa | troca também pisos, revestimentos e acabamentos |
 | Redesign simples | mudança leve, que mantém a sala reconhecível |
@@ -49,6 +50,8 @@ mesma janela:
 | Texto para ambiente | cria um ambiente a partir de uma descrição, sem foto |
 | Ampliar 4K | a versão escolhida sai com 3840 px |
 | Vídeo antes e depois | a foto original se transforma nas versões novas, com movimento de câmera lento, em 16:9 (1920×1080) ou 9:16 (1080×1920) |
+| Exportar para anúncio | JPEG de 2048 px (WhatsApp e portais) ou 4K, com o selo discreto "Imagem ilustrativa" opcional |
+| Lote | várias fotos de um imóvel com a mesma função, numa pasta com o nome do imóvel |
 
 - 14 estilos (moderno, contemporâneo, escandinavo, minimalista, industrial, clássico, luxo, boho, japandi, rústico,
   costeiro, tropical brasileiro, mid-century e fazenda moderna) e 8 tipos de ambiente.
@@ -185,6 +188,9 @@ Para só a interface e o Lead Finder bastam `PySide6==6.12.0` e `pytest`. Linha 
 ```bash
 python -m mobilia.cli hardware
 python -m mobilia.cli design --photo sala.jpg --funcao mudar_estilo --estilo japandi --ambiente sala --n 4 --out-dir saida/
+python -m mobilia.cli design --photo sala.jpg --funcao melhorar --out-dir saida/ [--mask remover.png] [--sem-ceu]
+python -m mobilia.cli design-lote --fotos f1.jpg f2.jpg --imovel "Apto 302" --funcao melhorar --exportar 2048
+python -m mobilia.cli exportar --images saida/<versão>.jpg --out-dir anuncio/ --lado 2048 --rotulo
 python -m mobilia.cli ampliar --image saida/<versão>.jpg --out saida/<versão>_4k.jpg
 python -m mobilia.cli showcase --before saida/antes.jpg --after saida/<versão1>.jpg --out antes_depois.mp4 --format 9x16
 python -m mobilia.cli run --photo sala.jpg --room sala --out montagem.mp4     # modo legado A/B
