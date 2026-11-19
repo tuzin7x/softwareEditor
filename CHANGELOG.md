@@ -49,8 +49,10 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
   curto e cortinas balançam uma vez. Poucos pixels, sempre suave, e o último quadro continua idêntico à foto.
   Ligado por padrão (desligar: `--sem-tecido` ou a opção na tela do vídeo).
 - **Modo B com sala vazia por IA (padrão):** quando o gerador de difusão está instalado (GPU ou CPU), a sala vazia
-  do início do vídeo de montagem é a sala refeita pela geometria refinada pela IA dentro da área dos móveis, com
-  verificação de qualidade própria; se reprovar, segue a geometria e, por último, o preenchimento clássico
+  do início do vídeo de montagem é gerada pela IA dentro da área dos móveis (até três tentativas: refino da sala
+  refeita pela geometria com máscara larga e justa, e uma geração livre guiada pela forma da sala), com
+  verificação de qualidade própria (móvel que volta, porta/janela nova, contorno do móvel, linha parede/piso);
+  se todas reprovarem, segue a geometria e, por último, o preenchimento clássico
   (forçar: `run --placa ia|geometria`, ou `MOBILIA_PLACA`). Novos parâmetros de `run`: `--sala-vazia <imagem>`
   (usa um cômodo vazio já escolhido), `--formato original|16x9|9x16` e `--sem-tecido`.
 

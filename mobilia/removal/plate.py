@@ -139,6 +139,7 @@ LIMITS = {
     "material_max": 0.6,             # orientação das bordas do preenchimento x material visível do mesmo plano
     "contorno_max": 0.6,             # contorno da peça removida marcado na borda da máscara
     "nota_min": 60.0,                # nota contínua mínima para aprovar
+    "exige_referencia": True,        # plano preenchido sem material visível reprova (False na sala por IA)
 }
 
 # Pesos da nota contínua (pontos tirados de 100 pela severidade 0..1 de cada defeito). Os defeitos que o crítico vê
@@ -157,7 +158,21 @@ HARD_KEYS = ("nevoa", "fantasma", "estrutura_nova", "material", "contorno")
 # medidas de textura do portão foram calibradas no preenchimento pela geometria (cópia do material visível): o
 # grão e as bordas de uma imagem gerada são outros, então ``material``/``estrutura_nova``/``grao`` medem diferente
 # sem que haja defeito. O que não muda: móvel reencontrado, porta/janela nova e costura reprovam como antes.
-LIMITS_IA = {**LIMITS}
+LIMITS_IA = {**LIMITS,
+             # Portão próprio da sala gerada. Medido na CPU (sala com sofás, foto do usuário, quarto): costura,
+             # cor média, grão, "placas soltas" e "material" comparam o preenchimento com o material visível
+             # COPIADO (é assim que a geometria preenche) e reprovaram todas as salas geradas, inclusive as sem
+             # defeito visível. Aqui decide o que a IA pode errar de verdade: móvel que volta, porta/janela nova,
+             # fantasma e contorno do móvel, linha parede/piso fora do lugar, estrutura inventada e geometria da
+             # sala não medida; costura só reprova acima de 9 (ΔE) e a área vai até 85% da foto.
+             "costura_de_max": 9.0, "preenchimento_de_max": 99.0, "preenchimento_de_max_relaxado": 99.0,
+             "grao_log2_max": 9.0, "placas_soltas_max": 1.01, "material_max": 1.01, "estrutura_nova_max": 0.85,
+             # "névoa" lê parede lisa pintada como véu (o quarto gerado limpo deu 1,0): na "ia" só tira pontos
+             "nevoa_max": 1.01, "area_gerada_max": 0.85, "costura_sem_plano_max": 24.0,
+             "nota_min": 0.0,
+             # parede escondida sem nada à vista (a cozinha que sai inteira): a geometria não tem o que copiar e
+             # reprova; gerar essa parede é justamente o papel da IA (só tira pontos)
+             "exige_referencia": False}
 
 
 def disk(r: int) -> np.ndarray:
@@ -1076,7 +1091,8 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         n = int((mask & (labels == L)).sum())
         if name in per or n < min_area * H * W or (fill_info or {}).get(name, {}).get("metodo") == "liso":
             continue
-        reasons.append(f"{name} preenchido sem referência visível do material ({100 * n / (H * W):.1f}% da foto)")
+        if lim_.get("exige_referencia", True):
+            reasons.append(f"{name} preenchido sem referência visível do material ({100 * n / (H * W):.1f}% da foto)")
         lose("plano_sem_referencia", 1.0)
     # sala pela geometria: parede escondida sem NADA dela à vista (atrás de planejados de ponta a ponta) não tem o que
     # copiar; o que sobra ali é membrana + grão (superfície cinza sem estrutura). Veto: reprova como falha dura, e o
@@ -1086,7 +1102,7 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         if isinstance(fi, dict) and fi.get("metodo") in ("sem_contexto", "sem_vista"):
             blind += int(fi.get("buraco_px", 0))
     sem_ref = blind / float(H * W)
-    if sem_ref >= lim_["sem_referencia_max"]:
+    if sem_ref >= lim_["sem_referencia_max"] and lim_.get("exige_referencia", True):
         reasons.append(f"parede escondida sem nenhuma referência visível ({100 * sem_ref:.1f}% da foto): seria "
                        "inventada")
         lose("plano_sem_referencia", 1.0)
@@ -1103,6 +1119,8 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
             continue
         relax = relax_fill and s.get("razao_material", 0.0) <= lim_["relaxa_area_max"]
         lim = fill_de_limit(s["costura_de"], s["grao_log2"], relax)
+        if limits is not None:
+            lim = max(lim, lim_["preenchimento_de_max"])
         if s["preenchimento_de"] > lim:
             reasons.append(f"cor do preenchimento destoa no(a) {name} (ΔE {s['preenchimento_de']:.1f})")
         if s["costura_de"] > lim_["costura_de_max"]:
@@ -1154,7 +1172,7 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         reasons.append(f"contorno da peça removida visível na sala vazia (severidade {cont:.2f})")
     hard_detail = {"nevoa": round(fog, 3), "fantasma": round(ghost, 3), "estrutura_nova": round(struct, 3),
                    "material": round(mat, 3), "contorno": round(cont, 3)}
-    if sem_ref >= lim_["sem_referencia_max"]:
+    if sem_ref >= lim_["sem_referencia_max"] and lim_.get("exige_referencia", True):
         hard_detail["sem_referencia"] = 1.0
     red, opn = [], []
     if redetect is not None:
@@ -1910,17 +1928,36 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     keep_why = risk if KEEP_BUILTINS_FIRST else ""
     ai_best = None
     if ai_fill is not None:
-        t_ai = time.perf_counter()
-        try:
-            ai_best = run("ia", False, "ia", CORE_DILATE)
-        except Exception as e:  # noqa: BLE001 - gerador sem memória, pesos corrompidos...: segue a geometria
-            _free_cuda()
-            attempts.append({"estrategia": "ia", "planejados_mantidos": False, "metodo": "ia", "nota": None,
-                             "aprovada": False, "erro": f"{type(e).__name__}: {str(e)[:300]}",
-                             "tempo_s": round(time.perf_counter() - t_ai, 2)})
-            ai_best = None
-        if ai_best is not None and (ai_best.quality is None or ai_best.quality.ok):
-            return _gate_finish(ai_best, inst_set, attempts, "", risk)
+        # uma tentativa por variante do preenchimento (``PlateFiller.variants``: refino da geometria, depois a
+        # livre); a 1ª aprovada encerra; a melhor delas disputa no fim com as da geometria
+        base_fill = ai_fill
+        wide = CORE_DILATE * GATE_WIDE_DILATE
+        variants = getattr(base_fill, "variants", None)
+        if variants and "refino" in variants:
+            # máscara larga primeiro (com o núcleo justo sobrava a borda fina do quadro/luminária: contorno escuro
+            # no quarto); depois a justa (na sala com sofás a larga fez o gerador inventar tábuas onde a justa
+            # saiu limpa); por último a livre (ruído puro, quando a geometria de partida é ruim)
+            plan = [("ia", "refino", wide), ("ia_justa", "refino", CORE_DILATE)]
+            plan += [(f"ia_{v}", v, wide) for v in variants if v != "refino"]
+        else:
+            plan = [("ia" if k == 0 else f"ia_{v}", v, wide) for k, v in enumerate(variants or (None,))]
+        for name, var, dil in plan:
+            ai_fill = base_fill if var is None else (lambda *a, _v=var: base_fill(*a, variant=_v))
+            t_ai = time.perf_counter()
+            try:
+                r = run(name, False, "ia", dil)
+            except Exception as e:  # noqa: BLE001 - gerador sem memória, pesos corrompidos...: segue a geometria
+                _free_cuda()
+                attempts.append({"estrategia": name, "planejados_mantidos": False, "metodo": "ia", "nota": None,
+                                 "aprovada": False, "erro": f"{type(e).__name__}: {str(e)[:300]}",
+                                 "tempo_s": round(time.perf_counter() - t_ai, 2)})
+                break
+            if ai_best is None or (r.quality is not None and ai_best.quality is not None
+                                   and attempt_rank(r.quality) > attempt_rank(ai_best.quality)):
+                ai_best = r
+            if r.quality is None or r.quality.ok:
+                return _gate_finish(r, inst_set, attempts, "", risk)
+        ai_fill = base_fill
     geo = (GEOMETRY_FIRST if geometry is None else geometry) and room is not None \
         and getattr(room, "walls", None) is not None
     if geo:

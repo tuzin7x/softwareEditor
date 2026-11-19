@@ -210,7 +210,7 @@ def test_plate_filler_crops_generates_and_keeps_photo_outside():
     plate, info = f(rgb, init, mask, g, depth, seed=9)
     assert np.array_equal(plate[~mask], rgb[~mask])
     assert info["origem"] == "gerada" and max(info["tamanho_geracao"]) <= 128 and len(eng.calls) == 1
-    assert eng.calls[0]["strength"] == E.STRENGTH_GEO and eng.calls[0]["control"]
+    assert eng.calls[0]["strength"] == E.STRENGTH_PLATE and eng.calls[0]["control"]
     # o cômodo vazio escolhido pelo usuário dispensa o gerador
     given = np.full((96, 128, 3), 200, np.uint8)
     f2 = E.PlateFiller(FakeEngine(), "cpu", given=given)

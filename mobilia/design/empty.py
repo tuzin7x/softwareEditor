@@ -73,10 +73,13 @@ HANGING_BOTTOM = 0.45        # luminária que termina acima disto (fração da a
 # Profundidade forte (0,9 até o fim) redesenhava a silhueta do sofá nas bordas da máscara.
 STRENGTH_GEO = 0.75          # partida pela geometria: o gerador refina (textura, luz, sombras suaves)
 STRENGTH_SOFT = 1.0          # partida suave: o gerador refaz tudo dentro da máscara (a profundidade guia)
+# modo B: a partida é a sala pela geometria já conferida; com 0,75 o gerador inventou um "bloco" branco no lugar do
+# sofá (sala com sofás brancos, CPU). 0,55 refaz textura, luz e sombras suaves e mantém a geometria
+STRENGTH_PLATE = 0.55
 CONTROL_SCALE = 0.6
 CONTROL_END = 0.8
 GUIDANCE = 2.2
-FEATHER = 0.004              # rampa por dentro da máscara (× diagonal)
+FEATHER = 0.008              # rampa por dentro da máscara (× diagonal): borda recortada não aparece
 
 # ---------------------------------------------------------------------------------------------- escolha
 RESIDUAL_WEIGHT = 250.0      # nota perdida por fração da máscara com móvel reencontrado
@@ -236,7 +239,7 @@ def soft_prefill(img: np.ndarray, hole: np.ndarray) -> np.ndarray:
 
 
 def membrane_blend(gen: np.ndarray, photo: np.ndarray, hole: np.ndarray, ring_frac: float = 0.006,
-                   work_side: int = 384) -> np.ndarray:
+                   work_side: int = 1024) -> np.ndarray:
     """Casamento de cor/luz na borda (Poisson por membrana): a diferença foto − gerado medida num anel logo fora
     da máscara é interpolada (Laplace) para dentro e somada ao gerado. Sem degrau na borda, a textura gerada fica.
     A conta é feita em resolução reduzida (a correção é de baixa frequência)."""
@@ -470,6 +473,10 @@ def empty_room(photo, n: int = 2, seed: int | None = None, out_dir=None, quality
     gr = _resize_nn(an.groups, (W, H))
     lock = openings_mask(gr, (W, H))
     hole = empty_mask(gr, an.labels, an.id2label, (W, H), keep_curtains=keep_curtains, pieces=an.pieces)
+    # só a borda da janela/porta que a máscara cresceu por cima volta da foto: "janela" no MIOLO de uma peça é
+    # quadro ou cúpula que a segmentação confundiu (devolver traria o fantasma do quadro)
+    core = cv2.erode(hole.astype(np.uint8), _disk(int(GROW * np.hypot(W, H)) + 2)).astype(bool)
+    lock = lock & ~core
     area = float(hole.mean())
     if area < MIN_EMPTY:
         raise ValueError("Nenhum móvel encontrado na foto para tirar: o ambiente já parece vazio.")
@@ -597,7 +604,7 @@ class PlateFiller:
     "Esvaziar ambiente"): usada no lugar de uma geração nova."""
 
     def __init__(self, engine, device: str = "cpu", steps: int | None = None, long_side: int | None = None,
-                 strength: float = STRENGTH_GEO, given: np.ndarray | None = None, wrap=None):
+                 strength: float = STRENGTH_PLATE, given: np.ndarray | None = None, wrap=None):
         self._engine = engine
         self.device = device
         gpu = str(device).startswith("cuda")
@@ -614,8 +621,16 @@ class PlateFiller:
             self._engine = self._engine()
         return self._engine
 
+    @property
+    def variants(self) -> tuple[str, ...]:
+        """Tentativas do portão: "refino" (a sala pela geometria refinada, força :data:`STRENGTH_PLATE`) e
+        "livre" (partida suave, ruído puro dentro da máscara, a profundidade estrutural guia): quando a geometria
+        sai ruim (cortina esticada, parede em retalhos), refinar não conserta; a livre refaz. Com o cômodo vazio
+        escolhido pelo usuário, só ele."""
+        return ("escolhida",) if self.given is not None else ("refino", "livre")
+
     def __call__(self, photo: np.ndarray, init: np.ndarray, mask: np.ndarray, groups: np.ndarray,
-                 depth: np.ndarray | None, seed: int = 0) -> tuple[np.ndarray, dict]:
+                 depth: np.ndarray | None, seed: int = 0, variant: str = "refino") -> tuple[np.ndarray, dict]:
         t0 = time.perf_counter()
         H, W = mask.shape
         mask = np.asarray(mask, bool)
@@ -627,7 +642,7 @@ class PlateFiller:
             g = self.given
             if g.shape[:2] != (H, W):
                 g = cv2.resize(g, (W, H), interpolation=cv2.INTER_LANCZOS4)
-            plate = finish(g, photo, mask, openings_mask(groups, (W, H)))
+            plate = finish(g, photo, mask)
             info.update(origem="escolhida pelo usuário", tempo_s=round(time.perf_counter() - t0, 2))
             self.calls.append(info)
             return plate, info
@@ -648,8 +663,13 @@ class PlateFiller:
             dz = cv2.resize(dz, (gw, gh), interpolation=cv2.INTER_NEAREST)
             sd = S.structural_depth(dz, hole_c, g_c)
             control = depth_control(sd, (gw, gh), ref=dz)
-        init_c = in_c.copy()
-        init_c[~hole_c] = ph_c[~hole_c]
+        strength = self.strength
+        if variant == "livre":
+            init_c = soft_prefill(ph_c, hole_c)
+            strength = STRENGTH_SOFT
+        else:
+            init_c = in_c.copy()
+            init_c[~hole_c] = ph_c[~hole_c]
         eng = self.engine()
         gen = eng.generate
         if self.wrap is not None:
@@ -659,17 +679,21 @@ class PlateFiller:
             generate = staticmethod(gen)
 
         hint = surface_hint(ph_c, g_c, hole_c)
-        img = generate_empty(_E, ph_c, hole_c, init_c, control, seed, self.strength, self.steps, lock=None,
+        img = generate_empty(_E, ph_c, hole_c, init_c, control, seed, strength, self.steps, lock=None,
                              prompt=empty_prompt(hint))
         up = cv2.resize(img, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
         full = photo.copy()
         full[sl] = up
         # alta frequência da partida pela geometria (grão real do piso) sob a baixa frequência gerada: a
         # geração a ~768–1024 px ampliada para a foto do vídeo ficaria mais macia que o entorno
-        full = _detail_transfer(full, init, mask, scale=max(cw / gw, ch / gh))
-        plate = finish(full, photo, mask, openings_mask(groups, (W, H)))
+        if variant != "livre":
+            full = _detail_transfer(full, init, mask, scale=max(cw / gw, ch / gh))
+        # sem trava de aberturas aqui: dentro da máscara do modo B a abertura escondida pela peça já vem
+        # protegida da geometria, e devolver os pixels "janela" da foto trazia de volta quadro e luminária que a
+        # segmentação confundiu com janela (fantasmas na foto do usuário)
+        plate = finish(full, photo, mask)
         info.update(origem="gerada", pista_material=hint, recorte=[x0, y0, x1, y1], tamanho_geracao=[gw, gh], semente=int(seed),
-                    forca=self.strength, passos=self.steps, tempo_s=round(time.perf_counter() - t0, 2))
+                    variante=variant, forca=strength, passos=self.steps, tempo_s=round(time.perf_counter() - t0, 2))
         self.calls.append(info)
         return plate, info
 

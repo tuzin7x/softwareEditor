@@ -374,12 +374,17 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
     # -------------------------------------------------------------- sala vazia + portão
     em.stage("sala_vazia", 0.02, "Montando a sala vazia (por trás, não aparece no vídeo)")
     attempt_no = [0]
-    names = {"ia": "sala vazia gerada por IA", "crua_geometria": "sala crua, refeita pela geometria",
+    names = {"ia": "sala vazia por IA (refino da geometria)", "ia_justa": "sala vazia por IA (máscara justa)",
+             "ia_livre": "sala vazia por IA (livre)", "crua_geometria": "sala crua, refeita pela geometria",
              "crua_por_plano": "sala crua, por plano", "planejados_mantidos": "mantendo os planejados",
              "lama_imagem": "preenchimento direto na imagem", "mascara_ampla": "máscara mais larga"}
 
     def on_attempt(name, r):
         attempt_no[0] += 1
+        try:                                   # cada tentativa fica na pasta do trabalho (conferência)
+            Image.fromarray(r.plate).save(work / f"tentativa_{attempt_no[0]}_{name}.jpg", quality=88)
+        except Exception:  # noqa: BLE001
+            pass
         qq = r.quality
         nota = "" if qq is None else f": nota {qq.score:.0f}/100 ({'aprovada' if qq.ok else 'reprovada'})"
         em.stage("sala_vazia", min(0.95, 0.25 * attempt_no[0]), f"Sala vazia, tentativa {attempt_no[0]} "
@@ -489,7 +494,7 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
                     nota_lama=ri_.get("nota_lama"), prompt=ri_.get("prompt"))
     base = _base_report(ctx, inst, res, pieces, gate, t_load, vram_b)
     base["refino_sdxl"] = sdxl_rep
-    ai_rep["usada"] = res.info.get("estrategia_portao") == "ia"
+    ai_rep["usada"] = str(res.info.get("estrategia_portao", "")).startswith("ia")
     base["sala_vazia_ia"] = ai_rep
     if ai_rep["usada"]:
         base["narrativa"].append("A sala vazia do início foi gerada por IA só onde estavam os móveis (paredes e "
