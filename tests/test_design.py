@@ -1222,7 +1222,7 @@ def test_every_design_model_is_prefetched(monkeypatch):
     from mobilia.config import GEOMETRY_MODEL_ID, GEOMETRY_MODEL_ID_SMALL, SEGMENTATION_MODEL_ID
 
     got = []
-    import huggingface_hub
+    huggingface_hub = pytest.importorskip("huggingface_hub")
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda repo, **k: got.append(repo))
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, *a, **k: got.append(repo))
@@ -1238,7 +1238,7 @@ def test_every_design_model_is_prefetched(monkeypatch):
 
 
 def test_oneformer_loads_without_safetensors_conversion(monkeypatch):
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     from mobilia.analysis import weights as Wt
 
