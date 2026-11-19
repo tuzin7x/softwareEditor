@@ -1213,12 +1213,14 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     t0 = time.perf_counter()
     prog("analise", 0.0, "Medindo a profundidade do ambiente")
     control = None
+    dcrop_raw = None
     if fp.control_scale > 0:
         if depth is None:
             depth = estimate_depth(rgb, dev)
         dfull = cv2.resize(np.asarray(depth, np.float32), (Wf, Hf), interpolation=cv2.INTER_NEAREST)
         dcrop = cv2.resize(dfull[y0:y1, x0:x1], (W, H), interpolation=cv2.INTER_NEAREST)
         # a profundidade do objeto antigo redesenharia a silhueta dele: dentro da área vale a do plano em volta
+        dcrop_raw = dcrop
         dcrop = S.structural_depth(dcrop, hole)
         control = depth_control(dcrop, (W, H))
     timings["analise_s"] = round(time.perf_counter() - t0, 2)
@@ -1310,6 +1312,11 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
         plate = base
     if area_grown:
         alpha = AL.feather_alpha(ue, fr, inside=1.0)
+    if (area_grown or footprint) and control is not None and old_obj is not None and old_obj.any():
+        # a profundidade do objeto antigo INTEIRO sai do controle (a parte fora da pincelada original redesenhava a
+        # silhueta quadrada dele: "mesa redonda" saía quadrada no teste em CPU)
+        flat = hole | cv2.dilate(old_obj.astype(np.uint8), AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool)
+        control = depth_control(S.structural_depth(dcrop_raw, flat | mw), (W, H))
     t_gen = time.perf_counter()
     try:
         for i, (sd, pr) in enumerate(zip(seeds, prompts)):
