@@ -1554,3 +1554,151 @@ def test_score_penalizes_cut_furniture_at_border():
     assert cut_pieces(big) == 0.0
     p = P.build_prompt("mobiliar", "moderno", "sala", 0)
     assert "cut off" in p.negative
+
+
+# ------------------------------------------------- 0.9.1: pontos fracos medidos na GPU (a45fe5c)
+def test_edit_prompt_keeps_requested_shape():
+    p = P.build_prompt("editar_area", None, "sala", 0, "mesa de centro redonda de madeira")
+    assert "perfectly round" in p.positive and p.positive.index("perfectly round") < p.positive.index("single")
+    assert "blob" in p.negative and "irregular shape" in p.negative
+    assert "square shape" in P.build_prompt("editar_area", None, "sala", 0, "mesa quadrada").positive
+    assert P.shape_cue("a wooden armchair") == ""
+
+
+def test_mobiliar_prompt_asks_for_furniture_inside_the_frame():
+    p = P.build_prompt("mobiliar", "moderno", "sala", 0)
+    assert P.FRAME_CUE in p.positive and "chair cut in half" in p.negative
+    from mobilia.design import quality as Q
+    assert Q.CUT_WEIGHT >= 3.0 and Q.CUT_MAX_FRAC >= 0.1
+
+
+def test_sam_completes_old_object_with_thin_base():
+    H, W = 200, 300
+    top = np.zeros((H, W), bool); top[60:100, 100:200] = True          # tampo (o que a segmentação achou)
+    base = np.zeros((H, W), bool); base[100:150, 140:160] = True       # base cromada fina (ficou de fora)
+    neigh = np.zeros((H, W), bool); neigh[60:160, 0:60] = True         # vizinho: nunca entra
+    allowed = ~neigh
+    seen = []
+
+    def sam(rgb, boxes):
+        seen.extend(boxes)
+        full = (top | base).astype(np.float32)
+        huge = np.ones((H, W), np.float32)
+        return [np.stack([top.astype(np.float32), full, huge])]
+
+    out, n = api._sam_complete(np.zeros((H, W, 3), np.uint8), top, allowed, sam)
+    assert n == 1 and out[120, 150] and not (out & neigh).any() and not out[10, 10]
+    assert seen[0][3] > 100                                            # a caixa desce além do tampo (pés/base)
+
+    def broken(rgb, boxes):
+        raise RuntimeError("sem pesos")
+
+    out2, n2 = api._sam_complete(np.zeros((H, W, 3), np.uint8), top, allowed, broken)
+    assert n2 == 0 and np.array_equal(out2, top)
+
+
+def test_edit_area_uses_sam_and_refines_leftover_texture(tmp_path, room):
+    rgb, _, depth, _ = room
+    H, W = rgb.shape[:2]
+    mask = np.zeros((H, W), np.uint8); mask[130:230, 60:260] = 255
+
+    def seg(img):
+        out = np.full(img.shape[:2], FLOOR, np.uint8)
+        h, w = img.shape[:2]
+        if (img[..., 2] > 190).mean() > 0.05:                          # imagem gerada: objeto novo pequeno
+            out[int(h * .52):int(h * .74), int(w * .46):int(w * .54)] = FURN
+        else:                                                          # foto: mesa antiga grande
+            out[int(h * .55):int(h * .78), int(w * .30):int(w * .70)] = FURN
+        return out
+
+    calls = []
+
+    def sam(rgb_, boxes):
+        calls.append(boxes)
+        h, w = rgb_.shape[:2]
+        out = []
+        for x0, y0, x1, y1 in boxes:                                   # a caixa inteira (com a base embaixo)
+            m = np.zeros((h, w), np.float32); m[int(y0):int(y1), int(x0):int(x1)] = 1
+            out.append(np.stack([m, m, m]))
+        return out
+
+    eng = FakeEngine()
+    res = api.edit_area(rgb, mask, prompt="mesa de centro redonda", n=1, seed=2, out_dir=tmp_path, engine=eng,
+                        depth=depth, seg_fn=seg, sam_fn=sam, inpainter=lambda im, m: im)
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert calls and rep["sam_partes"] == 1 and rep["colagem"] == ["objeto"]
+    assert rep["textura_refeita"] and len(eng.calls) == 2
+    ref = eng.calls[1]
+    assert ref["strength"] == api.PLATE_REFINE_STRENGTH and "seamless continuation" in ref["prompt"].positive
+    # sem a passada: só a geração
+    eng2 = FakeEngine()
+    api.edit_area(rgb, mask, prompt="mesa", n=1, seed=2, out_dir=tmp_path / "b", engine=eng2, depth=depth,
+                  seg_fn=seg, sam_fn=sam, inpainter=lambda im, m: im, refine_plate=False)
+    assert len(eng2.calls) == 1
+
+
+def test_tree_spot_picks_free_wall_corner():
+    H, W = 240, 320
+    g = np.full((H, W), WALL, np.uint8)
+    g[:30] = CEIL
+    g[170:] = FLOOR
+    g[60:150, 10:90] = WIN                                             # janela à esquerda
+    g[120:200, 120:230] = FURN                                         # sofá no meio
+    spot = api.tree_spot(g, (W, H))
+    assert spot is not None and spot.mean() > 0.02
+    ys, xs = np.nonzero(spot)
+    assert xs.min() > 230 and not (spot & (g == WIN)).any()           # canto direito, longe da janela e do sofá
+    assert ys.max() > 170 and ys.min() > 30                            # apoiada no piso, abaixo do teto
+    assert api.tree_spot(np.full((H, W), WALL, np.uint8), (W, H)) is None   # sem piso: não inventa
+    busy = g.copy(); busy[30:200, 90:] = FURN
+    assert api.tree_spot(busy, (W, H)) is None
+
+
+def test_christmas_without_tree_gets_one_inserted(tmp_path):
+    rgb, g, depth, _ = _room(320, 240)
+
+    class NoTree(FakeEngine):
+        def generate(self, image, mask, control, prompt, seed, *a, **kw):
+            out = super().generate(image, mask, control, prompt, seed, *a, **kw)
+            if "a star on top" in prompt.positive:
+                out = image.copy(); out[np.asarray(mask) > 0.5] = (30, 110, 45)   # o pinheiro pedido
+                return out
+            return _xmas(False, *image.shape[:2])
+
+    def rank(im):
+        out = np.full(im.shape[:2], WALL, np.uint8)
+        out[int(im.shape[0] * 0.7):] = FLOOR
+        return out
+
+    eng = NoTree()
+    res = api.redesign(rgb, "evento", None, evento="natal", n=1, seed=5, out_dir=tmp_path, engine=eng, depth=depth,
+                       groups=g, rank_fn=rank, refine=False, tone=False)
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    info = rep["reparos"]["0"]["arvore"]
+    assert info["inserida"] and info["arvore_depois"] > info["arvore_antes"]
+    assert any("a star on top" in c["prompt"].positive for c in eng.calls)
+    eng2 = NoTree()
+    api.redesign(rgb, "evento", None, evento="natal", n=1, seed=5, out_dir=tmp_path / "b", engine=eng2, depth=depth,
+                 groups=g, rank_fn=rank, refine=False, tone=False, tree_fix=False)
+    assert not any("a star on top" in c["prompt"].positive for c in eng2.calls)
+
+
+def test_mobiliar_generates_extra_candidates_when_furniture_is_cut(tmp_path):
+    rgb, g, depth, _ = _room(320, 240, furnished=False)
+    eng = FakeEngine()
+
+    def rank(im):                                                      # toda versão com poltrona cortada no canto
+        out = np.full(im.shape[:2], FLOOR, np.uint8)
+        h, w = im.shape[:2]
+        out[int(h * .85):, int(w * .9):] = FURN
+        return out
+
+    res = api.redesign(rgb, "mobiliar", "moderno", n=1, seed=3, out_dir=tmp_path, engine=eng, depth=depth, groups=g,
+                       rank_fn=rank, refine=False, tone=False, candidates=2, repair=False)
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert len(rep["candidatos"]["sementes"]) == 4 and rep["tempos"]["extras_por_corte"] == 2
+    assert len(rep["candidatos"]["notas"]) == 4 and len(res.outputs) == 1
+    eng2 = FakeEngine()
+    api.redesign(rgb, "mobiliar", "moderno", n=1, seed=3, out_dir=tmp_path / "b", engine=eng2, depth=depth,
+                 groups=g, rank_fn=rank, refine=False, tone=False, candidates=2, repair=False, retry_cut=False)
+    assert len([c for c in eng2.calls if c["strength"] == P.function("mobiliar").strength]) == 2

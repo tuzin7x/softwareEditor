@@ -24,8 +24,12 @@ NEW_OPENING_WEIGHT = 4.0
 MISSING_OPENING_WEIGHT = 3.0
 OVERSIZE_FRAC = 0.22         # um único móvel cobrindo mais que isto da imagem: fora de escala (sofá gigante)
 OVERSIZE_WEIGHT = 2.0
-CUT_WEIGHT = 1.5             # móvel novo cortado pela borda da foto (pedaço sem sentido no canto)
-CUT_MAX_FRAC = 0.06          # só pedaços: um móvel grande que sai do quadro é composição normal
+# móvel novo cortado pela borda da foto (pedaço sem sentido no canto). 1,5 não bastou: na GPU (0.9.0) ainda saíram
+# uma poltrona cortada embaixo à direita e cadeiras cortadas nas laterais — pesa o dobro e vale até 10% da imagem
+# (uma poltrona cortada perto da câmera passa de 6%)
+CUT_WEIGHT = 3.0
+CUT_MAX_FRAC = 0.10          # só pedaços: um móvel grande que sai do quadro (sofá em primeiro plano) é composição normal
+CUT_RETRY = 0.008            # "Mobiliar": escolhidos com mais que isto de móvel cortado -> gera mais candidatos
 TREE_WEIGHT = 3.0            # Natal: a árvore é o que faz a decoração ser reconhecida
 
 
@@ -229,5 +233,5 @@ def rank(images: list[np.ndarray], lock: np.ndarray, device: str = "cpu", furnis
             seg.close()
 
 
-__all__ = ["score", "rank", "Segmenter", "tree_score", "cut_pieces", "FURNISHED_TARGET", "NEW_OPENING_WEIGHT",
+__all__ = ["score", "rank", "Segmenter", "tree_score", "cut_pieces", "CUT_RETRY", "FURNISHED_TARGET", "NEW_OPENING_WEIGHT",
            "MISSING_OPENING_WEIGHT", "OVERSIZE_FRAC", "CUT_WEIGHT", "TREE_WEIGHT"]

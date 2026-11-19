@@ -351,10 +351,35 @@ NEGATIVE_CEILING = ("ceiling beams, exposed beams, coffered ceiling, tray ceilin
                     "round ceiling cove, new ceiling structure")
 NEGATIVE_SCALE = "oversized furniture, giant sofa, huge coffee table, furniture out of scale"
 SCALE_CUE = "realistic proportions, furniture correctly scaled to the room"
+# composição com folga nas bordas: os móveis novos ficam inteiros dentro do quadro (poltrona cortada no canto, GPU)
+FRAME_CUE = "all furniture fully inside the frame, clear floor space near the image edges"
 NEGATIVE_EMPTY = "empty room, unfurnished, bare floor, sparse, single vase, lonely object in the middle of the room"
 # "Editar área": uma sala inteira dentro do retângulo (o defeito visto na GPU) e móveis que ninguém pediu
 EDIT_NEGATIVE_ROOM = ("entire room, room interior view, miniature room, room inside a room, collage, picture in "
                       "picture, frame within frame, new window, wall corner")
+# formas pedidas: "mesa redonda" saiu em gota na GPU (0.9.0). A forma vira uma frase própria logo depois do objeto
+# (o CLIP pesa o começo) e forma irregular vai para o negativo
+SHAPES: tuple[tuple[str, str], ...] = (
+    ("round", "perfectly round circular shape, geometric circle seen in perspective"),
+    ("circular", "perfectly round circular shape, geometric circle seen in perspective"),
+    ("oval", "regular oval shape, smooth symmetric ellipse"),
+    ("square", "square shape with straight edges and right angles"),
+    ("rectangular", "rectangular shape with straight parallel edges"),
+)
+NEGATIVE_SHAPE = "irregular shape, blob, amorphous, teardrop shape, drop shape, melted, deformed, asymmetrical"
+
+
+def shape_cue(text: str) -> str:
+    """Frase de forma para o objeto pedido (texto já em inglês), ou "" sem forma citada."""
+    import re
+
+    t = (text or "").lower()
+    for word, cue in SHAPES:
+        if re.search(rf"\b{word}\b", t):
+            return cue
+    return ""
+
+
 EDIT_OTHER_OBJECTS = ("sofa", "armchair", "bed", "dining table", "floor lamp", "bookshelf", "television", "curtains")
 OPEN_KITCHEN = "open-plan kitchen with its cabinets and appliances kept in place"
 
@@ -460,6 +485,9 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
         adj = st.prompt.split(",")[0].replace(" interior design", "").strip() if st else ""
         if extra:
             parts[0] = f"a {extra}"
+            shape = shape_cue(extra)
+            if shape:
+                parts.insert(1, shape)
             parts.append(f"a single {adj + ' style ' if adj else ''}{extra} as the only new object, "
                          f"placed in the existing {r['en']}")
             parts.append("realistic scale, natural contact shadows on the floor, lighting and perspective matching "
@@ -474,7 +502,7 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             parts.append(f"realistic scale, natural contact shadows, matching lighting and perspective, {tail}")
             neg.append(EDIT_NEGATIVE_ROOM)
         neg.append("empty floor, bare area, blank space, smudge, blurry patch, seam, visible border, "
-                   "mismatched lighting, floating object, oversized")
+                   "mismatched lighting, floating object, oversized, " + NEGATIVE_SHAPE)
     else:
         adj = st.prompt.split(",")[0].replace(" interior design", "").strip() + " " if st else ""
         lead = {"mobiliar": f"photo of a fully furnished {adj}{r['en']}",
@@ -489,6 +517,8 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             parts.append(OPEN_KITCHEN)
         if f.furnish:
             parts.append(SCALE_CUE)
+        if f.key == "mobiliar":
+            parts.append(FRAME_CUE)
         parts.append(tail)
         if f.furnish:
             neg.append(NEGATIVE_EMPTY)
@@ -496,8 +526,8 @@ def build_prompt(funcao: str, estilo: str | None = None, ambiente: str = "sala",
             neg.append(NEGATIVE_OPENINGS)
         if f.key == "mobiliar":     # o volume é da sala vazia: nada de arquitetura nova
             # e nada de móvel cortado pela borda do quadro (um pedaço sem sentido no canto, visto na GPU)
-            neg.append("furniture cut off by the frame edge, cropped furniture fragment, fireplace, radiator, "
-                       "column, new wall, built-in niche")
+            neg.append("furniture cut off by the frame edge, cropped furniture fragment, partial armchair at the "
+                       "image border, chair cut in half, fireplace, radiator, column, new wall, built-in niche")
         if f.keep_ceiling:
             neg.append(NEGATIVE_CEILING)
         if f.furnish:
@@ -604,4 +634,5 @@ __all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "ILLUSTRATIVE", "WET", "APP
            "NEGATIVE_OPENINGS", "OPEN_KITCHEN", "Style", "FunctionPreset", "DesignPrompt", "QualityProfile",
            "function", "style", "room", "norm_room", "norm_style", "norm_event", "build_prompt", "with_overrides",
            "quality_profile", "work_size", "catalog", "NEGATIVE_BASE", "NEGATIVE_EMPTY", "NEGATIVE_CEILING",
-           "NEGATIVE_SCALE", "SCALE_CUE", "EDIT_NEGATIVE_ROOM", "EDIT_OTHER_OBJECTS", "NEGATIVE_EVENT", "infer_room", "norm_aspect"]
+           "NEGATIVE_SCALE", "SCALE_CUE", "EDIT_NEGATIVE_ROOM", "EDIT_OTHER_OBJECTS", "shape_cue",
+           "NEGATIVE_SHAPE", "FRAME_CUE", "NEGATIVE_EVENT", "infer_room", "norm_aspect"]
