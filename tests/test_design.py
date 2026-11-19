@@ -1748,3 +1748,12 @@ def test_lit_tree_detects_fully_lit_tree_and_honours_exclusion():
     assert m.any() and lit_tree(img, exclude=cv2.dilate(m.astype(np.uint8), np.ones((9, 9))) > 0) == 0.0
     lamp = np.full((240, 320, 3), (70, 60, 55), np.uint8); cv2.circle(lamp, (100, 100), 12, (255, 210, 120), -1)
     assert lit_tree(lamp) == 0.0                                       # luminária: brilho só, não árvore
+
+
+def test_round_request_uses_elliptic_footprint():
+    m = np.zeros((100, 160), bool); m[30:70, 40:120] = True
+    e = api._ellipse_of(m)
+    assert e[50, 80] and not e[31, 41] and not e[69, 119] and e.sum() < m.sum()
+    assert api._round_request("mesa de centro redonda") and api._round_request("oval table")
+    assert not api._round_request("mesa quadrada") and not api._round_request("poltrona")
+    assert not api._ellipse_of(np.zeros((5, 5), bool)).any()

@@ -34,6 +34,21 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
   "Imagem ilustrativa" ligado por padrão nas funções de redesenho e desligado no Melhorar foto
   (linha de comando: `exportar`).
 
+### Correções
+
+- **Editar área:** o móvel antigo sai inteiro, com pés finos e base (mesmo a parte que a pincelada não cobriu), e
+  o novo nasce no lugar e na escala do antigo; onde o antigo estava e o novo não cobre, a textura do tapete/piso é
+  refeita (sem o borrão cinza). A forma pedida é respeitada ("mesa redonda" sai redonda, não em gota).
+- **Decoração de Natal:** versão sem árvore ganha uma árvore de verdade num canto livre do piso (sem janela, porta
+  ou móvel na frente); árvore toda acesa passa a ser reconhecida (nada de segunda árvore).
+- **Mobiliar:** móvel cortado na borda da foto pesa o dobro na escolha das versões, o pedido ao gerador reforça
+  móveis inteiros dentro do quadro e, se ainda sobrar um cortado, mais duas versões entram na disputa.
+
+### Notas importantes de atualização
+
+- O "Melhorar foto" roda em segundos mesmo sem placa de vídeo; só a troca do céu e a remoção de objetos usam IA.
+  O céu é trocado apenas onde a IA reconhece céu aberto (fachadas, varandas): a vista pela janela fica como está.
+
 ## [0.9.0] - 2026-11-19
 
 ### Novidades

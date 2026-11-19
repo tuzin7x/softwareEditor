@@ -1097,6 +1097,25 @@ def _sam_complete(rgb: np.ndarray, obj: np.ndarray, allowed: np.ndarray, sam_fn)
     return out, grown
 
 
+def _round_request(prompt: str) -> bool:
+    from .glossary import to_english
+
+    cue = P.shape_cue(to_english(prompt or ""))
+    return "round" in cue or "oval" in cue
+
+
+def _ellipse_of(mask: np.ndarray) -> np.ndarray:
+    """Elipse inscrita no retângulo envolvente da máscara (vazia se a máscara é vazia)."""
+    m = np.asarray(mask, bool)
+    out = np.zeros(m.shape, np.uint8)
+    ys, xs = np.nonzero(m)
+    if len(xs):
+        cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
+        ax, ay = (xs.max() - xs.min()) / 2 + 1, (ys.max() - ys.min()) / 2 + 1
+        cv2.ellipse(out, (int(round(cx)), int(round(cy))), (int(round(ax)), int(round(ay))), 0, 0, 360, 1, -1)
+    return out.astype(bool)
+
+
 def _auto_sam(device: str):
     from ..removal.instances import sam2_box_fn
 
@@ -1264,6 +1283,10 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
                     if old_obj.sum() >= EDIT_FOOTPRINT_MIN * mw.sum():
                         foot = cv2.dilate(old_obj.astype(np.uint8),
                                           AL._disk(max(2, int(EDIT_FOOTPRINT_GROW * dw)))).astype(bool) & mw & ~keep
+                        if _round_request(prompt):
+                            # mesa redonda na pegada de uma quadrada saía quadrada (teste em CPU): a pegada vira a
+                            # elipse inscrita no retângulo dela (o círculo visto em perspectiva)
+                            foot = _ellipse_of(foot) & mw & ~keep
                         weight = AL.feather_alpha(foot, max(4.0, 0.03 * dw), inside=0.5)
                         weight[foot & (cv2.erode(foot.astype(np.uint8), AL._disk(2)) > 0)] = 1.0
                         hole = weight > 0.5
