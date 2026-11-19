@@ -240,6 +240,7 @@ class CliTask(QObject):
     progress = Signal(str, float, str)       # etapa, fração 0..1, mensagem
     preview = Signal(str, int)               # caminho da versão pronta, índice
     log = Signal(str)
+    item = Signal(object)                    # lote: evento "item" (index, total, photo, status, outputs, message)
     finished = Signal(object)                # CliResult
     _ended = Signal(object)                  # interno: fim do processo (da thread do worker para a da interface)
 
@@ -333,6 +334,8 @@ class CliTask(QObject):
             msg = str(ev.get("message") or "")
             res.log.append(msg)
             self.log.emit(msg)
+        elif kind == "item":
+            self.item.emit(dict(ev))
         elif kind == "done":
             res.done = dict(ev)
             res.status = "pronto"

@@ -100,7 +100,7 @@ def _no_real_segmenter(monkeypatch):
 def test_catalog_has_all_functions_styles_and_rooms():
     c = P.catalog()
     assert set(c["funcoes"]) == {"mudar_estilo", "reforma", "redesign_simples", "mobiliar", "editar_area",
-                                 "fachada", "evento", "texto"}
+                                 "fachada", "evento", "texto", "melhorar"}
     assert len(c["estilos"]) >= 12
     for k in ("moderno", "contemporaneo", "escandinavo", "minimalista", "industrial", "classico", "luxo", "boho",
               "japandi", "rustico", "costeiro", "tropical"):

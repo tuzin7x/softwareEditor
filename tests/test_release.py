@@ -136,7 +136,9 @@ def test_check_refuses_draft_and_empty_sections(tmp_path):
 def test_real_changelog_has_unreleased_and_published_first_version(tmp_path):
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "## [Não publicado]" in text
-    assert rn.code_version() == "0.9.0", "a primeira versão oficial proposta é a 0.9.0"
+    assert rn.code_version() == "0.9.1", "versão em desenvolvimento: 0.9.1 (a 0.9.0 já foi publicada)"
+    cur = rn.find_section(text, "0.9.1")
+    assert cur is not None and "Melhorar foto" in cur.body   # rascunho até a data ser fechada na publicação
     sec = rn.find_section(text, "0.9.0")
     assert sec is not None and not sec.is_draft, "a 0.9.0 foi aprovada pelo dono e sai como primeira versão oficial"
     for item in ("Mudar estilo", "Reforma completa", "Redesign simples", "Mobiliar ambiente vazio", "Editar área",

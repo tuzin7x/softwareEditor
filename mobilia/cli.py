@@ -9,6 +9,9 @@ Uso:
   python -m mobilia.cli design --photo sala.jpg --funcao mudar_estilo --estilo escandinavo --ambiente sala
                                [--n 4] [--seed 7] [--mask area.png] [--prompt "texto"] [--evento natal]
                                [--out-dir pasta/] [--quality rapido|final] [--json]
+  python -m mobilia.cli design --photo sala.jpg --funcao melhorar [--mask remover.png] [--sem-ceu] [--ampliar-4k]
+  python -m mobilia.cli design-lote --fotos a.jpg b.jpg --imovel "Apto 302" --funcao melhorar [--exportar 2048]
+  python -m mobilia.cli exportar --images v1.jpg v2.jpg --out-dir anuncio/ [--lado 2048|4k] [--rotulo]
   python -m mobilia.cli ampliar|upscale --image versao.jpg --out versao_4k.jpg [--lado 3840] [--json]
   python -m mobilia.cli showcase --before antes.jpg --after v1.jpg [v2.jpg ...] --out video.mp4
                                  [--format 16x9|9x16] [--duracao 15] [--rotulos "Escandinavo" ...]
@@ -25,6 +28,7 @@ import os
 import sys
 import time
 import traceback
+from pathlib import Path
 
 # Instante em que o processo do motor começou a rodar código do Mobília (telemetria: o
 # lançamento real vem de MOBILIA_T_INICIO quando a interface informa).
@@ -212,7 +216,7 @@ def _cmd_design(a) -> int:
 
     try:
         f = presets.function(a.funcao)
-        if not a.estilo and f.key not in ("evento", "editar_area"):
+        if not a.estilo and f.key not in ("evento", "editar_area", "melhorar"):
             a.estilo = "moderno"
         common = dict(n=a.n, seed=a.seed, out_dir=a.out_dir, quality=a.quality, progress=emit, device=a.device)
         if f.key == "texto":
@@ -226,6 +230,12 @@ def _cmd_design(a) -> int:
                 if not a.mask:
                     raise ValueError("Pinte a área a editar (--mask).")
                 res = api.edit_area(a.photo, a.mask, a.prompt or "", a.estilo, a.ambiente, **common)
+            elif f.key == "melhorar":
+                from .design.enhance import enhance
+
+                if a.mask and not os.path.isfile(a.mask):
+                    raise FileNotFoundError(f"Máscara não encontrada: {a.mask}")
+                res = enhance(a.photo, a.out_dir, _enhance_opts(a), mask=a.mask, progress=emit, device=a.device)
             else:
                 res = api.redesign(a.photo, f.key, a.estilo, a.ambiente, prompt=a.prompt or "", evento=a.evento,
                                    repair=False if a.sem_reparo else None, auto_empty=not a.manter_funcao,
@@ -237,6 +247,97 @@ def _cmd_design(a) -> int:
         return 130
     except Exception as e:  # erro reportado à UI com detalhe técnico
         emit({"event": "error", "message": str(e) or e.__class__.__name__, "detail": traceback.format_exc()})
+        return 1
+
+
+def _enhance_opts(a):
+    from .design.enhance import EnhanceOptions
+
+    return EnhanceOptions(exposicao=not a.sem_exposicao, branco=not a.sem_branco, verticais=not a.sem_verticais,
+                          ceu=not a.sem_ceu, nitidez=not a.sem_nitidez, ampliar_4k=bool(a.ampliar_4k),
+                          ceu_preset=int(a.ceu or 0))
+
+
+def _add_enhance_args(p) -> None:
+    g = p.add_argument_group("Melhorar foto (todas as etapas ligadas por padrão)")
+    g.add_argument("--sem-exposicao", action="store_true", help="sem exposição automática / HDR natural")
+    g.add_argument("--sem-branco", action="store_true", help="sem correção do balanço de branco")
+    g.add_argument("--sem-verticais", action="store_true", help="sem endireitar as verticais")
+    g.add_argument("--sem-ceu", action="store_true", help="sem trocar o céu")
+    g.add_argument("--sem-nitidez", action="store_true", help="sem nitidez e redução de ruído")
+    g.add_argument("--ampliar-4k", action="store_true", help="saída com 3840 px no lado maior")
+    g.add_argument("--ceu", type=int, default=0, help="modelo de céu (0-3)")
+
+
+def _cmd_design_batch(a) -> int:
+    """Lote: várias fotos do mesmo imóvel com a mesma função. Eventos ``progress``, ``item`` (index, total, photo,
+    status processando|pronto|erro, outputs, message) e ``done`` (outputs = entregas, output = a 1ª, folder)."""
+    from .design import listing, presets
+
+    emit = _json_or_human(a)
+    try:
+        f = presets.function(a.funcao)
+        fotos = list(a.fotos or [])
+        if a.pasta:
+            exts = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff")
+            fotos += sorted(str(p) for p in Path(a.pasta).iterdir() if p.suffix.lower() in exts)
+        miss = [p for p in fotos if not os.path.isfile(p)]
+        if miss:
+            raise FileNotFoundError(f"Foto não encontrada: {miss[0]}")
+        if a.out_dir:
+            out = Path(a.out_dir)
+        else:
+            from .config import JOBS_DIR
+
+            out = JOBS_DIR / listing.property_folder(a.imovel or time.strftime("lote_%Y%m%d_%H%M%S"))
+        export = None
+        if a.exportar:
+            export = {"lado": listing.norm_long_side(a.exportar),
+                      "rotulo": True if a.rotulo else False if a.sem_rotulo else None}
+        rep = listing.run_batch(fotos, out, f.key, progress=emit, export=export, opts=_enhance_opts(a),
+                                estilo=a.estilo, ambiente=a.ambiente, evento=a.evento, prompt=a.prompt or "",
+                                n=a.n, seed=a.seed, quality=a.quality, device=a.device)
+        ok = [i for i in rep["itens"] if i["status"] == "pronto"]
+        if not ok:
+            raise RuntimeError("Nenhuma foto do lote foi processada: " +
+                               "; ".join(i.get("message", "") for i in rep["itens"])[:400])
+        emit({"event": "done", "outputs": rep["entregas"], "output": rep["entregas"][0], "folder": str(out),
+              "anuncio": rep["anuncio"], "itens": rep["itens"], "funcao": f.key})
+        if not a.json:
+            print(f"Pronto: {len(ok)} de {len(fotos)} fotos em {out}", flush=True)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        ev = {"event": "error", "message": str(e) or e.__class__.__name__, "detail": traceback.format_exc()}
+        print(json.dumps(ev, ensure_ascii=False) if a.json else f"ERRO: {ev['message']}", flush=True)
+        return 1
+
+
+def _cmd_export(a) -> int:
+    """"Exportar para anúncio": JPEGs de 2048 px (ou 4K) com o selo "Imagem ilustrativa" opcional. Eventos
+    ``progress`` e ``done`` (outputs, output = o 1º, folder)."""
+    from .design import listing
+
+    emit = _json_or_human(a)
+    try:
+        for p in a.images:
+            if not os.path.isfile(p):
+                raise FileNotFoundError(f"Imagem não encontrada: {p}")
+        lado = listing.norm_long_side(a.lado)
+        label = True if a.rotulo else False if a.sem_rotulo else listing.default_label(a.funcao)
+        emit({"event": "progress", "stage": "exportar", "fraction": 0.0, "message": "Preparando as imagens"})
+        outs = listing.export_for_listing(
+            a.images, a.out_dir, lado, label,
+            progress=lambda fr: emit({"event": "progress", "stage": "exportar", "fraction": round(fr, 3),
+                                      "message": "Exportando para o anúncio"}),
+            log=lambda m: emit({"event": "log", "level": "warning", "message": m}))
+        emit({"event": "done", "outputs": outs, "output": outs[0], "folder": str(a.out_dir), "rotulo": label,
+              "lado": lado})
+        if not a.json:
+            print("Pronto:\n  " + "\n  ".join(outs), flush=True)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        ev = {"event": "error", "message": str(e) or e.__class__.__name__, "detail": traceback.format_exc()}
+        print(json.dumps(ev, ensure_ascii=False) if a.json else f"ERRO: {ev['message']}", flush=True)
         return 1
 
 
@@ -363,14 +464,16 @@ def main(argv=None) -> int:
     d = sub.add_parser("design", help="redesenho do ambiente por IA (N versões novas da mesma foto)")
     d.add_argument("--photo", default=None, help="foto do ambiente (não usada em --funcao texto)")
     d.add_argument("--funcao", default="mudar_estilo",
-                   help="mudar_estilo | reforma | redesign_simples | mobiliar | editar_area | fachada | evento | texto")
+                   help="mudar_estilo | reforma | redesign_simples | mobiliar | editar_area | fachada | evento | texto | "
+                        "melhorar")
     d.add_argument("--estilo", default=None, help="moderno, escandinavo, luxo... (veja mobilia/design/presets.py)")
     d.add_argument("--ambiente", default="sala",
                    help="sala | quarto | cozinha | banheiro | escritorio | sala_jantar | varanda | fachada")
     d.add_argument("--evento", default=None, help="função evento: aniversario | casamento | natal | ...")
     d.add_argument("--n", type=int, default=4, help="quantas versões (padrão 4)")
     d.add_argument("--seed", type=int, default=None, help="semente (padrão: aleatória)")
-    d.add_argument("--mask", default=None, help="PNG da área a editar (branco = editar), função editar_area")
+    d.add_argument("--mask", default=None,
+                   help="PNG da área a editar (branco = editar), função editar_area; no melhorar, o que remover")
     d.add_argument("--prompt", default="", help="texto livre (o que o cliente quer)")
     d.add_argument("--formato", default="paisagem", help="função texto: paisagem | retrato | quadrado | 16:9 | 9:16")
     d.add_argument("--sem-reparo", action="store_true",
@@ -383,6 +486,34 @@ def main(argv=None) -> int:
     d.add_argument("--quality", default="final", choices=["rapido", "final"])
     d.add_argument("--device", default="auto", help="auto | cuda | cpu")
     d.add_argument("--json", action="store_true", help="eventos de progresso em JSON (uso pela UI)")
+    _add_enhance_args(d)
+    bl = sub.add_parser("design-lote", help="lote: várias fotos de um imóvel com a mesma função (ex.: melhorar)")
+    bl.add_argument("--fotos", nargs="*", default=None, help="fotos do imóvel")
+    bl.add_argument("--pasta", default=None, help="ou uma pasta com as fotos")
+    bl.add_argument("--imovel", default="", help="nome do imóvel (vira o nome da pasta de saída)")
+    bl.add_argument("--funcao", default="melhorar")
+    bl.add_argument("--estilo", default=None)
+    bl.add_argument("--ambiente", default="sala")
+    bl.add_argument("--evento", default=None)
+    bl.add_argument("--prompt", default="")
+    bl.add_argument("--n", type=int, default=1, help="versões por foto (funções de redesenho)")
+    bl.add_argument("--seed", type=int, default=None)
+    bl.add_argument("--quality", default="final", choices=["rapido", "final"])
+    bl.add_argument("--out-dir", default=None, help="pasta de saída (padrão: <dados>/jobs/<imóvel>)")
+    bl.add_argument("--exportar", default=None, help="também exporta para anúncio: 2048 | 4k")
+    bl.add_argument("--rotulo", action="store_true", help="selo 'Imagem ilustrativa' na exportação")
+    bl.add_argument("--sem-rotulo", action="store_true")
+    bl.add_argument("--device", default="auto")
+    bl.add_argument("--json", action="store_true")
+    _add_enhance_args(bl)
+    ex = sub.add_parser("exportar", help="exportar para anúncio (JPEG 2048 px ou 4K, selo opcional)")
+    ex.add_argument("--images", nargs="+", required=True)
+    ex.add_argument("--out-dir", required=True)
+    ex.add_argument("--lado", default="2048", help="2048 | 4k")
+    ex.add_argument("--funcao", default=None, help="função que gerou as imagens (define o selo padrão)")
+    ex.add_argument("--rotulo", action="store_true", help="com o selo 'Imagem ilustrativa'")
+    ex.add_argument("--sem-rotulo", action="store_true", help="sem o selo")
+    ex.add_argument("--json", action="store_true")
     up = sub.add_parser("ampliar", aliases=["upscale"], help="amplia uma versão para 4K (Real-ESRGAN x4)")
     up.add_argument("--image", required=True)
     up.add_argument("--out", required=True)
@@ -416,7 +547,8 @@ def main(argv=None) -> int:
     use_installed_models(os.environ)
     return {"run": _cmd_run, "hardware": _cmd_hardware, "analyze": _cmd_analyze, "batch": _cmd_batch,
             "prefetch": _cmd_prefetch, "aquecer": _cmd_warmup, "recompor": _cmd_recompose,
-            "design": _cmd_design, "ampliar": _cmd_upscale, "upscale": _cmd_upscale,
+            "design": _cmd_design, "design-lote": _cmd_design_batch, "exportar": _cmd_export,
+            "ampliar": _cmd_upscale, "upscale": _cmd_upscale,
             "showcase": _cmd_showcase}[a.cmd](a)
 
 

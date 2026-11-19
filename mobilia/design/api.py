@@ -452,8 +452,9 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     são procuradas de novo num recorte ampliado (``refine_openings``)."""
     t_all = time.perf_counter()
     fp = P.with_overrides(P.function(funcao), **(overrides or {}))
-    if fp.key in ("editar_area", "texto"):
-        raise ValueError(f"Use {'edit_area' if fp.key == 'editar_area' else 'text_to_design'} para '{fp.label}'.")
+    if fp.key in ("editar_area", "texto", "melhorar"):
+        alt = {"editar_area": "edit_area", "texto": "text_to_design", "melhorar": "enhance.enhance"}[fp.key]
+        raise ValueError(f"Use {alt} para '{fp.label}'.")
     requested = fp.key
     room_key = "fachada" if fp.exterior else P.norm_room(ambiente)
     st_key = P.norm_style(estilo) if (estilo and not (fp.event and estilo in P.EVENTS)) else None

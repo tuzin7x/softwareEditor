@@ -274,6 +274,8 @@ class FunctionPreset:
     # tom: quanto a exposição/cor da imagem gerada é puxada para a da foto (0 = nada). Troca de estilo precisa de
     # pouca âncora na cor (senão escandinavo e moderno saem com a mesma cor da foto)
     tone_ab: float = 0.35
+    # False: a função não usa o gerador (processamento de foto: "Melhorar foto", ``enhance.py``)
+    generative: bool = True
 
 
 APPLIANCES = ("refrigerator", "stove", "oven", "dishwasher", "microwave")
@@ -317,7 +319,15 @@ FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
                    repair=False),
     FunctionPreset("texto", "Texto para ambiente", strength=1.0, control_scale=0.0, control_end=0.0, guidance=2.0,
                    lock=(), needs_photo=False, repair=False),
+    # edição de foto de anúncio (exposição, branco, verticais, céu, nitidez, remover objetos): nada é gerado e a
+    # arquitetura nunca muda (``enhance.py``)
+    FunctionPreset("melhorar", "Melhorar foto", strength=0.0, control_scale=0.0, control_end=0.0, lock=(),
+                   furnish=False, repair=False, generative=False),
 )}
+
+# funções em que a imagem final mostra móveis/decoração que não existem: o "Exportar para anúncio" põe o selo
+# "Imagem ilustrativa" por padrão (o "Melhorar foto" só corrige a foto real: sem selo)
+ILLUSTRATIVE = ("mudar_estilo", "reforma", "redesign_simples", "mobiliar", "editar_area", "fachada", "evento", "texto")
 
 # funções que, numa foto de ambiente vazio, viram "Mobiliar" (mudar o estilo de uma sala vazia devolvia uma sala
 # vazia com um vaso: exatamente o que o usuário odiou)
@@ -367,7 +377,8 @@ def _norm(key: str, table: dict, kind: str) -> str:
          "jantar": "sala_jantar", "aniversário": "aniversario", "chá_de_bebê": "cha_de_bebe",
          "redesign": "redesign_simples", "reforma_completa": "reforma", "editar": "editar_area",
          "mobiliar_ambiente_vazio": "mobiliar", "texto_para_ambiente": "texto", "decoracao_de_evento": "evento",
-         "decoração_de_evento": "evento"}.get(k, k)
+         "decoração_de_evento": "evento", "melhorar_foto": "melhorar", "melhorar_a_foto": "melhorar",
+         "enhance": "melhorar"}.get(k, k)
     if k not in table:
         raise ValueError(f"{kind} inválido: {key!r} (opções: {', '.join(table)})")
     return k
@@ -589,7 +600,7 @@ def catalog() -> dict:
             "eventos": {k: e["label"] for k, e in EVENTS.items()}}
 
 
-__all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "WET", "APPLIANCES", "EMPTY_TO_STAGING", "EMPTY_FURNITURE_FRAC",
+__all__ = ["ROOMS", "STYLES", "EVENTS", "FUNCTIONS", "ILLUSTRATIVE", "WET", "APPLIANCES", "EMPTY_TO_STAGING", "EMPTY_FURNITURE_FRAC",
            "NEGATIVE_OPENINGS", "OPEN_KITCHEN", "Style", "FunctionPreset", "DesignPrompt", "QualityProfile",
            "function", "style", "room", "norm_room", "norm_style", "norm_event", "build_prompt", "with_overrides",
            "quality_profile", "work_size", "catalog", "NEGATIVE_BASE", "NEGATIVE_EMPTY", "NEGATIVE_CEILING",
