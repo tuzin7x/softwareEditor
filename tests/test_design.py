@@ -1702,3 +1702,32 @@ def test_mobiliar_generates_extra_candidates_when_furniture_is_cut(tmp_path):
     api.redesign(rgb, "mobiliar", "moderno", n=1, seed=3, out_dir=tmp_path / "b", engine=eng2, depth=depth,
                  groups=g, rank_fn=rank, refine=False, tone=False, candidates=2, repair=False, retry_cut=False)
     assert len([c for c in eng2.calls if c["strength"] == P.function("mobiliar").strength]) == 2
+
+
+def test_edit_area_removes_whole_old_object_and_uses_its_footprint(tmp_path, room):
+    rgb, _, depth, _ = room
+    H, W = rgb.shape[:2]
+    mask = np.zeros((H, W), np.uint8); mask[120:200, 80:220] = 255     # pincelada pegou quase toda a mesa
+
+    seen = []
+
+    def seg(img):
+        import cv2
+        out = np.full(img.shape[:2], FLOOR, np.uint8)
+        h, w = img.shape[:2]
+        seen.append(1)
+        if len(seen) > 1:                                              # gerada: mesa nova (a 1ª chamada é a foto)
+            out[int(h * .45):int(h * .6), int(w * .45):int(w * .55)] = FURN
+        else:                                                          # foto: mesa antiga, a perna sai da pincelada
+            out[int(h * .40):int(h * .70), int(w * .35):int(w * .66)] = FURN
+        return out
+
+    eng = FakeEngine()
+    res = api.edit_area(rgb, mask, prompt="mesa de centro redonda", n=1, seed=2, out_dir=tmp_path, engine=eng,
+                        depth=depth, seg_fn=seg, inpainter=lambda im, m: np.where(m[..., None], 0, im).astype(np.uint8))
+    rep = json.loads(Path(res.report).read_text(encoding="utf-8"))
+    assert rep["area_crescida_px"] > 0 and rep["pegada_do_objeto_antigo"]
+    gen = eng.calls[0]["mask"]
+    painted = rep["recorte"]
+    assert gen.mean() < 0.14                                           # nasce na pegada da mesa, não no retângulo
+    assert painted and res.images[0].shape == rgb.shape

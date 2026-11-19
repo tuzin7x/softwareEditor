@@ -936,8 +936,8 @@ def _objects(groups: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return np.isin(g, [GROUP_IDS_[k] for k in OBJECT_GROUPS])
 
 
-def _split_target(objs: np.ndarray, area: np.ndarray, inside: float = 0.6, ids: np.ndarray | None = None
-                  ) -> tuple[np.ndarray, np.ndarray]:
+def _split_target(objs: np.ndarray, area: np.ndarray, inside: float = 0.6, ids: np.ndarray | None = None,
+                  clip: bool = True) -> tuple[np.ndarray, np.ndarray]:
     """Objetos da foto -> (alvo, vizinhos). Alvo = o que está majoritariamente (``inside``) dentro da área pintada
     (a mesa que o usuário quer trocar); vizinhos = o que só encosta na área (o sofá e a poltrona que o retângulo
     pegou de raspão) — esses ficam intactos."""
@@ -960,7 +960,7 @@ def _split_target(objs: np.ndarray, area: np.ndarray, inside: float = 0.6, ids: 
     grow = AL._disk(r + 1)
     protect = cv2.dilate(protect.astype(np.uint8), grow).astype(bool) & o
     target = cv2.dilate(target.astype(np.uint8), grow).astype(bool) & o & ~protect
-    return target & a, protect
+    return (target & a if clip else target), protect
 
 
 def _object_only(g: np.ndarray, photo: np.ndarray, plate: np.ndarray, area: np.ndarray, old_obj: np.ndarray,
@@ -1048,6 +1048,8 @@ def _edit_prefill(img: np.ndarray, hole: np.ndarray, inpainter=None, auto: bool 
     return AL.composite(img, cv2.GaussianBlur(base, (0, 0), 0.01 * dw), hole.astype(np.float32)), "telea"
 
 
+EDIT_FOOTPRINT_MIN = 0.25  # objeto antigo cobrindo isto da área pintada: o novo nasce na pegada dele
+EDIT_FOOTPRINT_GROW = 0.03 # folga da pegada (× diagonal): o novo pode ser um pouco maior que o antigo
 EDIT_SAM_MIN = 0.002      # componentes do objeto antigo a partir desta fração do recorte vão ao SAM
 
 
@@ -1207,6 +1209,8 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
     old_obj, plate, base, fill_kind = None, None, None, ""
     protect = None
     sam_grown = 0
+    area_grown = 0
+    footprint = False
     plate_refined: list = []
     modes: list[str] = []
     try:
@@ -1231,17 +1235,39 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
                     ids = cv2.resize(lab0, (W, H), interpolation=cv2.INTER_NEAREST)
                 else:
                     g0 = sfn(crop_ref)
-                old_obj, protect = _split_target(_objects(g0, (W, H)), mw, ids=ids)
-                if old_obj.any():
+                old_full, protect = _split_target(_objects(g0, (W, H)), mw, ids=ids, clip=False)
+                keep = cv2.dilate(protect.astype(np.uint8), AL._disk(2)).astype(bool)
+                old_obj = old_full & mw
+                if old_full.any():
                     sfn_sam = sam_fn if sam_fn is not None else (_auto_sam(dev) if engine is None else None)
                     if sfn_sam is not None:
-                        keep0 = cv2.dilate(protect.astype(np.uint8), AL._disk(2)).astype(bool)
-                        old_obj, sam_grown = _sam_complete(crop_ref, old_obj, hole & ~keep0, sfn_sam)
+                        old_full, sam_grown = _sam_complete(crop_ref, old_full, ~keep, sfn_sam)
+                    # o objeto antigo sai INTEIRO, mesmo a parte que a pincelada não cobriu (a perna cromada fora do
+                    # retângulo ficava na foto): a área cresce até ele, se o que falta não passa da metade dela
+                    og = cv2.dilate(old_full.astype(np.uint8), AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool)
+                    ext = og & ~mw & ~keep
+                    if ext.any() and ext.sum() <= 0.5 * mw.sum():
+                        mw = mw | ext
+                        ext_full = cv2.resize(ext.astype(np.uint8), (x1 - x0, y1 - y0),
+                                              interpolation=cv2.INTER_NEAREST).astype(bool)
+                        ue[y0:y1, x0:x1] |= ext_full
+                        area_grown = int(ext_full.sum())
+                    old_obj = old_full & mw
+                    # o objeto novo nasce na pegada do antigo (mesma escala e lugar), não no retângulo inteiro: com a
+                    # área toda o gerador enchia o retângulo (mesa enorme por cima da poltrona, colagem "area")
+                    if old_obj.sum() >= EDIT_FOOTPRINT_MIN * mw.sum():
+                        foot = cv2.dilate(old_obj.astype(np.uint8),
+                                          AL._disk(max(2, int(EDIT_FOOTPRINT_GROW * dw)))).astype(bool) & mw & ~keep
+                        weight = AL.feather_alpha(foot, max(4.0, 0.03 * dw), inside=0.5)
+                        weight[foot & (cv2.erode(foot.astype(np.uint8), AL._disk(2)) > 0)] = 1.0
+                        hole = weight > 0.5
+                        footprint = True
+                    ring = cv2.dilate(mw.astype(np.uint8), AL._disk(max(2, int(0.025 * dw)))).astype(bool) & ~mw
+                if old_obj is not None and old_obj.any():
                     # SÓ o objeto antigo sai (crescido um pouco para os pés finos e a sombra), nunca o móvel vizinho
                     # que o retângulo pegou: o removedor na área inteira deixava um borrão por cima do braço do sofá
-                    keep = cv2.dilate(protect.astype(np.uint8), AL._disk(2)).astype(bool)
                     od = cv2.dilate(old_obj.astype(np.uint8),
-                                    AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool) & hole & ~keep
+                                    AL._disk(max(2, int(EDIT_OLD_GROW * dw)))).astype(bool) & mw & ~keep
                     plate, fill_kind = _edit_prefill(crop_ref, od, inpainter, auto=engine is None, device=dev)
                     # a geração parte da foto SEM o objeto antigo (nítida no resto): a borda suave dos latentes
                     # mistura a foto de verdade, não um borrão
@@ -1253,6 +1279,8 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
         base, fill_kind = _edit_prefill(crop_ref, hole, inpainter, auto=engine is None, device=dev)
     if plate is None:
         plate = base
+    if area_grown:
+        alpha = AL.feather_alpha(ue, fr, inside=1.0)
     t_gen = time.perf_counter()
     try:
         for i, (sd, pr) in enumerate(zip(seeds, prompts)):
@@ -1302,7 +1330,8 @@ def edit_area(photo, mask, prompt: str = "", estilo: str | None = None, ambiente
            "proporcao": {"foto": round(Wf / Hf, 4), "recorte": round((x1 - x0) / (y1 - y0), 4),
                          "geracao": round(W / H, 4)},
            "margem_px": grow, "preenchimento": fill_kind, "colagem": modes or None,
-           "sam_partes": sam_grown, "textura_refeita": plate_refined or None,
+           "sam_partes": sam_grown, "textura_refeita": plate_refined or None, "area_crescida_px": area_grown,
+           "pegada_do_objeto_antigo": footprint,
            "tamanho_geracao": [W, H], "tamanho": [Wf, Hf], "sementes": seeds, "passos": steps,
            "preset": asdict(fp), "prompts": [asdict(p) for p in prompts], "saidas": outputs, "tempos": timings}
     report = out / "design.json"
