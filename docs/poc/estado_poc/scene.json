@@ -1,0 +1,715 @@
+{
+ "version": 1,
+ "photo_path": "/tmp/claude-0/poc_sala/plate.png",
+ "width": 960,
+ "height": 720,
+ "intrinsics": {
+  "width": 960,
+  "height": 720,
+  "fx": 758.8438415527344,
+  "fy": 758.8438415527344,
+  "cx": 480.0,
+  "cy": 360.0
+ },
+ "cam_to_room": [
+  [
+   0.8064882280964734,
+   0.0868386033821411,
+   -0.5848382860464694,
+   0.0
+  ],
+  [
+   0.5912459413656286,
+   -0.12219676910993464,
+   0.7971801555414562,
+   0.0
+  ],
+  [
+   -0.002239337656646967,
+   -0.9886996746063232,
+   -0.14989322423934937,
+   1.6875025375421986
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "room": {
+  "walls": [
+   {
+    "id": 0,
+    "p0": [
+     -3.3569685511586944,
+     5.015121429625523
+    ],
+    "p1": [
+     -3.3569685511586944,
+     1.2807543104328645
+    ],
+    "normal": [
+     1.0,
+     -0.0
+    ],
+    "height": 2.45,
+    "support": 30143,
+    "rms": 0.01977922029707847
+   },
+   {
+    "id": 1,
+    "p0": [
+     -1.7004210335887344,
+     5.096434732073638
+    ],
+    "p1": [
+     -3.2408628926772742,
+     5.096434732073638
+    ],
+    "normal": [
+     0.0,
+     -1.0
+    ],
+    "height": 2.45,
+    "support": 14941,
+    "rms": 0.017518268792066385
+   },
+   {
+    "id": 2,
+    "p0": [
+     -0.6689663163508734,
+     5.873711869227298
+    ],
+    "p1": [
+     -1.7322621030994985,
+     5.157884157247609
+    ],
+    "normal": [
+     0.5584557517639456,
+     -0.8295343111178505
+    ],
+    "height": 2.45,
+    "support": 6228,
+    "rms": 0.04535034326898435
+   },
+   {
+    "id": 3,
+    "p0": [
+     -1.0272975686940022,
+     5.849302209624125
+    ],
+    "p1": [
+     -0.317042229673733,
+     5.766066592472113
+    ],
+    "normal": [
+     -0.11639457594561518,
+     -0.9932030520948072
+    ],
+    "height": 2.45,
+    "support": 1790,
+    "rms": 0.03053078121428555
+   }
+  ],
+  "openings": [
+   {
+    "kind": "window",
+    "wall": 0,
+    "s0": 3.130054380065518,
+    "s1": 3.7158679430515997,
+    "z0": 0.851550057904336,
+    "z1": 2.348696474032485,
+    "pixel_bbox": [
+     0,
+     114,
+     228,
+     726
+    ],
+    "mean_rgb": [
+     0.697449803352356,
+     0.6937143206596375,
+     0.7146973609924316
+    ],
+    "luminance": 0.6960234597921371
+   },
+   {
+    "kind": "window",
+    "wall": 0,
+    "s0": 1.3086732281249522,
+    "s1": 2.282897573809174,
+    "z0": 0.8234089830898441,
+    "z1": 2.3495425706669164,
+    "pixel_bbox": [
+     441,
+     188,
+     645,
+     642
+    ],
+    "mean_rgb": [
+     0.7758116126060486,
+     0.7661037445068359,
+     0.7683362364768982
+    ],
+    "luminance": 0.7683288231849671
+   },
+   {
+    "kind": "window",
+    "wall": 3,
+    "s0": 0.2493147526168546,
+    "s1": 0.6485158273057889,
+    "z0": 0.7505894793735998,
+    "z1": 2.337657813999501,
+    "pixel_bbox": [
+     1423,
+     220,
+     1535,
+     623
+    ],
+    "mean_rgb": [
+     0.518491268157959,
+     0.47302037477493286,
+     0.4773910343647003
+    ],
+    "luminance": 0.48300304833054536
+   },
+   {
+    "kind": "window",
+    "wall": 2,
+    "s0": 0.3820134567396448,
+    "s1": 1.1783601481454289,
+    "z0": 0.7945801517583355,
+    "z1": 2.3354386796307045,
+    "pixel_bbox": [
+     1176,
+     225,
+     1385,
+     605
+    ],
+    "mean_rgb": [
+     0.7198901772499084,
+     0.6848897933959961,
+     0.6816144585609436
+    ],
+    "luminance": 0.692094395828247
+   }
+  ],
+  "ceiling_height": 2.45,
+  "extent": [
+   -3.8544181532807973,
+   0.6040984550733739,
+   0.3955818467192027,
+   6.054098455073374
+  ]
+ },
+ "occluders": null,
+ "albedo_scale": 2.033723038356678,
+ "albedo_mean": {
+  "floor": [
+   0.3467040956020355,
+   0.26225072145462036,
+   0.2158605307340622
+  ],
+  "wall": [
+   0.327778160572052,
+   0.24228119850158691,
+   0.15896086394786835
+  ],
+  "ceiling": [
+   0.37626221776008606,
+   0.30946895480155945,
+   0.23455065488815308
+  ]
+ },
+ "illuminant": [
+  1.1549104452133179,
+  0.976520836353302,
+  0.7764312028884888
+ ],
+ "lighting": {
+  "calibrate": true,
+  "calib_mask_path": "/tmp/claude-0/poc_sala/calib_mask.png",
+  "window_color": [
+   1.1549104452133179,
+   0.976520836353302,
+   0.7764312028884888
+  ],
+  "world_color": [
+   1.1549104452133179,
+   0.976520836353302,
+   0.7764312028884888
+  ],
+  "sun": {
+   "direction": [
+    -0.45752563963404125,
+    0.41195793629644706,
+    0.788010753606722
+   ],
+   "angle_deg": 0.6,
+   "color": [
+    1.2011068630218507,
+    0.976520836353302,
+    0.7298453307151794
+   ]
+  }
+ },
+ "items": [
+  {
+   "id": "rug_0",
+   "role": "rug",
+   "asset_id": "proc:rug",
+   "position": [
+    -1.9989,
+    3.2672,
+    0.0
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    2.0,
+    1.4,
+    0.012
+   ],
+   "mount": "floor",
+   "wall_id": null,
+   "parent": null,
+   "order": 0,
+   "params": {
+    "color": [
+     0.4076,
+     0.3048,
+     0.2647
+    ],
+    "pattern_color": [
+     0.7595,
+     0.7243,
+     0.6882
+    ],
+    "pattern": "geometrico",
+    "thickness": 0.012,
+    "size": [
+     2.0,
+     1.4,
+     0.012
+    ]
+   },
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "procedural",
+    "kind": "rug",
+    "params": {
+     "size": [
+      2.0,
+      1.4,
+      0.012
+     ],
+     "pattern": "berber",
+     "color": "#684e43",
+     "accent": "#c2b9af"
+    }
+   },
+   "start": 0.8,
+   "duration": 1.5,
+   "motion": "unroll"
+  },
+  {
+   "id": "sofa_0",
+   "role": "sofa",
+   "asset_id": "ph:sofa_02",
+   "position": [
+    -2.9185,
+    2.9781,
+    0.0
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    1.807,
+    0.817,
+    0.709
+   ],
+   "mount": "floor",
+   "wall_id": 0,
+   "parent": null,
+   "order": 1,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/sofa_02/1k/sofa_02_1k.gltf"
+   },
+   "start": 1.625,
+   "duration": 1.15,
+   "motion": "drop"
+  },
+  {
+   "id": "armchair_0",
+   "role": "armchair",
+   "asset_id": "ph:modern_arm_chair_01",
+   "position": [
+    -2.2725,
+    4.4538,
+    0.0
+   ],
+   "yaw_deg": 3.845,
+   "scale": 1.0,
+   "size": [
+    0.82,
+    0.986,
+    1.022
+   ],
+   "mount": "floor",
+   "wall_id": null,
+   "parent": null,
+   "order": 2,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/modern_arm_chair_01/1k/modern_arm_chair_01_1k.gltf"
+   },
+   "start": 2.2575,
+   "duration": 1.0,
+   "motion": "drop"
+  },
+  {
+   "id": "side_table_0",
+   "role": "side_table",
+   "asset_id": "ph:side_table_01",
+   "position": [
+    -3.102,
+    1.7496,
+    0.0
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    0.55,
+    0.45,
+    0.55
+   ],
+   "mount": "floor",
+   "wall_id": 0,
+   "parent": null,
+   "order": 3,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/side_table_01/1k/side_table_01_1k.gltf"
+   },
+   "start": 2.8075,
+   "duration": 0.85,
+   "motion": "drop"
+  },
+  {
+   "id": "coffee_table_0",
+   "role": "coffee_table",
+   "asset_id": "ph:modern_coffee_table_01",
+   "position": [
+    -1.7611,
+    2.9781,
+    0.0
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    1.201,
+    0.6,
+    0.389
+   ],
+   "mount": "floor",
+   "wall_id": null,
+   "parent": null,
+   "order": 4,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/modern_coffee_table_01/1k/modern_coffee_table_01_1k.gltf"
+   },
+   "start": 3.275,
+   "duration": 0.95,
+   "motion": "drop"
+  },
+  {
+   "id": "floor_lamp_0",
+   "role": "floor_lamp",
+   "asset_id": "proc:floor_lamp",
+   "position": [
+    -3.117,
+    4.1716,
+    0.0
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    0.42,
+    0.42,
+    1.62
+   ],
+   "mount": "floor",
+   "wall_id": 0,
+   "parent": null,
+   "order": 5,
+   "params": {
+    "shade_color": [
+     0.9265,
+     0.8945,
+     0.8549
+    ],
+    "metal_color": [
+     0.1216,
+     0.1216,
+     0.1294
+    ],
+    "size": [
+     0.42,
+     0.42,
+     1.62
+    ]
+   },
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "procedural",
+    "kind": "floor_lamp",
+    "params": {
+     "size": [
+      0.42,
+      0.42,
+      1.62
+     ],
+     "metal": "black",
+     "shade_color": "#ece4da"
+    }
+   },
+   "start": 3.7975,
+   "duration": 0.9,
+   "motion": "drop"
+  },
+  {
+   "id": "plant_medium_0",
+   "role": "plant_medium",
+   "asset_id": "ph:potted_plant_02",
+   "position": [
+    -1.445,
+    4.6743,
+    0.0
+   ],
+   "yaw_deg": 3.845,
+   "scale": 1.0,
+   "size": [
+    0.701,
+    0.657,
+    0.841
+   ],
+   "mount": "floor",
+   "wall_id": null,
+   "parent": null,
+   "order": 6,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/potted_plant_02/1k/potted_plant_02_1k.gltf"
+   },
+   "start": 4.2925,
+   "duration": 1.0,
+   "motion": "grow"
+  },
+  {
+   "id": "wall_art_1",
+   "role": "wall_art",
+   "asset_id": "ph:hanging_picture_frame_01",
+   "position": [
+    -2.7699,
+    5.0839,
+    1.08
+   ],
+   "yaw_deg": 0.0,
+   "scale": 1.0,
+   "size": [
+    0.593,
+    0.015,
+    0.84
+   ],
+   "mount": "wall",
+   "wall_id": 1,
+   "parent": null,
+   "order": 7,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/hanging_picture_frame_01/1k/hanging_picture_frame_01_1k.gltf"
+   },
+   "start": 4.8425,
+   "duration": 0.9,
+   "motion": "slide"
+  },
+  {
+   "id": "wall_art_0",
+   "role": "wall_art",
+   "asset_id": "ph:hanging_picture_frame_01",
+   "position": [
+    -2.0969,
+    5.0839,
+    1.08
+   ],
+   "yaw_deg": 0.0,
+   "scale": 1.0,
+   "size": [
+    0.593,
+    0.015,
+    0.84
+   ],
+   "mount": "wall",
+   "wall_id": 1,
+   "parent": null,
+   "order": 8,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/hanging_picture_frame_01/1k/hanging_picture_frame_01_1k.gltf"
+   },
+   "start": 5.3375,
+   "duration": 0.9,
+   "motion": "slide"
+  },
+  {
+   "id": "pillows_0",
+   "role": "pillows",
+   "asset_id": "ph:throw_pillows_01",
+   "position": [
+    -2.8685,
+    2.9791,
+    0.406
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    1.021,
+    0.627,
+    0.45
+   ],
+   "mount": "on_top",
+   "wall_id": null,
+   "parent": "sofa_0",
+   "order": 9,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/throw_pillows_01/1k/throw_pillows_01_1k.gltf"
+   },
+   "start": 5.8325,
+   "duration": 0.7,
+   "motion": "drop"
+  },
+  {
+   "id": "vase_0",
+   "role": "vase",
+   "asset_id": "ph:ceramic_vase_01",
+   "position": [
+    -1.9281,
+    3.4351,
+    0.39
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    0.204,
+    0.206,
+    0.401
+   ],
+   "mount": "on_top",
+   "wall_id": null,
+   "parent": "coffee_table_0",
+   "order": 10,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/ceramic_vase_01/1k/ceramic_vase_01_1k.gltf"
+   },
+   "start": 6.102,
+   "duration": 0.6,
+   "motion": "drop"
+  },
+  {
+   "id": "books_0",
+   "role": "books",
+   "asset_id": "ph:book_encyclopedia_set_01",
+   "position": [
+    -1.5726,
+    3.2616,
+    0.39
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    0.551,
+    0.163,
+    0.237
+   ],
+   "mount": "on_top",
+   "wall_id": null,
+   "parent": "coffee_table_0",
+   "order": 11,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/book_encyclopedia_set_01/1k/book_encyclopedia_set_01_1k.gltf"
+   },
+   "start": 6.342,
+   "duration": 0.7,
+   "motion": "drop"
+  },
+  {
+   "id": "bowl_0",
+   "role": "bowl",
+   "asset_id": "ph:wooden_bowl_01",
+   "position": [
+    -1.7611,
+    2.7081,
+    0.39
+   ],
+   "yaw_deg": 90.0,
+   "scale": 1.0,
+   "size": [
+    0.313,
+    0.309,
+    0.093
+   ],
+   "mount": "on_top",
+   "wall_id": null,
+   "parent": "coffee_table_0",
+   "order": 12,
+   "params": {},
+   "yaw_fix": 0.0,
+   "source": {
+    "type": "gltf",
+    "path": "/home/user/mobilia_data/assets/polyhaven/wooden_bowl_01/1k/wooden_bowl_01_1k.gltf"
+   },
+   "start": 6.6115,
+   "duration": 0.6,
+   "motion": "drop"
+  }
+ ],
+ "render": {
+  "fps": 24,
+  "n_frames": 251,
+  "samples": 24,
+  "device": "CPU",
+  "denoise": true,
+  "motion_blur": true,
+  "shutter": 0.5,
+  "seed": 7,
+  "threads": 0,
+  "out_dir": "/tmp/claude-0/poc_sala/render",
+  "border_margin_m": 0.6,
+  "calib_width": 240
+ }
+}

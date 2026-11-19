@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240.20 100" width="240" height="100">
+  <title>7xAi</title>
+  <defs>
+    <linearGradient id="word" x1="0.00" y1="0" x2="127.20" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#DDD6FE"/><stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+  </defs>
+  <path fill="#ECEFF2" fill-rule="evenodd" d="M160.50 0.00 L181.50 0.00 L207.80 100.00 L187.95 100.00 L182.79 80.40 L159.21 80.40 L154.05 100.00 L134.20 100.00ZM178.48 64.00 L171.00 35.56 L163.52 64.00ZM220.20 30.00 L240.20 30.00 L240.20 100.00 L220.20 100.00ZM220.20 0.00 L240.20 0.00 L240.20 20.00 L220.20 20.00Z"/>
+  <path fill="url(#word)" fill-rule="evenodd" d="M0.00 0.00 L60.00 0.00 L30.00 100.00 L9.95 100.00 L33.95 20.00 L0.00 20.00ZM66.00 30.00 L87.19 30.00 L127.20 100.00 L106.01 100.00ZM106.01 30.00 L127.20 30.00 L109.50 60.97 L98.90 42.43ZM94.30 87.57 L87.19 100.00 L66.00 100.00 L83.70 69.03Z"/>
+</svg>

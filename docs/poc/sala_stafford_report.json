@@ -1,0 +1,599 @@
+{
+ "versao": "0.1.0",
+ "data": "20261116-040259",
+ "foto": {
+  "arquivo": "tests/fixtures/photos/sala_vazia_stafford.jpg",
+  "original": [
+   1920,
+   1440
+  ],
+  "placa_video": [
+   960,
+   720
+  ],
+  "reduzida": true
+ },
+ "ambiente": "sala",
+ "qualidade": {
+  "name": "previa",
+  "long_edge": 960,
+  "samples": 24,
+  "fps": 24,
+  "texture_res": "1k",
+  "motion_blur": true
+ },
+ "hardware": {
+  "os": "Linux 6.18.44-fc-v470 (x86_64)",
+  "cpu": "x86_64",
+  "cpu_threads": 4,
+  "ram_gb": 16.9,
+  "gpus": [],
+  "torch_cuda": false,
+  "torch_version": "2.15.0+cpu",
+  "nvenc": null
+ },
+ "perfil": {
+  "name": "cpu",
+  "torch_device": "cpu",
+  "use_fp16": false,
+  "geometry_model": "Ruicheng/moge-2-vitb-normal",
+  "geometry_tokens": 1500,
+  "render_device": "CPU",
+  "render_samples": 32,
+  "max_long_edge": 1280,
+  "description": "Sem GPU NVIDIA utilizável: modo CPU (lento, qualidade de prévia)."
+ },
+ "sala": {
+  "camera_altura_m": 1.6875025375421986,
+  "pe_direito_m": 2.45,
+  "paredes": 4,
+  "aberturas": [
+   "window",
+   "window",
+   "window",
+   "window"
+  ],
+  "qualidade": {
+   "floor_inlier_frac": 1.0,
+   "floor_pixels": 489639,
+   "wall_pixels": 652742,
+   "ceiling_frac": 0.1739230685763889,
+   "n_walls": 4,
+   "wall_rms": [
+    0.01736816045343109,
+    0.015382815837886428,
+    0.0398221985843517,
+    0.026809120831554456
+   ],
+   "fov_x_deg": 64.63007885304542,
+   "manhattan_yaw_deg": -36.265030197053306,
+   "scale_cues": {
+    "ceiling_height": 2.1513483581145714,
+    "camera_height": 1.4817982912063599
+   },
+   "suggested_scale": 1.1388206799512308,
+   "scale_applied": 1.1388206799512308
+  }
+ },
+ "layout": {
+  "room_type": "sala",
+  "style": "moderno",
+  "palette": {
+   "accent": [
+    0.7098,
+    0.3765,
+    0.2431
+   ],
+   "accent_name": "terracota",
+   "accent2": [
+    0.7154,
+    0.6633,
+    0.6022
+   ],
+   "textiles": [
+    [
+     0.7098,
+     0.3765,
+     0.2431
+    ],
+    [
+     0.7154,
+     0.6633,
+     0.6022
+    ],
+    [
+     0.5184,
+     0.2932,
+     0.2031
+    ]
+   ],
+   "rug": {
+    "base": [
+     0.4076,
+     0.3048,
+     0.2647
+    ],
+    "pattern": [
+     0.7595,
+     0.7243,
+     0.6882
+    ],
+    "pattern_kind": "geometrico"
+   },
+   "wood": [
+    0.3686,
+    0.2627,
+    0.1961
+   ],
+   "wood_name": "nogueira",
+   "metal": [
+    0.1216,
+    0.1216,
+    0.1294
+   ],
+   "metal_name": "preto",
+   "linen": [
+    0.9353,
+    0.9189,
+    0.899
+   ],
+   "lamp_shade": [
+    0.9265,
+    0.8945,
+    0.8549
+   ],
+   "floor": {
+    "material": "carpete",
+    "tone": "claro",
+    "rgb": [
+     0.6048,
+     0.5276,
+     0.4727
+    ]
+   },
+   "wall": {
+    "rgb": [
+     0.6098,
+     0.5359,
+     0.4439
+    ]
+   }
+  },
+  "items": [
+   {
+    "id": "rug_0",
+    "role": "rug",
+    "asset_id": "proc:rug",
+    "position": [
+     -1.9989,
+     3.2672,
+     0.0
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     2.0,
+     1.4,
+     0.012
+    ],
+    "mount": "floor",
+    "wall_id": null,
+    "parent": null,
+    "order": 0,
+    "params": {
+     "color": [
+      0.4076,
+      0.3048,
+      0.2647
+     ],
+     "pattern_color": [
+      0.7595,
+      0.7243,
+      0.6882
+     ],
+     "pattern": "geometrico",
+     "thickness": 0.012,
+     "size": [
+      2.0,
+      1.4,
+      0.012
+     ]
+    }
+   },
+   {
+    "id": "sofa_0",
+    "role": "sofa",
+    "asset_id": "ph:sofa_02",
+    "position": [
+     -2.9185,
+     2.9781,
+     0.0
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     1.807,
+     0.817,
+     0.709
+    ],
+    "mount": "floor",
+    "wall_id": 0,
+    "parent": null,
+    "order": 1,
+    "params": {}
+   },
+   {
+    "id": "armchair_0",
+    "role": "armchair",
+    "asset_id": "ph:modern_arm_chair_01",
+    "position": [
+     -2.2725,
+     4.4538,
+     0.0
+    ],
+    "yaw_deg": 3.845,
+    "scale": 1.0,
+    "size": [
+     0.82,
+     0.986,
+     1.022
+    ],
+    "mount": "floor",
+    "wall_id": null,
+    "parent": null,
+    "order": 2,
+    "params": {}
+   },
+   {
+    "id": "side_table_0",
+    "role": "side_table",
+    "asset_id": "ph:side_table_01",
+    "position": [
+     -3.102,
+     1.7496,
+     0.0
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     0.55,
+     0.45,
+     0.55
+    ],
+    "mount": "floor",
+    "wall_id": 0,
+    "parent": null,
+    "order": 3,
+    "params": {}
+   },
+   {
+    "id": "coffee_table_0",
+    "role": "coffee_table",
+    "asset_id": "ph:modern_coffee_table_01",
+    "position": [
+     -1.7611,
+     2.9781,
+     0.0
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     1.201,
+     0.6,
+     0.389
+    ],
+    "mount": "floor",
+    "wall_id": null,
+    "parent": null,
+    "order": 4,
+    "params": {}
+   },
+   {
+    "id": "floor_lamp_0",
+    "role": "floor_lamp",
+    "asset_id": "proc:floor_lamp",
+    "position": [
+     -3.117,
+     4.1716,
+     0.0
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     0.42,
+     0.42,
+     1.62
+    ],
+    "mount": "floor",
+    "wall_id": 0,
+    "parent": null,
+    "order": 5,
+    "params": {
+     "shade_color": [
+      0.9265,
+      0.8945,
+      0.8549
+     ],
+     "metal_color": [
+      0.1216,
+      0.1216,
+      0.1294
+     ],
+     "size": [
+      0.42,
+      0.42,
+      1.62
+     ]
+    }
+   },
+   {
+    "id": "plant_medium_0",
+    "role": "plant_medium",
+    "asset_id": "ph:potted_plant_02",
+    "position": [
+     -1.445,
+     4.6743,
+     0.0
+    ],
+    "yaw_deg": 3.845,
+    "scale": 1.0,
+    "size": [
+     0.701,
+     0.657,
+     0.841
+    ],
+    "mount": "floor",
+    "wall_id": null,
+    "parent": null,
+    "order": 6,
+    "params": {}
+   },
+   {
+    "id": "wall_art_1",
+    "role": "wall_art",
+    "asset_id": "ph:hanging_picture_frame_01",
+    "position": [
+     -2.7699,
+     5.0839,
+     1.08
+    ],
+    "yaw_deg": 0.0,
+    "scale": 1.0,
+    "size": [
+     0.593,
+     0.015,
+     0.84
+    ],
+    "mount": "wall",
+    "wall_id": 1,
+    "parent": null,
+    "order": 7,
+    "params": {}
+   },
+   {
+    "id": "wall_art_0",
+    "role": "wall_art",
+    "asset_id": "ph:hanging_picture_frame_01",
+    "position": [
+     -2.0969,
+     5.0839,
+     1.08
+    ],
+    "yaw_deg": 0.0,
+    "scale": 1.0,
+    "size": [
+     0.593,
+     0.015,
+     0.84
+    ],
+    "mount": "wall",
+    "wall_id": 1,
+    "parent": null,
+    "order": 8,
+    "params": {}
+   },
+   {
+    "id": "pillows_0",
+    "role": "pillows",
+    "asset_id": "ph:throw_pillows_01",
+    "position": [
+     -2.8685,
+     2.9791,
+     0.406
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     1.021,
+     0.627,
+     0.45
+    ],
+    "mount": "on_top",
+    "wall_id": null,
+    "parent": "sofa_0",
+    "order": 9,
+    "params": {}
+   },
+   {
+    "id": "vase_0",
+    "role": "vase",
+    "asset_id": "ph:ceramic_vase_01",
+    "position": [
+     -1.9281,
+     3.4351,
+     0.39
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     0.204,
+     0.206,
+     0.401
+    ],
+    "mount": "on_top",
+    "wall_id": null,
+    "parent": "coffee_table_0",
+    "order": 10,
+    "params": {}
+   },
+   {
+    "id": "books_0",
+    "role": "books",
+    "asset_id": "ph:book_encyclopedia_set_01",
+    "position": [
+     -1.5726,
+     3.2616,
+     0.39
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     0.551,
+     0.163,
+     0.237
+    ],
+    "mount": "on_top",
+    "wall_id": null,
+    "parent": "coffee_table_0",
+    "order": 11,
+    "params": {}
+   },
+   {
+    "id": "bowl_0",
+    "role": "bowl",
+    "asset_id": "ph:wooden_bowl_01",
+    "position": [
+     -1.7611,
+     2.7081,
+     0.39
+    ],
+    "yaw_deg": 90.0,
+    "scale": 1.0,
+    "size": [
+     0.313,
+     0.309,
+     0.093
+    ],
+    "mount": "on_top",
+    "wall_id": null,
+    "parent": "coffee_table_0",
+    "order": 12,
+    "params": {}
+   }
+  ],
+  "score": 50.333,
+  "notes": [
+   "Estilo moderno: carpete claro, paredes de tom médio em tons quentes; cor de destaque terracota.",
+   "Sofá encostado na parede P0, de frente para a câmera.",
+   "Sem espaço livre visível na foto para: planta grande, rack/aparador.",
+   "Pontuação: 50.3 (13 peças)."
+  ]
+ },
+ "calibracao_luz": {
+  "window_power_per_m2": 4.525647331583717,
+  "ambient_strength": 0.37248945952837,
+  "sun_strength": 0.1791832508547318,
+  "color_ratio": [
+   1.0439525601670454,
+   0.9982735361553864,
+   0.8876794046104309
+  ],
+  "rel_rms": 0.21230592683131622,
+  "pixels": 33398,
+  "seconds": 8.7
+ },
+ "sol": {
+  "direction": [
+   -0.45752563963404125,
+   0.41195793629644706,
+   0.788010753606722
+  ],
+  "elevation_deg": 52.0,
+  "azimuth_deg": 138.0,
+  "iou": 0.6736619898208122,
+  "patches": 2,
+  "windows": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "excess_ratio": 1.8147534728050232,
+  "patch_area_m2": 0.4382468803266017,
+  "precision": 0.9508083693552405,
+  "recall": 0.31102523025252254
+ },
+ "render": {
+  "dispositivo": "CPU",
+  "tempos": {
+   "total_s": 6767.0,
+   "render_s": 6757.0,
+   "rendered_frames": 176
+  }
+ },
+ "preservacao": {
+  "quadros": 251,
+  "todos_bit_exatos_fora_dos_objetos": true,
+  "max_pixels_alterados_em_um_quadro": 392212,
+  "fracao_max_alterada": 0.5674,
+  "quadros_identicos_a_foto": 20
+ },
+ "encode": {
+  "codec": "libx264",
+  "verificacao": [
+   {
+    "frame": 1,
+    "psnr_total_db": 44.25,
+    "psnr_fundo_db": 44.25
+   },
+   {
+    "frame": 125,
+    "psnr_total_db": 43.96,
+    "psnr_fundo_db": 43.15
+   },
+   {
+    "frame": 251,
+    "psnr_total_db": 44.0,
+    "psnr_fundo_db": 43.17
+   }
+  ],
+  "arquivo": "/home/user/softwareEditor/docs/poc/sala_stafford_poc.mp4",
+  "bytes": 2005322
+ },
+ "tempos_s": {
+  "preparo": 1.3,
+  "analise": 19.4,
+  "layout": 3.9,
+  "assets": 0.1,
+  "render": 6767.7,
+  "composicao_video": 46.9,
+  "verificacao": 0.8
+ },
+ "licencas_assets": [
+  "ph:book_encyclopedia_set_01",
+  "ph:ceramic_vase_01",
+  "ph:hanging_picture_frame_01",
+  "ph:modern_arm_chair_01",
+  "ph:modern_coffee_table_01",
+  "ph:potted_plant_02",
+  "ph:side_table_01",
+  "ph:sofa_02",
+  "ph:throw_pillows_01",
+  "ph:wooden_bowl_01",
+  "proc:floor_lamp",
+  "proc:rug"
+ ],
+ "previas": [
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00001.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00032.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00063.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00094.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00125.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00156.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00187.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00218.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00249.jpg",
+  "/tmp/claude-0/poc_sala3/quadros/quadro_00251.jpg"
+ ],
+ "plataforma": "Linux-6.18.44-fc-v470-x86_64-with-glibc2.39"
+}

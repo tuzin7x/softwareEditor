@@ -1,0 +1,78 @@
+name: Build Windows (.exe + instalador, só artefatos)
+# Builds de DESENVOLVIMENTO: geram o instalador e a pasta do programa como artefatos do Actions (ficam 14 dias na
+# página da execução). NUNCA publicam Release nem criam tag. Versões oficiais saem só do release.yml.
+on:
+  push:
+    branches: ["claude/**", "feature/**", "main"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Dependências da interface (versões fixas)
+        run: |
+          python -m pip install -r packaging/ci/requirements-build.txt
+          python -m pip check
+      - name: Versão
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (python packaging/win_version.py).Trim()
+          "versao=$v" >> $env:GITHUB_OUTPUT
+      - name: PyInstaller (onedir)
+        run: python -m PyInstaller --noconfirm --distpath dist --workpath build packaging/7xai.spec
+      - name: PyInstaller (portátil, arquivo único)
+        shell: pwsh
+        run: |
+          $env:SEVENXAI_ONEFILE = "1"
+          python -m PyInstaller --noconfirm --distpath dist-portable --workpath build-portable packaging/7xai.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller (portátil) falhou" }
+      - name: Conteúdo do executável (módulos como o Lead Finder dentro; nada do motor)
+        env:
+          PYTHONIOENCODING: utf-8      # acentos legíveis no log do Windows
+        run: python scripts/check_bundle.py build/7xai/PYZ-00.toc build-portable/7xai/PYZ-00.toc
+      - name: Autoteste dos executáveis (abre sem tela; reprova se um módulo não carregar)
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          foreach ($exe in @("dist\7xAi\7xAi.exe", "dist-portable\7xAi.exe")) {
+            $p = Start-Process -FilePath $exe -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "selftest de $exe falhou: $($p.ExitCode)" }
+            Write-Host ("OK: {0} ({1:N1} MB no arquivo principal)" -f $exe, ((Get-Item $exe).Length / 1MB))
+          }
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.versao }}" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup falhou" }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 7xAi-Setup
+          path: dist/7xAi-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 7xAi-Portable
+          path: dist-portable/7xAi.exe
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 7xAi-onedir
+          path: dist/7xAi
+          if-no-files-found: error
+          retention-days: 14

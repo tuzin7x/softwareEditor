@@ -1,0 +1,22 @@
+{
+  "places": [
+    {"id": "ChIJTESTE0000000000000001", "displayName": {"text": "Alfa Exemplo Imóveis", "languageCode": "pt"},
+     "formattedAddress": "Rua Fictícia, 100 - Centro, Campinas - SP, 13000-000, Brasil",
+     "addressComponents": [
+       {"longText": "Campinas", "shortText": "Campinas", "types": ["administrative_area_level_2", "political"]},
+       {"longText": "São Paulo", "shortText": "SP", "types": ["administrative_area_level_1", "political"]},
+       {"longText": "13000-000", "shortText": "13000-000", "types": ["postal_code"]}],
+     "nationalPhoneNumber": "(19) 99900-0001", "internationalPhoneNumber": "+55 19 99900-0001",
+     "websiteUri": "https://alfa-exemplo.com.br/", "types": ["real_estate_agency", "point_of_interest"],
+     "primaryTypeDisplayName": {"text": "Imobiliária"}, "businessStatus": "OPERATIONAL"},
+    {"id": "ChIJTESTE0000000000000002", "displayName": {"text": "Delta Negócios Imobiliários"},
+     "formattedAddress": "Av. Teste, 5 - Campinas - SP, Brasil",
+     "addressComponents": [
+       {"longText": "Campinas", "shortText": "Campinas", "types": ["administrative_area_level_2"]},
+       {"longText": "São Paulo", "shortText": "SP", "types": ["administrative_area_level_1"]}],
+     "nationalPhoneNumber": "(19) 3200-0004", "types": ["real_estate_agency"], "businessStatus": "OPERATIONAL"},
+    {"id": "ChIJTESTE0000000000000003", "displayName": {"text": "Imobiliária Fechada de Teste"},
+     "types": ["real_estate_agency"], "businessStatus": "CLOSED_PERMANENTLY"}
+  ],
+  "nextPageToken": "TOKEN_PAGINA_2"
+}

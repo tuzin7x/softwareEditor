@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <title>7xAi</title>
+  <defs>
+    <linearGradient id="edge" x1="5" y1="2" x2="43" y2="46" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#C084FC"/><stop offset="0.55" stop-color="#7C3AED"/><stop offset="1" stop-color="#4C1D95"/></linearGradient>
+    <linearGradient id="facet" x1="10" y1="8" x2="38" y2="40" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#C084FC"/><stop offset="0.55" stop-color="#7C3AED"/><stop offset="1" stop-color="#4C1D95"/></linearGradient>
+  </defs>
+  <polygon points="24,2 43,13 43,35 24,46 5,35 5,13" fill="#120B22" stroke="url(#edge)" stroke-width="2.5"/>
+  <polygon points="24,8 38,16 38,32 24,40 10,32 10,16" fill="url(#facet)" opacity="0.18"/>
+  <path d="M24 3L24 8M24 40L24 45M5.5 24L10 24M38 24L42.5 24" stroke="#C4B5FD" stroke-width="1.6" stroke-linecap="round"/>
+  <polyline points="14,16 25,16 18,33" fill="none" stroke="#F5F3FF" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M26 23L34 32M34 23L26 32" stroke="#C084FC" stroke-width="3.2" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,7 @@
+# Instalado com `pip install --no-deps` depois de runtime-cuda.txt/runtime-cpu.txt.
+# Arquivos ZIP do GitHub com commit fixo: dispensa o Git no computador do cliente.
+# --no-deps porque o pacote "moge" (3.0.0) declara dependências do MoGe-3 (flex-gemm, pipeline,
+# gradio, via git+) que o MoGe-2 usado aqui não importa; as que ele importa (torch, numpy,
+# scipy, opencv, huggingface_hub, tqdm) já estão nos arquivos principais.
+moge @ https://github.com/microsoft/MoGe/archive/74fbce054ebed49800de42d0ad0e83495065719a.zip
+utils3d_moge @ https://github.com/EasternJournalist/utils3d-moge/archive/62f09d58509485564e24d5d9f6aac9ee9ebc0c37.zip

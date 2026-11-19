@@ -1,0 +1,54 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.partial.mp4
+.venv/
+/work/
+/jobs/
+.venv-build/
+MobiliaStudio_codigo.zip
+
+# --- caches de ferramentas e relatórios de cobertura
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- pacotes, logs e rascunhos locais (arquivos já rastreados não são afetados)
+/*.zip
+*.log
+!docs/poc/estado_poc/progresso.log
+/scratch/
+/tmp/
+*.tmp
+*.bak
+
+# --- segredos e configuração local: chaves de API NUNCA entram no repositório
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+config.local.json
+secrets/
+
+# --- bancos de dados locais (ex.: CRM de módulos; os dados ficam na pasta do app, não no repo)
+*.db
+*.sqlite
+*.sqlite3
+
+# --- dados pessoais: fotos do usuário nunca vão para o repositório
+usuario_*
+
+# --- editores e sistema operacional
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

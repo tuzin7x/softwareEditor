@@ -1,0 +1,23 @@
+# Variante sem GPU NVIDIA (modo CPU, lento) — mesmas dependências com PyTorch CPU.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0
+torchvision==0.29.2
+bpy==5.3.0
+transformers==5.23.0
+# Redesenho de ambientes (fluxo principal): SDXL + ControlNet pelo diffusers; accelerate carrega os pesos sem
+# duplicar a RAM; safetensors lê os arquivos .safetensors. Versões testadas com o torch e o transformers acima.
+diffusers==0.43.0
+accelerate==1.16.0
+safetensors==0.8.0
+huggingface_hub
+numpy
+scipy
+pillow
+opencv-python-headless
+shapely
+OpenEXR
+imageio-ffmpeg
+nvidia-ml-py
+tqdm
+# MoGe-2 e utils3d_moge: instalados à parte, sem dependências, por runtime-nodeps.txt
+# (ZIP com commit fixo: não exige Git no computador do cliente).
