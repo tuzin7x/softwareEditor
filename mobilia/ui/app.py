@@ -46,7 +46,8 @@ TAGLINE = "Redesenho de ambientes por IA, a partir de uma única foto"
 CATALOG: dict[str, dict[str, str]] = {
     "funcoes": {"mudar_estilo": "Mudar estilo", "reforma": "Reforma completa", "redesign_simples": "Redesign simples",
                 "mobiliar": "Mobiliar ambiente vazio", "editar_area": "Editar área", "fachada": "Fachada",
-                "evento": "Decoração de evento", "texto": "Texto para ambiente", "melhorar": "Melhorar foto"},
+                "evento": "Decoração de evento", "texto": "Texto para ambiente", "melhorar": "Melhorar foto",
+                "esvaziar": "Esvaziar ambiente"},
     "estilos": {"moderno": "Moderno", "contemporaneo": "Contemporâneo", "escandinavo": "Escandinavo",
                 "minimalista": "Minimalista", "industrial": "Industrial", "classico": "Clássico", "luxo": "Luxo",
                 "boho": "Boho", "japandi": "Japandi", "rustico": "Rústico", "costeiro": "Costeiro",
@@ -64,6 +65,14 @@ QUALITIES = ("final", "rapido")
 NEEDS_PHOTO = {k for k in CATALOG["funcoes"] if k != "texto"}
 VIDEO_FORMATS = {"16x9": ("Horizontal 16:9", "1920 × 1080 · YouTube, TV e apresentações"),
                  "9x16": ("Vertical 9:16", "1080 × 1920 · Reels, Stories, TikTok e WhatsApp")}
+# "Vídeo: móveis entrando" (modo B a partir do "Esvaziar ambiente"): o formato da foto ou um recorte
+FURNITURE_FORMATS = {"original": ("Formato da foto", "Sem recorte · o vídeo termina exatamente na sua foto"),
+                     **VIDEO_FORMATS}
+# ambientes da interface -> tipos de ambiente do motor de vídeo (``jobs.ROOM_TYPES``)
+VIDEO_ROOMS = {"sala": "sala", "quarto": "quarto", "cozinha": "cozinha", "banheiro": "banheiro",
+               "escritorio": "escritorio", "sala_jantar": "sala_jantar", "varanda": "sala", "fachada": "sala"}
+# funções sem estilo (o "Esvaziar ambiente" só pede o tipo de ambiente)
+NO_STYLE = ("evento", "melhorar", "esvaziar")
 DESIGN_STAGES = [("preparo", "Preparando a foto"), ("analise", "Analisando o ambiente"),
                  ("geracao", "Gerando as versões"), ("final", "Finalizando")]
 TEXT_STAGES = [("preparo", "Preparando"), ("geracao", "Gerando as versões"), ("final", "Finalizando")]
@@ -234,6 +243,25 @@ def upscale_args(image: str, out: str) -> list[str]:
     return ["--image", str(image), "--out", str(out), "--json"]
 
 
+def furniture_video_args(photo: str, empty: str | None, room: str, out: str, fmt: str, work_dir: str,
+                         accept_weak: bool = False, fabric: bool = True) -> list[str]:
+    """Argumentos de ``mobilia.cli run`` para o vídeo "móveis entrando" (modo B): começa no cômodo vazio
+    escolhido (``empty``), os móveis reais da foto entram peça por peça e o vídeo termina na foto."""
+    if fmt not in FURNITURE_FORMATS:
+        raise ValueError(f"Formato de vídeo inválido: {fmt!r}")
+    if not isinstance(photo, str) or not Path(photo).is_file():
+        raise ValueError("Foto original não encontrada.")
+    a = ["--photo", str(photo), "--room", VIDEO_ROOMS.get(room, "sala"), "--out", str(out), "--mode", "B",
+         "--quality", "final", "--work-dir", str(work_dir), "--formato", fmt]
+    if empty:
+        a += ["--sala-vazia", str(empty)]
+    if accept_weak:
+        a.append("--aceitar-placa-fraca")
+    if not fabric:
+        a.append("--sem-tecido")
+    return a + ["--json"]
+
+
 def showcase_args(before: str, afters: list[str], out: str, fmt: str) -> list[str]:
     if fmt not in VIDEO_FORMATS:
         raise ValueError(f"Formato de vídeo inválido: {fmt!r}")
@@ -375,7 +403,7 @@ class Page(QFrame):
 # =============================================================================================== janela
 
 class MainWindow(QMainWindow):
-    P_PHOTO, P_FUNC, P_STYLE, P_PROGRESS, P_RESULTS, P_EDIT, P_VIDEO, P_ENHANCE, P_BATCH = range(9)
+    P_PHOTO, P_FUNC, P_STYLE, P_PROGRESS, P_RESULTS, P_EDIT, P_VIDEO, P_ENHANCE, P_BATCH, P_FVIDEO = range(10)
     L_DROP, L_TEXT, L_PROGRESS, L_RESULT, L_MASK, L_BATCH = range(6)
     COMPACT_BELOW = 790
 
@@ -438,7 +466,8 @@ class MainWindow(QMainWindow):
         self.right = QStackedWidget(); self.right.setFixedWidth(424)
         self.pages: list[Page] = []
         for build in (self._page_photo, self._page_function, self._page_style, self._page_progress,
-                      self._page_results, self._page_edit, self._page_video, self._page_enhance, self._page_batch):
+                      self._page_results, self._page_edit, self._page_video, self._page_enhance, self._page_batch,
+                      self._page_furniture_video):
             pg = build(); self.pages.append(pg); self.right.addWidget(pg)
         body.addWidget(self.right)
 
@@ -773,6 +802,12 @@ class MainWindow(QMainWindow):
         on_click(self.btn_video, self.go, self.P_VIDEO)
         self.btn_folder = _button("Abrir pasta", "folder")
         on_click(self.btn_folder, self.open_folder)
+        self.btn_fvideo = _button("Vídeo: móveis entrando", "video", "primary", theme.ON_ACCENT)
+        self.btn_fvideo.setToolTip("Vídeo que começa neste cômodo vazio, os móveis reais da sua foto entram peça "
+                                   "por peça e termina exatamente na sua foto (MP4).")
+        on_click(self.btn_fvideo, self.go, self.P_FVIDEO)
+        self.btn_fvideo.hide()
+        b.addWidget(self.btn_fvideo); b.addSpacing(10)
         self.btn_export = _button("Exportar para anúncio", "export")
         self.btn_export.setToolTip("JPEG pronto para WhatsApp e portais (2048 px ou 4K), com o selo "
                                    "“Imagem ilustrativa” opcional.")
@@ -901,6 +936,48 @@ class MainWindow(QMainWindow):
         pg.foot.addWidget(self.video_ready); pg.foot.addWidget(self.btn_video_generate); pg.foot.addWidget(self.btn_video_back)
         self.video_format = "16x9"
         self.select_video_format("16x9")
+        return pg
+
+    def _page_furniture_video(self) -> Page:
+        pg = Page()
+        pg.head.addWidget(StepHeader("05", "VÍDEO: MÓVEIS ENTRANDO")); pg.head.addSpacing(12)
+        b = pg.body
+        intro = QLabel("O vídeo começa no cômodo vazio escolhido, os móveis reais da sua foto entram peça por peça "
+                       "(a roupa de cama e as almofadas assentam no pouso) e termina exatamente na sua foto.")
+        intro.setObjectName("body"); intro.setWordWrap(True)
+        b.addWidget(intro); b.addSpacing(18)
+        b.addWidget(_section("FORMATO")); b.addSpacing(10)
+        self.fformat_group = QButtonGroup(self); self.fformat_group.setExclusive(True)
+        self.fformat_chips = {}
+        frow = QHBoxLayout(); frow.setSpacing(8)
+        for key, (title, desc) in FURNITURE_FORMATS.items():
+            c = chip(f"{title}\n{desc.split(' · ')[0]}", height=58)
+            c.setAccessibleName(title); c.setToolTip(desc)
+            on_click(c, self.select_furniture_format, key)
+            self.fformat_group.addButton(c); self.fformat_chips[key] = c
+            frow.addWidget(c)
+        b.addLayout(frow); b.addSpacing(8)
+        self.fformat_desc = QLabel(""); self.fformat_desc.setObjectName("hint"); self.fformat_desc.setWordWrap(True)
+        b.addWidget(self.fformat_desc); b.addSpacing(18)
+        b.addWidget(_section("CÔMODO VAZIO DO INÍCIO")); b.addSpacing(10)
+        self.fvideo_base = QLabel(""); self.fvideo_base.setObjectName("hint"); self.fvideo_base.setWordWrap(True)
+        b.addWidget(self.fvideo_base); b.addSpacing(12)
+        self.chk_fabric = QCheckBox("Tecido assentando (roupa de cama, almofadas, cortinas)")
+        self.chk_fabric.setChecked(True)
+        self.chk_fabric.setToolTip("Um movimento pequeno e suave do tecido quando a peça pousa. O último quadro "
+                                   "continua idêntico à foto.")
+        b.addWidget(self.chk_fabric)
+        b.addStretch(1)
+        self.fvideo_ready = QLabel(""); self.fvideo_ready.setObjectName("hint"); self.fvideo_ready.setAlignment(Qt.AlignCenter)
+        self.fvideo_ready.setWordWrap(True)
+        self.btn_fvideo_generate = _button("Gerar vídeo com os móveis entrando", "video", "primary", theme.ON_ACCENT)
+        on_click(self.btn_fvideo_generate, self.generate_furniture_video)
+        self.btn_fvideo_back = _button("Voltar aos resultados", "back", "ghost")
+        on_click(self.btn_fvideo_back, self.go, self.P_RESULTS)
+        pg.foot.addWidget(self.fvideo_ready); pg.foot.addWidget(self.btn_fvideo_generate)
+        pg.foot.addWidget(self.btn_fvideo_back)
+        self.furniture_format = "original"
+        self.select_furniture_format("original")
         return pg
 
     def _enhance_checks(self, lay, prefix: str) -> dict[str, QCheckBox]:
@@ -1068,8 +1145,10 @@ class MainWindow(QMainWindow):
             page = self.P_PROGRESS
         if self.batch.busy() and page != self.P_BATCH:
             page = self.P_BATCH
-        if page in (self.P_RESULTS, self.P_VIDEO) and self.result is None:
+        if page in (self.P_RESULTS, self.P_VIDEO, self.P_FVIDEO) and self.result is None:
             page = self.P_STYLE if self.funcao else self.P_FUNC
+        if page == self.P_FVIDEO and self.result is not None and self.result.request.funcao != "esvaziar":
+            page = self.P_RESULTS
         if page == self.P_STYLE and not self.funcao:
             page = self.P_FUNC
         if page == self.P_STYLE and self.funcao in NEEDS_PHOTO and not self.photo_path:
@@ -1096,7 +1175,7 @@ class MainWindow(QMainWindow):
         elif page == self.P_BATCH:
             self.left.setCurrentIndex(self.L_BATCH)
             self._update_batch_page()
-        elif page in (self.P_RESULTS, self.P_VIDEO):
+        elif page in (self.P_RESULTS, self.P_VIDEO, self.P_FVIDEO):
             self.left.setCurrentIndex(self.L_RESULT)
         elif page in (self.P_EDIT, self.P_ENHANCE):
             self.left.setCurrentIndex(self.L_MASK)
@@ -1110,6 +1189,8 @@ class MainWindow(QMainWindow):
             self._update_style_page()
         elif page == self.P_VIDEO:
             self._update_video_page()
+        elif page == self.P_FVIDEO:
+            self._update_furniture_video_page()
         elif page == self.P_RESULTS:
             self._update_result_actions()
         self._update_photo_page()
@@ -1118,7 +1199,7 @@ class MainWindow(QMainWindow):
     def _update_stepper(self) -> None:
         page = self.page()
         cur = {self.P_PHOTO: 0, self.P_FUNC: 1, self.P_STYLE: 2, self.P_EDIT: 2, self.P_PROGRESS: 3,
-               self.P_RESULTS: 4, self.P_VIDEO: 4, self.P_ENHANCE: 2, self.P_BATCH: 0}[page]
+               self.P_RESULTS: 4, self.P_VIDEO: 4, self.P_ENHANCE: 2, self.P_BATCH: 0, self.P_FVIDEO: 4}[page]
         reach = {0, 1}
         if self.funcao and (self.funcao not in NEEDS_PHOTO or self.photo_path):
             reach.add(2)
@@ -1163,7 +1244,8 @@ class MainWindow(QMainWindow):
         self.photo_label.setText(fm.elidedText(Path(path).name, Qt.ElideMiddle, 350 - fm.horizontalAdvance(dims)) + dims)
         self.photo_label.setToolTip(path)
         self.btn_import.setText("  Trocar foto…")
-        self.go(self.P_FUNC if self.page() in (self.P_PHOTO, self.P_RESULTS, self.P_VIDEO) else self.page())
+        self.go(self.P_FUNC if self.page() in (self.P_PHOTO, self.P_RESULTS, self.P_VIDEO, self.P_FVIDEO)
+                else self.page())
         return True
 
     def _update_photo_page(self) -> None:
@@ -1227,10 +1309,12 @@ class MainWindow(QMainWindow):
         self.func_label.setText(f"Função: {CATALOG['funcoes'].get(f, '')}")
         self.room_box.setVisible(f != "fachada")
         self.event_box.setVisible(f == "evento")
-        self.style_box.setVisible(f != "evento")
+        self.style_box.setVisible(f not in ("evento", "esvaziar"))
+        self.prompt_title.setVisible(f != "esvaziar"); self.prompt.setVisible(f != "esvaziar")
         self.aspect_box.setVisible(f == "texto")
         self.style_header.set_title("AMBIENTE E EVENTO" if f == "evento" else
-                                    "ESTILO DA FACHADA" if f == "fachada" else "AMBIENTE E ESTILO")
+                                    "ESTILO DA FACHADA" if f == "fachada" else
+                                    "TIPO DE AMBIENTE" if f == "esvaziar" else "AMBIENTE E ESTILO")
         if f == "texto":
             self.prompt_title.setText("DESCRIÇÃO DO AMBIENTE")
             self.prompt.setPlaceholderText("Ex.: quarto de casal amplo, cabeceira de palhinha, luz de fim de tarde, "
@@ -1255,6 +1339,8 @@ class MainWindow(QMainWindow):
         parts = [CATALOG["ambientes"].get(self.ambiente, "")]
         if self.funcao == "evento":
             parts.append(CATALOG["eventos"][self.evento])
+        elif self.funcao == "esvaziar":
+            parts.append("Cômodo vazio")
         else:
             parts.append(CATALOG["estilos"][self.estilo])
         if self.funcao == "texto":
@@ -1325,12 +1411,13 @@ class MainWindow(QMainWindow):
 
     def build_request(self) -> DesignRequest:
         f = self.funcao
-        estilo = None if f == "evento" else self.estilo
+        estilo = None if f in NO_STYLE else self.estilo
         tag = f if f != "evento" else f"evento_{self.evento}"
         return DesignRequest(funcao=f, estilo=estilo, ambiente="fachada" if f == "fachada" else self.ambiente,
                              n=int(self.n_seg.value()), out_dir=self._new_out_dir(f"{tag}_{estilo or ''}".rstrip("_")),
                              photo=self.photo_path if f in NEEDS_PHOTO else None,
-                             prompt=self.prompt.toPlainText(), evento=self.evento if f == "evento" else None,
+                             prompt="" if f == "esvaziar" else self.prompt.toPlainText(),
+                             evento=self.evento if f == "evento" else None,
                              formato=self.formato, quality="rapido" if self.chk_fast.isChecked() else "final")
 
     def generate(self) -> None:
@@ -1371,6 +1458,7 @@ class MainWindow(QMainWindow):
         n = req.n
         what = CATALOG["eventos"][req.evento] if req.evento else (
             "Área pintada" if req.funcao == "editar_area" else "Luz, cor e linhas" if req.funcao == "melhorar"
+            else "Cômodo vazio" if req.funcao == "esvaziar"
             else CATALOG["estilos"].get(req.estilo or "", ""))
         self.progress_title.setText("MELHORANDO A FOTO" if req.funcao == "melhorar" else
                                     "GERANDO A VERSÃO" if n == 1 else f"GERANDO {n} VERSÕES")
@@ -1460,6 +1548,8 @@ class MainWindow(QMainWindow):
             title = "Área editada"
         elif req.funcao == "melhorar":
             title = "Foto melhorada"
+        elif req.funcao == "esvaziar":
+            title = "Cômodo vazio"
         elif req.funcao == "evento":
             title = CATALOG["eventos"][req.evento]
         else:
@@ -1511,11 +1601,14 @@ class MainWindow(QMainWindow):
                                   "Sem foto original (criado do texto): não há “antes” para o vídeo.")
         self.btn_edit.setEnabled(has)
         self.btn_export.setEnabled(has and not busy)
+        esvaziar = has and self.result.request.funcao == "esvaziar"
+        self.btn_fvideo.setVisible(esvaziar)
+        self.btn_fvideo.setEnabled(esvaziar and not busy)
         melhorar = has and self.result.request.funcao == "melhorar"
         self.btn_again.setEnabled(has and not self.design.busy() and not melhorar)
         self.btn_again.setToolTip("O “Melhorar foto” dá sempre o mesmo resultado: mude os ajustes em “Outro ajuste”."
                                   if melhorar else "Mesmas escolhas, outras sementes: versões diferentes.")
-        self.btn_restyle.setText("  Outro ajuste" if melhorar else "  Outro estilo")
+        self.btn_restyle.setText("  Outro ajuste" if melhorar else "  Outro ambiente" if esvaziar else "  Outro estilo")
         up = self.upscaled.get(self.selected_output() or "")
         self.btn_upscale.setText("  4K pronto" if up else "  Ampliar 4K")
         self.btn_save.setText("  Salvar imagem 4K…" if up else "  Salvar imagem…")
@@ -1925,6 +2018,52 @@ class MainWindow(QMainWindow):
         self._start_side("showcase", args, "Gerando o vídeo antes e depois")
         self.go(self.P_RESULTS)
 
+    # --- vídeo "móveis entrando" (modo B a partir do cômodo vazio escolhido)
+    def select_furniture_format(self, key: str) -> None:
+        if key not in FURNITURE_FORMATS:
+            raise ValueError(f"Formato de vídeo inválido: {key!r}")
+        self.furniture_format = key
+        self.fformat_chips[key].setChecked(True)
+        d = FURNITURE_FORMATS[key][1].split(" · ", 1)[1]
+        self.fformat_desc.setText(d[:1].upper() + d[1:] + ".")
+
+    def _update_furniture_video_page(self) -> None:
+        sel = self.selected_output()
+        self.fvideo_base.setText(f"Versão {self.selected + 1}  ·  {Path(sel).name}" if sel else "")
+        self.fformat_chips[self.furniture_format].setChecked(True)
+        ok = bool(sel) and self.result is not None and bool(self.result.request.photo) and not self.side.busy()
+        self.btn_fvideo_generate.setEnabled(ok)
+        self.fvideo_ready.setText("Leva alguns minutos: separa os móveis da foto, monta cada entrada e confere "
+                                  "todos os quadros." if ok else "Aguarde o trabalho em andamento.")
+
+    def generate_furniture_video(self, accept_weak: bool = False) -> None:
+        if self.result is None or self.side.busy() or accept_weak not in (True, False):
+            return
+        req = self.result.request
+        sel = self.selected_output()
+        if not sel or not req.photo:
+            return
+        folder = Path(self.result.folder)
+        stamp = datetime.now().strftime("%H%M%S")
+        out = str(folder / f"moveis_entrando_{stamp}.mp4")
+        try:
+            args = furniture_video_args(req.photo, sel, req.ambiente, out, self.furniture_format,
+                                        str(folder / f"video_moveis_{stamp}"), accept_weak=accept_weak,
+                                        fabric=self.chk_fabric.isChecked())
+        except ValueError as e:
+            self.warn(str(e))
+            return
+        self._start_side("run", args, "Gerando o vídeo com os móveis entrando")
+        self.go(self.P_RESULTS)
+
+    def ask_accept_weak(self, message: str) -> bool:
+        """O portão de qualidade reprovou a sala vazia: pergunta se gera mesmo assim."""
+        box = QMessageBox(QMessageBox.Warning, "Sala vazia abaixo da qualidade mínima", message,
+                          QMessageBox.Yes | QMessageBox.No, self)
+        box.button(QMessageBox.Yes).setText("Gerar mesmo assim")
+        box.button(QMessageBox.No).setText("Agora não")
+        return box.exec() == QMessageBox.Yes
+
     def _start_side(self, kind: str, args: list[str], title: str, tag: object = None) -> None:
         self.side.start(kind, args, tag=tag)
         self.task_title.setText(title); self.task_pct.setText("0%"); self.task_bar.setValue(0); self.task_bar.show()
@@ -1955,6 +2094,13 @@ class MainWindow(QMainWindow):
     def _on_side_finished(self, res: CliResult) -> None:
         self.last_task = res
         out = res.output
+        if res.kind == "run" and res.status == "pronto" and not out and res.done.get("warning"):
+            # modo B: a sala vazia não passou no portão (sem MP4): oferece gerar mesmo assim
+            self.taskbox.hide()
+            self._update_result_actions()
+            if self.ask_accept_weak(str(res.done["warning"])):
+                self.generate_furniture_video(accept_weak=True)
+            return
         if res.status == "pronto" and out and Path(out).is_file():
             if res.kind == "upscale":
                 if isinstance(res.tag, str):
@@ -1963,6 +2109,7 @@ class MainWindow(QMainWindow):
                 dims = f"{size[0]} × {size[1]} px" if isinstance(size, (list, tuple)) and len(size) == 2 else ""
                 self._show_task_done("Imagem 4K pronta", out, "  ·  ".join(x for x in (Path(out).name, dims) if x))
                 self.btn_task_open.setText("  Abrir imagem")
+                self.btn_task_export.setText("  Exportar…")
             elif res.kind == "exportar":
                 lab = "com selo “Imagem ilustrativa”" if res.done.get("rotulo") else "sem selo"
                 self._show_task_done("Pronto para o anúncio", out, "  ·  ".join((Path(out).name, lab)))
@@ -1972,8 +2119,11 @@ class MainWindow(QMainWindow):
                 sz = human_size(Path(out).stat().st_size)
                 dur = res.done.get("duration_s")
                 dur = f"{float(dur):.0f} s" if isinstance(dur, (int, float)) and dur > 0 else ""
+                if res.kind == "run" and res.done.get("warning"):
+                    dur = "com aviso: confira o início"
                 self._show_task_done("Vídeo pronto", out, "  ·  ".join(x for x in (Path(out).name, dur, sz) if x))
                 self.btn_task_open.setText("  Assistir")
+                self.btn_task_export.setText("  Salvar…")
             self.statusBar().showMessage(f"Pronto: {Path(out).name}", 10000)
             self.statusBar().setToolTip(out)
         else:
@@ -1987,6 +2137,8 @@ class MainWindow(QMainWindow):
         self._update_result_actions()
         if self.page() == self.P_VIDEO:
             self._update_video_ready()
+        elif self.page() == self.P_FVIDEO:
+            self._update_furniture_video_page()
 
     def open_task_output(self) -> None:
         p = getattr(self, "_task_output", None)

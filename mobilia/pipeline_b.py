@@ -90,6 +90,48 @@ def load_inpainter(device: str):
     return rp.LazyLama(device)
 
 
+ENV_PLACA = "MOBILIA_PLACA"     # "auto" (padrão) | "ia" | "geometria": como a sala vazia do modo B é feita
+
+
+def plate_choice(req, device: str) -> tuple[bool, str]:
+    """(usar a sala vazia por IA, motivo). Padrão: IA sempre que o gerador de difusão do redesenho está instalado
+    (GPU ou CPU); senão, a geometria. ``req.plate`` (ou ``MOBILIA_PLACA``) força "ia" ou "geometria"; um cômodo
+    vazio já escolhido pelo usuário (``req.empty_image``) dispensa o gerador."""
+    mode = str(getattr(req, "plate", "auto") or "auto").lower()
+    if mode == "geometria":
+        return False, "sala vazia pela geometria (pedido)"
+    if getattr(req, "empty_image", None):
+        return True, "cômodo vazio escolhido no \"Esvaziar ambiente\""
+    if mode == "auto":
+        mode = os.environ.get(ENV_PLACA, "auto").strip().lower() or "auto"
+    if mode in ("geometria", "0", "off"):
+        return False, f"sala vazia pela geometria ({ENV_PLACA}={mode})"
+    from .design.empty import design_engine_available
+
+    ok, why = design_engine_available(device)
+    if ok:
+        return True, "sala vazia gerada por IA (gerador de difusão instalado)"
+    return False, f"{why}: sala vazia pela geometria"
+
+
+def load_plate_filler(device: str, given: np.ndarray | None, wrap=None):
+    """Preenchimento "ia" da sala vazia (``design.empty.PlateFiller``); o gerador só é carregado na 1ª geração."""
+    from .design.empty import PlateFiller
+    from .design.engine import get_engine
+
+    return PlateFiller(lambda: get_engine(device), device, given=given, wrap=wrap)
+
+
+def release_plate_filler(filler) -> None:
+    if filler is None:
+        return
+    eng = getattr(filler, "_engine", None)
+    if eng is not None and hasattr(eng, "generate"):
+        from .design.engine import release_engines
+
+        release_engines()
+
+
 def load_redetector(device: str, use_fp16: bool):
     """OneFormer carregado uma vez para a nota da placa (``redetect(placa) -> (seg, pan)``). None = sem."""
     if not _flag(ENV_REDETECTAR, "1"):
@@ -332,7 +374,7 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
     # -------------------------------------------------------------- sala vazia + portão
     em.stage("sala_vazia", 0.02, "Montando a sala vazia (por trás, não aparece no vídeo)")
     attempt_no = [0]
-    names = {"crua_geometria": "sala crua, refeita pela geometria",
+    names = {"ia": "sala vazia gerada por IA", "crua_geometria": "sala crua, refeita pela geometria",
              "crua_por_plano": "sala crua, por plano", "planejados_mantidos": "mantendo os planejados",
              "lama_imagem": "preenchimento direto na imagem", "mascara_ampla": "máscara mais larga"}
 
@@ -359,6 +401,17 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
                         "vram_pico_mb_por_etapa": {"lama_e_oneformer_carregados": torch_peak_mb(dev)}}
             refiner = refine = None
             swap = VramSwap(dev, [getattr(inpaint, "model", None), red_model])
+            use_ai, why_ai = plate_choice(req, dev)
+            ai_rep = {"ligada": use_ai, "motivo": why_ai}
+            filler = None
+            if use_ai:
+                given = None
+                if req.empty_image:
+                    given = np.asarray(Image.open(req.empty_image).convert("RGB"))
+                filler = load_plate_filler(dev, given, swap.wrap)
+                if use_sdxl:                     # o refino antigo não roda junto com a sala vazia por IA
+                    use_sdxl = False
+                    sdxl_rep.update(ligado=False, motivo="sala vazia por IA (o refino antigo fica desligado)")
             if use_sdxl:
                 use_sdxl, offload, why2, free = sdxl_recheck(dev, offload, swap.reclaim_mb())
                 sdxl_rep["vram_trocada_mb"] = swap.reclaim_mb()
@@ -390,9 +443,17 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
                         return gsdxl.refine_plate(foto, r, seg_v, ctx.room, ctx.geo.depth, generate, redetect,
                                                   seed=req.seed, cfg=rcfg, room_type=req.room_type)
             try:
+                if filler is not None:
+                    em.stage("sala_vazia", 0.08, "Gerando a sala vazia com IA (só onde estão os móveis)")
                 res = rp.build_plate_gated(foto, inst, seg_v, ctx.room, ctx.geo.depth, inpaint, redetect,
-                                           seed=req.seed, on_attempt=on_attempt, refine=refine)
+                                           seed=req.seed, on_attempt=on_attempt, refine=refine, ai_fill=filler)
             finally:
+                if filler is not None:
+                    ai_rep["chamadas"] = list(filler.calls)
+                    if filler.last_init is not None:      # a sala pela geometria (partida), para conferência
+                        Image.fromarray(filler.last_init).save(work / "sala_vazia_geometria.jpg", quality=90)
+                    release_plate_filler(filler)
+                    filler = None
                 if refiner is not None:
                     sdxl_rep["chamadas"] = list(refiner.calls)
                     refiner.release()
@@ -428,6 +489,12 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
                     nota_lama=ri_.get("nota_lama"), prompt=ri_.get("prompt"))
     base = _base_report(ctx, inst, res, pieces, gate, t_load, vram_b)
     base["refino_sdxl"] = sdxl_rep
+    ai_rep["usada"] = res.info.get("estrategia_portao") == "ia"
+    base["sala_vazia_ia"] = ai_rep
+    if ai_rep["usada"]:
+        base["narrativa"].append("A sala vazia do início foi gerada por IA só onde estavam os móveis (paredes e "
+                                 "piso guiados pela geometria da sala); janelas, portas e o resto da foto ficaram "
+                                 "intactos.")
     base["semente_sdxl"] = sdxl_rep["semente"]
     if "carga_s" in sdxl_rep:
         base["modelos_carga_s"]["sdxl"] = sdxl_rep["carga_s"]
@@ -445,7 +512,7 @@ def run_mode_b(ctx: ModeBContext) -> JobResult:
         for w in st.warnings:             # ex.: pedaço de móvel voltando para a sala vazia (o portão não vê isso)
             em.log(w, "warning")
         em.stage("camadas", 0.6, "Planejando a entrada de cada peça")
-        ch = C.plan(st, fps=int(ctx.q.get("fps") or C.FPS))
+        ch = C.plan(st, fps=int(ctx.q.get("fps") or C.FPS), fabric=bool(getattr(req, "fabric", True)))
         cv = C.verify(st, ch)
         for w in ch.warnings:             # ex.: corte à vista pela verificação independente (o vídeo será recusado)
             em.log(w, "warning")

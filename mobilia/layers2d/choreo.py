@@ -147,6 +147,8 @@ class Choreography:
     _hard: list | None = field(default=None, repr=False)
     front: np.ndarray | None = field(default=None, repr=False)   # relação de oclusão usada (ciclos quebrados)
     _bands: list | None = field(default=None, repr=False)
+    # tecido assentando no pouso (camada -> :class:`FabricSpec`); vazio = sem efeito
+    fabric: dict = field(default_factory=dict, repr=False)
 
     @property
     def duration(self) -> float:
@@ -158,9 +160,11 @@ class Choreography:
         ent = [{"pecas": [name(i) for i in e.members], "estilo": e.style, "papel": e.role,
                 "inicio_s": round(e.start, 3), "duracao_s": round(e.dur, 3), "amplitude_px": round(e.amp, 1),
                 "escala0": e.scale0, "motivo": e.reason} for e in self.entrances]
+        tecido = [{"peca": name(i), "tipo": f.kind, "amplitude_px": round(f.amp, 2), "inicio_s": round(f.t0, 3),
+                   "duracao_s": round(f.dur, 3)} for i, f in sorted(self.fabric.items())]
         return {"coreografia": {"duracao_s": round(self.duration, 3), "quadros": self.n_frames, "fps": self.fps,
                                 "vazio_inicial_s": round(self.entrances[0].start, 3) if self.entrances else 0.0,
-                                "entradas": ent, **self.stats, "avisos": list(self.warnings)}}
+                                "entradas": ent, "tecido": tecido, **self.stats, "avisos": list(self.warnings)}}
 
 
 # ============================================================================================================
@@ -596,8 +600,151 @@ def _placements_for(ch: Choreography, stack: L.LayerStack, e: Entrance, t: float
             mul = np.broadcast_to(m, (y1 - y0, x1 - x0)).astype(np.float32)
         elif e.clip and dy != 0:
             mul = _clip_mul(e.clip, e.profile, lay.box, dy)
+        fs = ch.fabric.get(i)
+        warp = fabric_warp(fs, t) if fs is not None and t < e.end else None
         out[i] = L.Placement(dx=dx, dy=dy, shade=shade, contact=contact if (dx == 0 and dy == 0 and sc >= 1) else 0.0,
-                             alpha_mul=mul, scale=sc, anchor=e.anchor)
+                             alpha_mul=mul, scale=sc, anchor=e.anchor, warp=warp)
+    return out
+
+
+# ============================================================================================================
+# Tecido assentando no pouso (efeito 2D, sem física): roupa de cama, almofadas, cortinas
+# ============================================================================================================
+# A peça pousa e o tecido "atrasa": a parte de cima da roupa de cama desce alguns pixels, volta com 1–2
+# ultrapassagens pequenas amortecidas e assenta, com uma onda que atravessa a peça; almofadas e travesseiros dão um
+# quique curto (achatam e voltam); cortina balança uma vez. Amplitude de poucos px a 1080p, tudo suave, e o
+# deslocamento é ZERO a partir do fim da entrada: o quadro em repouso, a dissolução e o último quadro não mudam
+# (último quadro == foto, byte a byte). Perto dos cortes da peça (onde quem está na frente a cobre) o deslocamento
+# some, para nunca mostrar o corte.
+FABRIC_DRAPE = frozenset({"bed", "blanket", "quilt", "duvet", "bedspread"})
+FABRIC_SOFT = frozenset({"sofa", "armchair", "couch"})          # assento estofado: o mesmo, mais discreto
+FABRIC_SQUASH = frozenset({"pillow", "cushion"})
+FABRIC_SWAY = frozenset({"curtain", "drape", "drapery"})
+FABRIC_AMP = 0.0036          # amplitude máxima (× altura do quadro): ~3,9 px a 1080p
+FABRIC_SOFT_AMP = 0.45       # sofá/poltrona: fração da amplitude da cama
+FABRIC_SQUASH_AMP = 0.07     # almofada: até 7% da altura dela (limitado à amplitude máxima)
+FABRIC_DUR = (0.4, 0.7)      # janela do efeito no fim da entrada (s)
+FABRIC_LAG = 0.18            # atraso da onda de um lado ao outro da peça (fração da janela)
+FABRIC_TOP = (0.45, 0.72)    # cama/sofá: o tecido é a parte de cima (até 45% inteiro, some até 72% da altura)
+FABRIC_STYLES = frozenset({"queda", "pousar", "descer", "deslizar", "subir_atras", "emergir", "escala"})
+
+
+@dataclass
+class FabricSpec:
+    kind: str                        # "drape" | "squash" | "sway"
+    weight: np.ndarray               # (h, w) float32 em [0, 1], na caixa da camada
+    amp: float                       # px
+    t0: float                        # início do efeito (s)
+    dur: float                       # duração (termina exatamente no fim da entrada)
+    lag: np.ndarray                  # (w,) atraso da onda por coluna (fração da janela)
+    rows: np.ndarray                 # (h,) posição relativa da linha na peça (0 = topo, 1 = base)
+    cols: np.ndarray                 # (w,) posição relativa da coluna em relação ao centro (−1..1)
+
+
+def _fabric_profile(kind: str, u: np.ndarray) -> np.ndarray:
+    """Curva no tempo (u = 0..1 na janela): começa e termina em 0, com velocidade final 0."""
+    u = np.clip(u, 0.0, 1.0)
+    env = 1.0 - np.asarray([smoothstep(0.72, 1.0, float(x)) for x in np.ravel(u)]).reshape(u.shape)
+    if kind == "squash":
+        return np.exp(-3.5 * u) * np.sin(4.0 * np.pi * u) * env
+    if kind == "sway":
+        return np.exp(-2.0 * u) * np.sin(2.0 * np.pi * u) * env
+    return np.exp(-2.6 * u) * np.sin(3.0 * np.pi * u) * env      # drape: desce, volta um pouco, assenta
+
+
+def fabric_warp(fs: FabricSpec, t: float) -> np.ndarray | None:
+    """Deslocamento (h, w, 2) do tecido no instante ``t`` (None fora da janela do efeito)."""
+    if t < fs.t0 or t >= fs.t0 + fs.dur:
+        return None
+    u = (t - fs.t0) / fs.dur
+    h, w = fs.weight.shape
+    d = np.zeros((h, w, 2), np.float32)
+    if fs.kind == "squash":
+        s = float(_fabric_profile("squash", np.array([u]))[0]) * fs.amp
+        d[..., 1] = s * fs.rows[:, None]                         # o topo desce s, a base fica
+        d[..., 0] = 0.35 * s * fs.cols[None, :]                  # e alarga um pouco (achata)
+    elif fs.kind == "sway":
+        f = _fabric_profile("sway", u - fs.lag)                  # (w,)
+        d[..., 0] = fs.amp * f[None, :] * (fs.rows[:, None] ** 1.5)
+    else:
+        f = _fabric_profile("drape", u - fs.lag)                 # onda atravessando a peça
+        d[..., 1] = fs.amp * f[None, :]
+    d *= fs.weight[..., None]
+    if not np.any(np.abs(d) > 1e-3):
+        return None
+    return d
+
+
+def _fabric_kind(label: str) -> str | None:
+    b = label.split(",")[0].strip().lower()
+    if b in FABRIC_DRAPE or b in FABRIC_SOFT:
+        return "drape"
+    if b in FABRIC_SQUASH:
+        return "squash"
+    if b in FABRIC_SWAY:
+        return "sway"
+    return None
+
+
+def fabric_regions(stack: L.LayerStack, ch: Choreography, bands: Sequence[np.ndarray] | None = None) -> dict:
+    """Peças de tecido da coreografia e o peso (onde o tecido mexe) de cada uma. Só nas entradas com movimento
+    (pouso, queda, descida, deslize, subida por trás, escala); nunca no tapete desenrolando nem no "surgir"."""
+    H, W = stack.photo_shape
+    bands = ch._bands if bands is None else bands
+    out: dict = {}
+    for e in ch.entrances:
+        if e.style not in FABRIC_STYLES:
+            continue
+        dur = float(np.clip(0.6 * e.dur, *FABRIC_DUR))
+        dur = min(dur, e.dur)
+        for i in e.members:
+            lay = stack.layers[i]
+            kind = _fabric_kind(lay.label)
+            if kind is None:
+                continue
+            sup = lay.alpha > 0.5
+            if sup.sum() < 64:
+                continue
+            ys, xs = np.nonzero(sup)
+            y0, y1 = ys.min(), ys.max() + 1
+            x0, x1 = xs.min(), xs.max() + 1
+            h, w = sup.shape
+            rows = np.clip((np.arange(h, dtype=np.float32) - y0) / max(1.0, y1 - y0 - 1), 0, 1)
+            cols = np.clip((np.arange(w, dtype=np.float32) - (x0 + x1) / 2.0) / max(1.0, (x1 - x0) / 2.0), -1, 1)
+            if kind == "drape":
+                lo, hi = FABRIC_TOP
+                wy = 1.0 - np.array([smoothstep(lo, hi, float(r)) for r in rows], np.float32)
+                weight = np.repeat(wy[:, None], w, axis=1)
+                amp = FABRIC_AMP * H * (FABRIC_SOFT_AMP if lay.label.split(",")[0].strip().lower() in FABRIC_SOFT
+                                        else 1.0)
+            elif kind == "squash":
+                weight = np.ones((h, w), np.float32)
+                amp = min(FABRIC_AMP * H * 1.2, FABRIC_SQUASH_AMP * (y1 - y0))
+            else:
+                weight = np.ones((h, w), np.float32)
+                amp = FABRIC_AMP * H * 0.8
+            # some perto dos cortes (onde a peça continua atrás de outra ou fora do quadro)
+            bx0, by0, bx1, by1 = lay.box
+            cut = np.zeros((h, w), np.uint8)
+            if bands is not None and i < len(bands) and len(bands[i]):
+                pts = np.round(bands[i]).astype(int)
+                px, py = pts[:, 0] - bx0, pts[:, 1] - by0
+                ok = (px >= 0) & (px < w) & (py >= 0) & (py < h)
+                cut[py[ok], px[ok]] = 1
+            r = max(3, int(round(2.5 * amp)) + band_radius((H, W)))
+            if cut.any():
+                near = cv2.dilate(cut, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+                att = 1.0 - cv2.GaussianBlur(near.astype(np.float32), (0, 0), r / 2.0)
+                weight = weight * np.clip(att, 0.0, 1.0)
+            # bordas da caixa: rampa curta para dentro (nada é amostrado de fora da caixa de uma vez)
+            ex = np.minimum(np.arange(w), np.arange(w)[::-1]).astype(np.float32)
+            ey = np.minimum(np.arange(h), np.arange(h)[::-1]).astype(np.float32)
+            weight = weight * np.clip(np.minimum(ey[:, None], ex[None, :]) / 3.0, 0.0, 1.0)
+            if float(weight.max()) <= 0.05 or amp < 0.5:
+                continue
+            lag = FABRIC_LAG * (cols + 1.0) / 2.0
+            out[i] = FabricSpec(kind, weight.astype(np.float32), float(amp), e.end - dur, dur,
+                                lag.astype(np.float32), rows, cols)
     return out
 
 
@@ -912,7 +1059,7 @@ def _plan_variant(stack, hard, bands, units, after, roles, ch):
     return stack, bands, units, ents, n_builtin, merged, cycles
 
 
-def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Choreography:
+def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None, fabric: bool = True) -> Choreography:
     """Planeja a coreografia da pilha (ordem, estilo, amplitude, tempos) e mede o "pixel oculto visível".
 
     Depois do plano, a verificação independente (:func:`verify_independent`, que não usa o grafo) confere todos os
@@ -923,6 +1070,8 @@ def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Ch
     ch = _plan_once(stack, fps, target)
     if not ch.entrances:
         return ch
+    # ``fabric``: tecido (roupa de cama, almofadas, cortina) assenta com um movimento pequeno no pouso
+    # (:func:`fabric_regions`); o último quadro continua sendo a foto
     ind = verify_independent(stack, ch)
     best, best_px = ch, ind["oculto_independente_px"]
     front = stack.front.copy()
@@ -944,6 +1093,8 @@ def plan(stack: L.LayerStack, fps: int = FPS, target: float | None = None) -> Ch
         if ind["oculto_independente_px"] < best_px:
             best, best_px = cand, ind["oculto_independente_px"]
     best.stats["reparos_independentes"] = fixes
+    if fabric:
+        best.fabric = fabric_regions(stack, best)
     return best
 
 

@@ -43,13 +43,15 @@ def test_window_behind_furniture_is_protected_in_every_strategy(strategy):
     repintava a janela escondida pelo sofá. Agora as duas estratégias rotulam igual."""
     room, photo, groups, win, sofa = _window_scene()
     seg = SimpleNamespace(groups=groups)
+    # "ia": a geometria refinada pelo gerador (aqui um falso que devolve a partida): mesmos rótulos da geometria
+    fake_ai = (lambda ph, pl, m, g, d, sd: (pl, {"falso": True})) if strategy == "ia" else None
     res = rp.build_plate(photo, [_piece(sofa, "solto", "sofa")], seg, room, inpaint=rp.telea_inpaint,
-                         strategy=strategy, assess_quality=False)
+                         strategy=strategy, assess_quality=False, ai_fill=fake_ai)
     ref = rp.build_plate(photo, [_piece(sofa, "solto", "sofa")], seg, room, inpaint=rp.telea_inpaint,
                          strategy="planos", assess_quality=False)
     prot = res.mask & (res.labels == rp.PROTECTED)
     assert prot.sum() > 500
-    if strategy == "geometria":
+    if strategy in ("geometria", "ia"):
         # a geometria ainda estende a abertura pela parede logo abaixo dela (até o peitoril/chão, ver
         # ``geofill.continue_openings``): contém os protegidos das outras, sempre perto da janela
         assert not (res.mask & ref.mask & (ref.labels == rp.PROTECTED) & ~prot).any()

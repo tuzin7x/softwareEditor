@@ -56,6 +56,7 @@ STAGES_B: list[tuple[str, str, float]] = [
 ]
 
 MODES = ("auto", "A", "B")
+PLATES = ("auto", "ia", "geometria")
 
 
 @dataclass
@@ -71,14 +72,25 @@ class JobRequest:
     mode: str = "auto"
     # modo B: gera o vídeo mesmo com a sala vazia reprovada pelo portão (o usuário pediu, com aviso no relatório)
     accept_weak_plate: bool = False
+    # modo B: como a sala vazia do início é feita. "auto" = gerada por IA quando o gerador de difusão está
+    # instalado (GPU ou CPU), senão pela geometria; "ia" | "geometria" forçam
+    plate: str = "auto"
+    # modo B: o cômodo vazio já escolhido pelo usuário ("Esvaziar ambiente"), usado dentro da máscara de remoção
+    empty_image: str | None = None
+    # modo B: tecido (roupa de cama, almofadas, cortina) assenta com um movimento pequeno quando a peça pousa
+    fabric: bool = True
 
     def validate(self) -> None:
         if self.room_type not in ROOM_TYPES:
             raise ValueError(f"Tipo de ambiente inválido: {self.room_type}")
         if self.mode not in MODES:
             raise ValueError(f"Modo inválido: {self.mode} (use auto, A ou B)")
+        if self.plate not in PLATES:
+            raise ValueError(f"Sala vazia inválida: {self.plate} (use auto, ia ou geometria)")
         if not Path(self.photo_path).is_file():
             raise FileNotFoundError(f"Foto não encontrada: {self.photo_path}")
+        if self.empty_image is not None and not Path(self.empty_image).is_file():
+            raise FileNotFoundError(f"Imagem do cômodo vazio não encontrada: {self.empty_image}")
 
 
 @dataclass

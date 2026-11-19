@@ -73,7 +73,9 @@ class Placement:
     delta de contato (que fica na posição de repouso); ``alpha_mul`` (recorte do tamanho da caixa, 0..1)
     revela só parte da peça no lugar (tapete desenrolando). ``scale`` (<= 1) encolhe RGBA e sombreamento em torno
     de ``anchor`` (x, y em pixels absolutos da posição de repouso; padrão: centro da base da caixa), antes do
-    deslocamento: "escala no ponto de contato" da coreografia (PT-V3-6)."""
+    deslocamento: "escala no ponto de contato" da coreografia (PT-V3-6). ``warp`` (h, w, 2) float32, do tamanho
+    da caixa: deslocamento (dx, dy) em px de cada pixel da peça dentro da própria caixa (tecido assentando quando
+    a peça pousa, ``choreo.fabric_warp``); aplicado antes da escala, nunca sai da caixa. ``None`` = sem."""
     dx: int = 0
     dy: int = 0
     shade: float = 1.0
@@ -81,6 +83,7 @@ class Placement:
     alpha_mul: np.ndarray | None = None
     scale: float = 1.0
     anchor: tuple[float, float] | None = None
+    warp: np.ndarray | None = None
 
 
 @dataclass
@@ -741,6 +744,21 @@ def _paste_slices(box, dx, dy, H, W):
     return (slice(cy0, cy1), slice(cx0, cx1)), (slice(cy0 - Y0, cy1 - Y0), slice(cx0 - X0, cx1 - X0))
 
 
+def warp_layer(a: np.ndarray, c: np.ndarray, sh: np.ndarray | None, disp: np.ndarray):
+    """Alpha, cor pré-multiplicada e sombreamento com cada pixel deslocado ``disp`` (h, w, 2) dentro da caixa
+    (amostragem inversa: destino p <- origem p − d). Fora da caixa entra transparente; C <= 255·A continua valendo."""
+    h, w = a.shape
+    d = np.asarray(disp, np.float32)
+    xs, ys = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    mx, my = xs - d[..., 0], ys - d[..., 1]
+    rm = lambda img, border: cv2.remap(np.ascontiguousarray(img, np.float32), mx, my, cv2.INTER_LINEAR,  # noqa: E731
+                                       borderMode=cv2.BORDER_CONSTANT, borderValue=border)
+    a2 = rm(a, 0)
+    c2 = np.minimum(np.maximum(rm(c, (0, 0, 0)), 0.0), 255.0 * a2[..., None])
+    sh2 = None if sh is None else rm(sh, (1, 1, 1))
+    return a2, c2, sh2
+
+
 def _scaled(L: Layer, q: Placement):
     """(alpha, cor, sombreamento, caixa) da camada com ``alpha_mul`` e ``scale`` aplicados. Com escala, a caixa
     é a da peça encolhida em torno de ``anchor`` (coordenadas absolutas, pode ficar fora da caixa)."""
@@ -748,6 +766,8 @@ def _scaled(L: Layer, q: Placement):
     if q.alpha_mul is not None:
         m = np.asarray(q.alpha_mul, np.float32)
         a, c = a * m, c * m[..., None]
+    if q.warp is not None:
+        a, c, sh = warp_layer(a, c, sh, q.warp)
     if q.scale >= 1.0 - 1e-6:
         return a, c, sh, L.box
     x0, y0, x1, y1 = L.box

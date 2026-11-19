@@ -284,3 +284,74 @@ def test_mode_b_end_to_end_big_lama_cpu(env, tmp_path, monkeypatch, name):
     assert rep["portao_qualidade"]["tentativas"] >= 1
     print(name, json.dumps({k: rep["portao_qualidade"][k] for k in ("aprovada", "nota", "estrategia", "motivos")},
                            ensure_ascii=False), rep["tempos_s"]["sala_vazia"])
+
+
+# ================================================================================== 0.9.1: sala vazia "ia"
+class _FakeEngine:
+    """Gerador falso para a sala vazia "ia": dentro da máscara, a partida levemente clareada (só para ver que a
+    placa veio dele) e conta as chamadas."""
+
+    device = "cpu"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, image, mask, control, prompt, seed, strength, steps, guidance, cs, ce, callback=None):
+        self.calls += 1
+        out = image.copy()
+        out[mask] = np.clip(out[mask].astype(np.int16) + 6, 0, 255).astype(np.uint8)
+        return out
+
+
+def test_mode_b_with_ai_plate_keeps_invariants(env, tmp_path, monkeypatch):
+    """Sala vazia "ia" como padrão do modo B (gerador falso): 1ª tentativa do portão é a "ia", quadro 0 == placa,
+    último == foto, MP4 entregue e o relatório diz que a placa veio da IA. O tecido assenta (cama/almofadas)."""
+    from mobilia import pipeline_b
+    from mobilia.design.empty import PlateFiller
+    from mobilia.jobs import ProgressEmitter
+    from mobilia.video import encoder as E
+
+    _fixture_analysis(monkeypatch, "sala_sofas_brancos")
+    _fast_models(monkeypatch, gate_ok=True)
+    eng = _FakeEngine()
+    monkeypatch.setattr(pipeline_b, "plate_choice", lambda req, dev: (True, "teste"))
+    monkeypatch.setattr(pipeline_b, "load_plate_filler",
+                        lambda dev, given, wrap=None: PlateFiller(eng, dev, steps=2, long_side=256, given=given))
+    res = env.run_job(_job(tmp_path, ROOMS / "sala_sofas_brancos" / "photo.jpg"), ProgressEmitter())
+    assert res.output_path and Path(res.output_path).exists() and res.gate["estrategia"] == "ia"
+    rep = json.loads(Path(res.report_path).read_text(encoding="utf-8"))
+    assert rep["sala_vazia_ia"]["usada"] and rep["sala_vazia_ia"]["chamadas"] and eng.calls == 1
+    assert rep["portao_qualidade"]["tentativas_detalhe"][0]["estrategia"] == "ia"
+    assert rep["verificacao_modo_b"]["ok"], rep["verificacao_modo_b"]["falhas"]
+    W, H = rep["foto"]["placa_video"]
+    frames = dict(E.decode_lossless(Path(res.work_dir) / "auditoria.mkv", W, H))
+    photo_v = np.asarray(Image.open(Path(res.work_dir) / "plate.png").convert("RGB"))
+    empty = np.asarray(Image.open(Path(res.work_dir) / "sala_vazia.png").convert("RGB"))
+    assert np.array_equal(frames[len(frames)], photo_v) and np.array_equal(frames[1], empty)
+    assert "tecido" in rep["coreografia"]
+
+
+def test_mode_b_uses_the_chosen_empty_room(env, tmp_path, monkeypatch):
+    """O cômodo vazio escolhido no "Esvaziar ambiente" entra na placa sem gerar de novo; ``--formato 9x16``
+    recorta o MP4 para 1080×1920."""
+    from mobilia import cli, pipeline_b
+    from mobilia.design.empty import PlateFiller
+    from mobilia.video.reframe import _probe_size
+
+    _fixture_analysis(monkeypatch, "sala_sofas_brancos")
+    _fast_models(monkeypatch, gate_ok=True)
+    eng = _FakeEngine()
+    monkeypatch.setattr(pipeline_b, "load_plate_filler",
+                        lambda dev, given, wrap=None: PlateFiller(eng, dev, given=given))
+    photo = ROOMS / "sala_sofas_brancos" / "photo.jpg"
+    empty = tmp_path / "vazio.jpg"
+    Image.open(photo).convert("RGB").resize((384, 256)).save(empty)
+    monkeypatch.setattr(env, "_quality", env._quality)
+    out = tmp_path / "v.mp4"
+    rc = cli.main(["run", "--photo", str(photo), "--room", "sala", "--out", str(out), "--mode", "B", "--quality",
+                   "previa", "--work-dir", str(tmp_path / "job"), "--sala-vazia", str(empty), "--formato", "9x16"])
+    assert rc == 0 and eng.calls == 0
+    v = tmp_path / "v_9x16.mp4"
+    assert v.exists() and _probe_size(str(v)) == (1080, 1920) and out.exists()
+    rep = json.loads((tmp_path / "job" / "report.json").read_text(encoding="utf-8"))
+    assert rep["sala_vazia_ia"]["usada"] and rep["sala_vazia_ia"]["chamadas"][0]["origem"].startswith("escolhida")

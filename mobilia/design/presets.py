@@ -323,11 +323,17 @@ FUNCTIONS: dict[str, FunctionPreset] = {f.key: f for f in (
     # arquitetura nunca muda (``enhance.py``)
     FunctionPreset("melhorar", "Melhorar foto", strength=0.0, control_scale=0.0, control_end=0.0, lock=(),
                    furnish=False, repair=False, generative=False),
+    # tira os móveis soltos e a decoração e mostra o mesmo cômodo vazio (``empty.py``): geração só na área dos
+    # móveis, guiada pela profundidade ESTRUTURAL; parâmetros próprios em ``empty.py`` (partida pela geometria x
+    # suave). Também é a sala vazia "ia" do vídeo "móveis entrando" (modo B)
+    FunctionPreset("esvaziar", "Esvaziar ambiente", strength=0.62, control_scale=0.55, control_end=0.7,
+                   guidance=2.0, furnish=False, repair=False, structural=True),
 )}
 
 # funções em que a imagem final mostra móveis/decoração que não existem: o "Exportar para anúncio" põe o selo
 # "Imagem ilustrativa" por padrão (o "Melhorar foto" só corrige a foto real: sem selo)
-ILLUSTRATIVE = ("mudar_estilo", "reforma", "redesign_simples", "mobiliar", "editar_area", "fachada", "evento", "texto")
+ILLUSTRATIVE = ("mudar_estilo", "reforma", "redesign_simples", "mobiliar", "editar_area", "fachada", "evento", "texto",
+                "esvaziar")
 
 # funções que, numa foto de ambiente vazio, viram "Mobiliar" (mudar o estilo de uma sala vazia devolvia uma sala
 # vazia com um vaso: exatamente o que o usuário odiou)

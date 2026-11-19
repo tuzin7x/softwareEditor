@@ -68,10 +68,16 @@ def _cmd_run(a) -> int:
 
     em = ProgressEmitter(stream=sys.stdout) if a.json else ProgressEmitter(callback=human)
     req = JobRequest(photo_path=a.photo, room_type=a.room, output_path=a.out, quality=a.quality,
-                     work_dir=a.work_dir, seed=a.seed, mode=a.mode, accept_weak_plate=a.aceitar_placa_fraca)
+                     work_dir=a.work_dir, seed=a.seed, mode=a.mode, accept_weak_plate=a.aceitar_placa_fraca,
+                     plate=a.placa, empty_image=a.sala_vazia, fabric=not a.sem_tecido)
     try:
         req.validate()
         res = run_job(req, em, t_ref=env_time(ENV_T_INICIO) or T_IMPORT)
+        if res.output_path and a.formato != "original":
+            from .video.reframe import reframe_mp4
+
+            em.log(f"Recortando o vídeo para {a.formato.replace('x', ':')}")
+            res.output_path = reframe_mp4(res.output_path, a.formato, res.report_path)
         em.done(res)
         return 0
     except KeyboardInterrupt:
@@ -216,7 +222,7 @@ def _cmd_design(a) -> int:
 
     try:
         f = presets.function(a.funcao)
-        if not a.estilo and f.key not in ("evento", "editar_area", "melhorar"):
+        if not a.estilo and f.key not in ("evento", "editar_area", "melhorar", "esvaziar"):
             a.estilo = "moderno"
         common = dict(n=a.n, seed=a.seed, out_dir=a.out_dir, quality=a.quality, progress=emit, device=a.device)
         if f.key == "texto":
@@ -230,6 +236,9 @@ def _cmd_design(a) -> int:
                 if not a.mask:
                     raise ValueError("Pinte a área a editar (--mask).")
                 res = api.edit_area(a.photo, a.mask, a.prompt or "", a.estilo, a.ambiente, **common)
+            elif f.key == "esvaziar":
+                res = api.empty_room(a.photo, prompt=a.prompt or "", keep_curtains=not a.tirar_cortinas,
+                                     prefill=a.partida, **common)
             elif f.key == "melhorar":
                 from .design.enhance import enhance
 
@@ -440,6 +449,15 @@ def main(argv=None) -> int:
                    help="auto (padrão): foto vazia -> A, foto mobiliada -> B; A/B força o modo")
     r.add_argument("--aceitar-placa-fraca", action="store_true",
                    help="modo B: gera o vídeo mesmo com a sala vazia reprovada pelo portão de qualidade")
+    r.add_argument("--placa", default="auto", choices=["auto", "ia", "geometria"],
+                   help="modo B: sala vazia do início gerada por IA (auto: quando o gerador está instalado) ou "
+                        "refeita pela geometria")
+    r.add_argument("--sala-vazia", default=None,
+                   help="modo B: imagem do cômodo vazio já escolhida (resultado do 'Esvaziar ambiente')")
+    r.add_argument("--sem-tecido", action="store_true",
+                   help="modo B: sem o tecido (roupa de cama, almofadas) assentando quando a peça pousa")
+    r.add_argument("--formato", default="original", choices=["original", "16x9", "9x16"],
+                   help="modo B: recorta o MP4 final para 16:9 (1920x1080) ou 9:16 (1080x1920)")
     h = sub.add_parser("hardware", help="mostra GPU/VRAM detectadas e o perfil escolhido")
     h.add_argument("--json", action="store_true")
     an = sub.add_parser("analyze", help="só a análise da foto (debug)")
@@ -465,7 +483,7 @@ def main(argv=None) -> int:
     d.add_argument("--photo", default=None, help="foto do ambiente (não usada em --funcao texto)")
     d.add_argument("--funcao", default="mudar_estilo",
                    help="mudar_estilo | reforma | redesign_simples | mobiliar | editar_area | fachada | evento | texto | "
-                        "melhorar")
+                        "melhorar | esvaziar")
     d.add_argument("--estilo", default=None, help="moderno, escandinavo, luxo... (veja mobilia/design/presets.py)")
     d.add_argument("--ambiente", default="sala",
                    help="sala | quarto | cozinha | banheiro | escritorio | sala_jantar | varanda | fachada")
@@ -486,6 +504,9 @@ def main(argv=None) -> int:
     d.add_argument("--quality", default="final", choices=["rapido", "final"])
     d.add_argument("--device", default="auto", help="auto | cuda | cpu")
     d.add_argument("--json", action="store_true", help="eventos de progresso em JSON (uso pela UI)")
+    d.add_argument("--tirar-cortinas", action="store_true", help="esvaziar: tira também cortinas e persianas")
+    d.add_argument("--partida", default="auto", choices=["auto", "geometria", "suave"],
+                   help="esvaziar: ponto de partida da geração (auto alterna geometria e suave entre as versões)")
     _add_enhance_args(d)
     bl = sub.add_parser("design-lote", help="lote: várias fotos de um imóvel com a mesma função (ex.: melhorar)")
     bl.add_argument("--fotos", nargs="*", default=None, help="fotos do imóvel")

@@ -904,3 +904,75 @@ def test_ui_arguments_for_new_commands_parse_with_the_real_cli(tmp_path):
     assert seen["design"].sem_ceu and seen["design"].ampliar_4k and not seen["design"].sem_branco
     assert seen["lote"].sem_branco and seen["lote"].exportar == "4k" and seen["lote"].sem_rotulo
     assert seen["exportar"].rotulo and seen["exportar"].lado == "2048"
+
+
+# ================================================================================== 0.9.1: esvaziar + móveis entrando
+
+def test_esvaziar_flow_then_furniture_video(app, win, env):
+    import shutil as sh
+    r = _to_results(app, win, "esvaziar", None, n=2)
+    a = _args(r.request.out_dir)
+    _no_signal_leak(a)
+    assert _opt(a, "--funcao") == "esvaziar" and "--estilo" not in a and "--prompt" not in a
+    assert win.result_title.text().startswith("Cômodo vazio")
+    assert win.btn_fvideo.isVisibleTo(win) and win.btn_fvideo.isEnabled()
+    assert "ambiente" in win.btn_restyle.text()
+    win.select_variant(1)
+    win.btn_fvideo.click(); app.processEvents()
+    assert win.page() == win.P_FVIDEO and win.left.currentIndex() == win.L_RESULT
+    assert "Versão 2" in win.fvideo_base.text() and win.chk_fabric.isChecked()
+    win.fformat_chips["9x16"].click(); app.processEvents()
+    _shot(win, "10_moveis_entrando")
+    win.btn_fvideo_generate.click(); app.processEvents()
+    assert win.page() == win.P_RESULTS
+    assert _wait(app, lambda: not win.side.busy())
+    args = win.last_task.args
+    _no_signal_leak(args)
+    assert args[0] == "run" and _opt(args, "--mode") == "B" and _opt(args, "--formato") == "9x16"
+    assert _opt(args, "--sala-vazia") == r.outputs[1] and _opt(args, "--photo") == str(FX)
+    assert "--sem-tecido" not in args and "--aceitar-placa-fraca" not in args
+    assert win.task_title.text() == "Vídeo pronto" and "Salvar" in win.btn_task_export.text()
+    win.btn_task_open.click()
+    assert win.opened and win.opened[-1].endswith(".mp4")
+
+
+def test_furniture_video_gate_rejection_offers_generate_anyway(app, win, env):
+    import shutil as sh
+    photo = env / "quarto_reprovada.jpg"
+    sh.copyfile(FX, photo)
+    win.load_photo(str(photo)); app.processEvents()
+    win.function_cards["esvaziar"].click(); app.processEvents()
+    assert not win.style_box.isVisibleTo(win) and win.room_box.isVisibleTo(win)
+    win.btn_generate.click(); app.processEvents()
+    assert _wait(app, lambda: win.page() == win.P_RESULTS)
+    asked = []
+    win.ask_accept_weak = lambda msg: asked.append(msg) or True
+    win.btn_fvideo.click(); app.processEvents()
+    win.chk_fabric.setChecked(False)
+    win.btn_fvideo_generate.click(); app.processEvents()
+    assert _wait(app, lambda: bool(asked) and not win.side.busy() and win.last_task is not None
+                 and "--aceitar-placa-fraca" in win.last_task.args, timeout=40)
+    assert "não passou" in asked[0] and "--sem-tecido" in win.last_task.args
+    assert win.task_title.text() == "Vídeo pronto" and "aviso" in win.task_msg.text()
+
+
+def test_furniture_video_hidden_for_other_functions(app, win):
+    _to_results(app, win, "mudar_estilo", "moderno", n=1)
+    assert not win.btn_fvideo.isVisibleTo(win)
+    win.go(win.P_FVIDEO); app.processEvents()
+    assert win.page() == win.P_RESULTS
+
+
+def test_furniture_video_args_parse_with_the_real_cli(tmp_path):
+    from mobilia import cli
+    from mobilia.ui.app import furniture_video_args
+    seen = {}
+    import unittest.mock as um
+    with um.patch.object(cli, "_cmd_run", lambda a: seen.setdefault("run", a) and 0):
+        cli.main(["run"] + furniture_video_args(str(FX), str(FX), "varanda", str(tmp_path / "v.mp4"), "16x9",
+                                                str(tmp_path / "w"), accept_weak=True, fabric=False))
+    a = seen["run"]
+    assert a.mode == "B" and a.room == "sala" and a.sala_vazia == str(FX) and a.formato == "16x9"
+    assert a.aceitar_placa_fraca and a.sem_tecido and a.placa == "auto"
+    with pytest.raises(ValueError):
+        furniture_video_args(str(FX), None, "sala", "v.mp4", "4x3", "w")

@@ -70,3 +70,11 @@ def room_fixture():
         return cache[name]
 
     return get
+
+
+@pytest.fixture(autouse=True)
+def _placa_geometria_padrao(monkeypatch):
+    """Nos testes, o modo B usa a sala vazia pela geometria (o padrão do produto é a sala vazia por IA quando o
+    gerador está instalado: numa máquina de desenvolvimento com os pesos, os testes carregariam o gerador). Os
+    testes da sala vazia "ia" pedem ``JobRequest(plate="ia")`` com um gerador falso."""
+    monkeypatch.setenv("MOBILIA_PLACA", "geometria")

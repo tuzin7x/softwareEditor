@@ -196,6 +196,10 @@ class FrameCompositor:
         ``warpAffine`` da CPU, igual ao numpy, e sobe pronta (cache por escala)."""
         t = self._t
         lay, g = self.stack.layers[i], self._lay[i]
+        if q.warp is not None:            # tecido assentando: deformação na CPU (igual ao numpy), sobe pronta
+            a, c, sh, box = L._scaled(lay, q)
+            up = lambda x: None if x is None else t.from_numpy(np.ascontiguousarray(x, np.float32)).to(self._dev)
+            return up(a), up(c), up(sh), box
         if q.scale < 1.0 - 1e-6:
             key = (i, round(float(q.scale), 6), q.anchor,
                    None if q.alpha_mul is None else hash(np.asarray(q.alpha_mul, np.float32).tobytes()))
@@ -272,7 +276,7 @@ def _pl_key(pl: Mapping[int, L.Placement]):
     k = []
     for i in sorted(pl):
         q = pl[i]
-        if q.alpha_mul is not None:
+        if q.alpha_mul is not None or q.warp is not None:
             return None
         k.append((i, q.dx, q.dy, float(q.shade), float(q.contact), float(q.scale), q.anchor))
     return tuple(k)
@@ -316,7 +320,7 @@ def master_frames(stack: L.LayerStack, ch, photo: np.ndarray, comp: FrameComposi
 
 
 def moving(q: L.Placement) -> bool:
-    return bool(q.dx or q.dy or q.scale < 1.0 - 1e-6)
+    return bool(q.dx or q.dy or q.scale < 1.0 - 1e-6 or q.warp is not None)
 
 
 def scaled_box(box, q: L.Placement) -> tuple[int, int, int, int]:

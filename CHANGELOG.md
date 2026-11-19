@@ -33,6 +33,26 @@ e, quando houver, `### Removido` e `### Segurança`. O texto da seção vira as 
 - **Exportar para anúncio:** JPEG pronto para WhatsApp e portais (2048 px ou 4K), com o selo discreto
   "Imagem ilustrativa" ligado por padrão nas funções de redesenho e desligado no Melhorar foto
   (linha de comando: `exportar`).
+- **Esvaziar ambiente** (nova função): da foto mobiliada sai o mesmo cômodo vazio. Saem os móveis soltos, o
+  tapete e a decoração (com a sombra de contato); ficam armários e bancadas planejados, portas, janelas, cortinas
+  (opcional: `--tirar-cortinas`), luminárias de teto e radiadores. O cômodo vazio é gerado por IA só onde estavam os
+  móveis, guiado pela geometria da sala sem os móveis (paredes e piso continuam retos), com cor e luz casadas na
+  borda e as janelas/portas da foto devolvidas por cima; fora dessa área a imagem é a foto. As versões partem da
+  sala refeita pela geometria (a IA só refina) ou de um preenchimento suave, e a escolha automática descarta as que
+  ainda mostram móvel, porta/janela nova ou degrau na borda (linha de comando: `design --funcao esvaziar`).
+- **Vídeo: móveis entrando** (no resultado do Esvaziar ambiente): o vídeo começa no cômodo vazio escolhido, os
+  móveis reais da foto entram peça por peça e termina exatamente na foto original. Formato da foto, 16:9 ou 9:16
+  (recorte em volta dos móveis); assistir, salvar e abrir a pasta pela tela de resultados. Se a sala vazia não
+  passar na verificação automática, a tela oferece gerar mesmo assim.
+- **Tecido assentando:** no vídeo de móveis entrando, quando a cama (ou sofá) pousa, a roupa de cama assenta com
+  um movimento pequeno e amortecido (uma onda leve atravessando o tecido), almofadas e travesseiros dão um quique
+  curto e cortinas balançam uma vez. Poucos pixels, sempre suave, e o último quadro continua idêntico à foto.
+  Ligado por padrão (desligar: `--sem-tecido` ou a opção na tela do vídeo).
+- **Modo B com sala vazia por IA (padrão):** quando o gerador de difusão está instalado (GPU ou CPU), a sala vazia
+  do início do vídeo de montagem é a sala refeita pela geometria refinada pela IA dentro da área dos móveis, com
+  verificação de qualidade própria; se reprovar, segue a geometria e, por último, o preenchimento clássico
+  (forçar: `run --placa ia|geometria`, ou `MOBILIA_PLACA`). Novos parâmetros de `run`: `--sala-vazia <imagem>`
+  (usa um cômodo vazio já escolhido), `--formato original|16x9|9x16` e `--sem-tecido`.
 
 ### Correções
 

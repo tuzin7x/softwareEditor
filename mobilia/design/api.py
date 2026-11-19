@@ -552,8 +552,9 @@ def redesign(photo, funcao: str = "mudar_estilo", estilo: str | None = "moderno"
     escolhida tem móvel cortado na borda, mais 2 sementes entram na disputa."""
     t_all = time.perf_counter()
     fp = P.with_overrides(P.function(funcao), **(overrides or {}))
-    if fp.key in ("editar_area", "texto", "melhorar"):
-        alt = {"editar_area": "edit_area", "texto": "text_to_design", "melhorar": "enhance.enhance"}[fp.key]
+    if fp.key in ("editar_area", "texto", "melhorar", "esvaziar"):
+        alt = {"editar_area": "edit_area", "texto": "text_to_design", "melhorar": "enhance.enhance",
+               "esvaziar": "empty_room"}[fp.key]
         raise ValueError(f"Use {alt} para '{fp.label}'.")
     requested = fp.key
     room_key = "fachada" if fp.exterior else P.norm_room(ambiente)
@@ -1438,3 +1439,10 @@ def text_to_design(prompt: str = "", estilo: str | None = "moderno", ambiente: s
 
 __all__ = ["redesign", "edit_area", "text_to_design", "DesignResult", "depth_control", "estimate_depth",
            "estimate_groups", "furniture_coverage", "STAGES", "ASPECTS", "EMPTY_NOTICE"]
+
+
+def empty_room(photo, n: int = 2, **kw) -> DesignResult:
+    """"Esvaziar ambiente": o mesmo cômodo sem os móveis soltos e a decoração (ver ``design/empty.py``)."""
+    from .empty import empty_room as _er
+
+    return _er(photo, n=n, **kw)

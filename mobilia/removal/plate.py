@@ -83,7 +83,7 @@ MIN_CONTEXT_FRAC = 0.01      # ... e em fração do buraco
 # estratégias do portão (:func:`build_plate_gated`): "planos" = LaMa por plano retificado (padrão);
 # "imagem" = LaMa direto no espaço da imagem (melhor quando o modelo da sala erra: linhas tortas por plano errado)
 # "geometria" = sala refeita pela geometria (:mod:`geofill`: só material real da foto, plano a plano; padrão do portão)
-STRATEGIES = ("planos", "imagem", "geometria")
+STRATEGIES = ("planos", "imagem", "geometria", "ia")
 GATE_WIDE_DILATE = 2.5       # máscara ampla do portão: núcleo dilatado 2,5× (sobra de borda/sombra do móvel)
 # Planejados mantidos **por padrão** (a 1ª tentativa já os deixa na foto, sem tentar a sala crua): quando a remoção
 # completa passa de 35% da foto ou só os planejados cobrem 10% ou mais. Atrás de armários, estantes e bancadas grandes
@@ -152,6 +152,12 @@ SCORE_WEIGHTS = {
 # falhas duras: a pior delas (severidade 0..1) vai para ``PlateQuality.hard`` e decide a escolha de semente/tentativa
 # antes da nota média (uma placa lisa com rejunte inventado não ganha de uma placa com costura pior)
 HARD_KEYS = ("nevoa", "fantasma", "estrutura_nova", "material", "contorno")
+
+# Portão da sala vazia "ia" (o gerador de difusão refina a sala refeita pela geometria, ``design/empty.py``). As
+# medidas de textura do portão foram calibradas no preenchimento pela geometria (cópia do material visível): o
+# grão e as bordas de uma imagem gerada são outros, então ``material``/``estrutura_nova``/``grao`` medem diferente
+# sem que haja defeito. O que não muda: móvel reencontrado, porta/janela nova e costura reprovam como antes.
+LIMITS_IA = {**LIMITS}
 
 
 def disk(r: int) -> np.ndarray:
@@ -1029,7 +1035,8 @@ def rug_mask(seg, shape: tuple[int, int]) -> np.ndarray | None:
 
 def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.ndarray, groups: np.ndarray,
            box: RoomBox | None, redetect: Callable | None = None, fill_info: dict | None = None,
-           min_area: float = 0.002, core: np.ndarray | None = None, rug: np.ndarray | None = None) -> PlateQuality:
+           min_area: float = 0.002, core: np.ndarray | None = None, rug: np.ndarray | None = None,
+           limits: dict | None = None) -> PlateQuality:
     """Nota automática da placa (0..100) e aprovação pelo :data:`LIMITS`. Plano preenchido que não pôde ser
     medido (nenhum pixel visível do próprio material em volta) reprova: o que não se mede não é aprovado.
 
@@ -1037,8 +1044,11 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
     0..1): costura, cor, grão, linha parede/piso, área sem plano, área gerada e, dentro do preenchimento, **névoa,
     fantasma e placas soltas** (:mod:`plate_score`), mais móvel ou porta/janela que o OneFormer reencontra na
     placa. Reprovada (algum motivo, ou nota sem teto abaixo de ``nota_min``): a nota vira 0,6 × a nota sem teto,
-    continua e sempre abaixo de 60, para ordenar tentativas e sementes e mostrar quão perto ficou."""
+    continua e sempre abaixo de 60, para ordenar tentativas e sementes e mostrar quão perto ficou. ``limits``:
+    outro conjunto de limites (padrão :data:`LIMITS`; a sala vazia "ia" usa :data:`LIMITS_IA`)."""
     from . import plate_score as ps
+
+    lim_ = LIMITS if limits is None else limits     # ``LIMITS_IA``: portão da sala vazia gerada ("ia")
 
     per = plane_stats(photo, plate, mask, labels, groups, min_area=min_area)
     line = line_stats(plate, photo, mask, box, labels=labels) if box is not None else {}
@@ -1052,10 +1062,10 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
     H, W = mask.shape
     n_mask = int(mask.sum())
     unplanned = float((mask & np.isin(labels, (OTHER, PROTECTED))).sum()) / n_mask if n_mask else 0.0
-    if area >= LIMITS["sem_plano_area_min"]:
+    if area >= lim_["sem_plano_area_min"]:
         # cor média certa e estrutura errada (névoa, fantasma translúcido, parede inventada) passam pela costura;
         # sem plano medido não há como aprovar uma sala tão grande inventada
-        if unplanned >= LIMITS["sem_plano_frac_max"]:
+        if unplanned >= lim_["sem_plano_frac_max"]:
             reasons.append(f"geometria da sala não encontrada: {100 * unplanned:.0f}% do preenchimento sem plano "
                            f"medido ({100 * area:.0f}% da foto)")
         lose("sem_plano", (unplanned - 0.2) / 0.3)
@@ -1076,40 +1086,40 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
         if isinstance(fi, dict) and fi.get("metodo") in ("sem_contexto", "sem_vista"):
             blind += int(fi.get("buraco_px", 0))
     sem_ref = blind / float(H * W)
-    if sem_ref >= LIMITS["sem_referencia_max"]:
+    if sem_ref >= lim_["sem_referencia_max"]:
         reasons.append(f"parede escondida sem nenhuma referência visível ({100 * sem_ref:.1f}% da foto): seria "
                        "inventada")
         lose("plano_sem_referencia", 1.0)
     # o limite da cor do preenchimento só relaxa se o que não tem plano não tem mancha forte (resto de móvel que a
     # reconferência não pegou): senão uma tentativa com fantasma passaria antes da tentativa limpa
-    relax_fill = per.get("sem_plano", {}).get("costura_p90_de", 0.0) <= LIMITS["costura_sem_plano_max"]
+    relax_fill = per.get("sem_plano", {}).get("costura_p90_de", 0.0) <= lim_["costura_sem_plano_max"]
     planes = {k: v for k, v in per.items() if k != "sem_plano"}
     tot = float(sum(v["area_px"] for v in planes.values())) or 1.0
     for name, s in per.items():
         if name == "sem_plano":
-            if s["costura_de"] > LIMITS["costura_sem_plano_max"]:
+            if s["costura_de"] > lim_["costura_sem_plano_max"]:
                 reasons.append(f"mancha no preenchimento sem plano (ΔE {s['costura_de']:.1f})")
             lose("mancha_sem_plano", (s["costura_de"] - 4.0) / 12.0)
             continue
-        relax = relax_fill and s.get("razao_material", 0.0) <= LIMITS["relaxa_area_max"]
+        relax = relax_fill and s.get("razao_material", 0.0) <= lim_["relaxa_area_max"]
         lim = fill_de_limit(s["costura_de"], s["grao_log2"], relax)
         if s["preenchimento_de"] > lim:
             reasons.append(f"cor do preenchimento destoa no(a) {name} (ΔE {s['preenchimento_de']:.1f})")
-        if s["costura_de"] > LIMITS["costura_de_max"]:
+        if s["costura_de"] > lim_["costura_de_max"]:
             reasons.append(f"costura visível no(a) {name} (ΔE {s['costura_de']:.1f})")
-        if abs(s["grao_log2"]) > LIMITS["grao_log2_max"]:
+        if abs(s["grao_log2"]) > lim_["grao_log2_max"]:
             reasons.append(f"textura diferente no(a) {name} (grão {2 ** s['grao_log2']:.2f}×)")
         share = s["area_px"] / tot                    # cada plano pesa pela área que ocupa no preenchimento
         lose("costura", (s["costura_de"] - 2.0) / 8.0, share)
         lose("cor", (s["preenchimento_de"] - 0.5 * lim) / lim, share)
         lose("grao", (abs(s["grao_log2"]) - 0.3) / 1.2, share)
     if "distancia_px" in line:
-        if line["distancia_px"] > LIMITS["linha_px_max"]:
+        if line["distancia_px"] > lim_["linha_px_max"]:
             reasons.append(f"linha parede/piso fora do lugar ({line['distancia_px']:.1f} px)")
-        if line["continuidade"] < LIMITS["linha_continuidade_min"]:
+        if line["continuidade"] < lim_["linha_continuidade_min"]:
             reasons.append(f"rodapé/linha parede-piso interrompido ({100 * line['continuidade']:.0f}% contínuo)")
         lose("linha", 0.5 * (line["distancia_px"] - 2.0) / 6.0 + 0.5 * (1 - line["continuidade"] / 0.8))
-    if area > LIMITS["area_gerada_max"]:
+    if area > lim_["area_gerada_max"]:
         reasons.append(f"área reconstruída muito grande ({100 * area:.0f}% da foto)")
     lose("area", (area - 0.5) / 0.4)
     # dentro do preenchimento: névoa, fantasma e placas soltas
@@ -1130,21 +1140,21 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
     lose("estrutura_nova", struct)
     lose("material", mat)
     lose("contorno", cont)
-    if fog > LIMITS["nevoa_max"]:
+    if fog > lim_["nevoa_max"]:
         reasons.append(f"névoa/borrão no preenchimento (severidade {fog:.2f})")
-    if ghost > LIMITS["fantasma_max"]:
+    if ghost > lim_["fantasma_max"]:
         reasons.append(f"fantasma do móvel removido na sala vazia (severidade {ghost:.2f})")
-    if slab > LIMITS["placas_soltas_max"]:
+    if slab > lim_["placas_soltas_max"]:
         reasons.append(f"manchas/placas soltas no preenchimento ({100 * slab:.0f}% da área gerada)")
-    if struct > LIMITS["estrutura_nova_max"]:
+    if struct > lim_["estrutura_nova_max"]:
         reasons.append(f"estrutura inventada no preenchimento (bordas {struct:.2f}: rejunte, bloco, cano ou placa)")
-    if mat > LIMITS["material_max"]:
+    if mat > lim_["material_max"]:
         reasons.append(f"material do preenchimento diferente do visível (severidade {mat:.2f})")
-    if cont > LIMITS["contorno_max"]:
+    if cont > lim_["contorno_max"]:
         reasons.append(f"contorno da peça removida visível na sala vazia (severidade {cont:.2f})")
     hard_detail = {"nevoa": round(fog, 3), "fantasma": round(ghost, 3), "estrutura_nova": round(struct, 3),
                    "material": round(mat, 3), "contorno": round(cont, 3)}
-    if sem_ref >= LIMITS["sem_referencia_max"]:
+    if sem_ref >= lim_["sem_referencia_max"]:
         hard_detail["sem_referencia"] = 1.0
     red, opn = [], []
     if redetect is not None:
@@ -1158,7 +1168,7 @@ def assess(photo: np.ndarray, plate: np.ndarray, mask: np.ndarray, labels: np.nd
             reasons.append("porta/janela nova na sala vazia: " + ", ".join(o["rotulo"] for o in opn))
             lose("abertura_nova", 1.0)
     raw = float(np.clip(100.0 - sum(pen.values()), 0.0, 100.0))
-    if not reasons and raw < LIMITS["nota_min"]:
+    if not reasons and raw < lim_["nota_min"]:
         top = sorted(pen.items(), key=lambda kv: -kv[1])[:3]
         reasons.append(f"nota baixa ({raw:.0f}/100; mais pontos perdidos em: "
                        + ", ".join(f"{k} {v:.0f}" for k, v in top) + ")")
@@ -1438,15 +1448,24 @@ def _fill_rect(inpaint, cur, photo, hole_img, same_img, Hm, size, rng, ctx_restr
 def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.ndarray | None = None,
                 inpaint: InpaintFn | None = None, redetect: Callable | None = None, seed: int = 0,
                 max_side: int = MAX_SIDE, assess_quality: bool = True, strategy: str = "planos",
-                core_dilate: float = CORE_DILATE) -> PlateResult:
+                core_dilate: float = CORE_DILATE, ai_fill: Callable | None = None) -> PlateResult:
     """Sala vazia a partir das peças a remover (``FurnitureInstance`` ou qualquer objeto com ``mask``, ``alpha``
     e ``kind``). ``seg``: segmentação semântica da foto. ``room``: ``RoomModel`` (sem ele, só espaço da
     imagem). ``depth``: profundidade do MoGe (detecta o que é visto por portas). ``redetect(placa) ->
     (seg, pan)``: OneFormer para a nota. ``strategy``: "planos" (LaMa por plano) ou "imagem" (LaMa no espaço da
     imagem; a nota usa os mesmos planos da caixa, para medir as duas do mesmo jeito). ``core_dilate``: dilatação
-    do núcleo (fração da diagonal). Garante ``placa[~mask] == foto[~mask]`` byte a byte."""
+    do núcleo (fração da diagonal). Garante ``placa[~mask] == foto[~mask]`` byte a byte.
+
+    ``strategy="ia"``: máscara e preenchimento como "geometria" (sem modelo da sala, por plano) e depois
+    ``ai_fill(foto, placa, mascara, grupos, profundidade, semente) -> (placa, info)`` (o gerador de difusão,
+    ``design.empty.PlateFiller``) refina só dentro da máscara; a nota usa :data:`LIMITS_IA`."""
     if strategy not in STRATEGIES:
         raise ValueError(f"estratégia de placa desconhecida: {strategy}")
+    ai = strategy == "ia"
+    if ai:
+        if ai_fill is None:
+            raise ValueError("estratégia \"ia\" sem o preenchimento por IA")
+        strategy = "geometria"
     if inpaint is None:
         inpaint = LazyLama()
     t: dict = {}
@@ -1529,17 +1548,27 @@ def build_plate(photo: np.ndarray, pieces: Sequence, seg, room=None, depth: np.n
         n_ext = extend_wall_panels(plate, mask, labels, np.logical_or.reduce(panels))
         if n_ext:
             pinfo["painel_estendido"] = {"metodo": "painel espelhado para baixo", "area_px": n_ext}
+    ai_info = None
+    if ai:
+        t0 = time.perf_counter()
+        plate, ai_info = ai_fill(photo, plate, mask, groups, depth, seed)
+        plate = np.array(plate, np.uint8, copy=True)
+        plate[~mask] = photo[~mask]
+        t["ia"] = time.perf_counter() - t0
+        strategy = "ia"
     if not np.array_equal(plate[~mask], photo[~mask]):     # regra absoluta: nunca deveria acontecer
         raise AssertionError("placa difere da foto fora da máscara")
     q = None
     if assess_quality:
         t0 = time.perf_counter()
-        q = assess(photo, plate, mask, labels, groups, box, redetect, pinfo, core=core, rug=rug)
+        q = assess(photo, plate, mask, labels, groups, box, redetect, pinfo, core=core, rug=rug,
+                   limits=LIMITS_IA if ai else None)
         t["nota"] = time.perf_counter() - t0
-    return PlateResult(plate, mask, core, effect, shadow, light, labels, q,
-                       {"planos": pinfo, "tempos": t, "estrategia": strategy, "dilatacao_nucleo": core_dilate,
-                        "pecas_alem_da_abertura": beyond_ids},
-                       warnings)
+    info = {"planos": pinfo, "tempos": t, "estrategia": strategy, "dilatacao_nucleo": core_dilate,
+            "pecas_alem_da_abertura": beyond_ids}
+    if ai_info is not None:
+        info["ia"] = ai_info
+    return PlateResult(plate, mask, core, effect, shadow, light, labels, q, info, warnings)
 
 
 def attempt_rank(q: PlateQuality) -> tuple:
@@ -1786,7 +1815,8 @@ def _free_cuda() -> None:
 def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, inpaint: InpaintFn | None = None,
                       redetect: Callable | None = None, seed: int = 0, max_side: int = MAX_SIDE,
                       alternatives: bool = True, on_attempt: Callable | None = None,
-                      refine: Callable | None = None, geometry: bool | None = None) -> PlateResult:
+                      refine: Callable | None = None, geometry: bool | None = None,
+                      ai_fill: Callable | None = None) -> PlateResult:
     """Portão de qualidade (§3.6 e PT-V3-8). Tentativas, parando na primeira aprovada:
 
     1. ``crua_por_plano``: soltos + planejados, LaMa por plano;
@@ -1809,7 +1839,12 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
 
     ``refine(placa, nome) -> placa`` (perfil "B com SDXL", PT-V3-4): estágio depois da LaMa em **cada** tentativa
     (refino SDXL só dentro da máscara, :func:`mobilia.gen.sdxl.refine_plate`); ele mesmo cai para a placa LaMa
-    quando nenhuma semente é melhor. A tentativa registra a nota da LaMa e a do refino."""
+    quando nenhuma semente é melhor. A tentativa registra a nota da LaMa e a do refino.
+
+    ``ai_fill`` (sala vazia "ia", padrão do modo B quando o gerador de difusão está instalado): a 1ª tentativa é
+    ``ia`` (sala crua pela geometria refinada pelo gerador, só dentro da máscara, com o portão :data:`LIMITS_IA`).
+    Aprovada, para aí; reprovada (ou com erro no gerador), segue a sequência de sempre (geometria → LaMa) e no fim
+    fica a melhor de todas as tentativas."""
     if inpaint is None:
         inpaint = LazyLama()
     attempts: list[dict] = []
@@ -1817,11 +1852,11 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     def run(name: str, keep: bool, strategy: str, dil: float) -> PlateResult:
         t0 = time.perf_counter()
         r = build_plate(photo, inst_set.removal(keep), seg, room, depth, inpaint, redetect, seed, max_side,
-                        strategy=strategy, core_dilate=dil)
+                        strategy=strategy, core_dilate=dil, ai_fill=ai_fill if strategy == "ia" else None)
         r.kept_builtins = keep
         r.info["estrategia_portao"] = name
         sd = None
-        if refine is not None:
+        if refine is not None and strategy != "ia":
             q_lama = r.quality
             try:
                 r = refine(r, name)
@@ -1863,7 +1898,7 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
                          "nota_sem_teto": None if q is None or q.raw_score is None else round(q.raw_score, 1),
                          "aprovada": None if q is None else q.ok, "motivos": [] if q is None else list(q.reasons),
                          "area_gerada_pct": round(100 * float(r.mask.mean()), 2),
-                         "refino_sdxl": sd, "tempo_s": round(time.perf_counter() - t0, 2)})
+                         "refino_sdxl": sd, "ia": r.info.get("ia"), "tempo_s": round(time.perf_counter() - t0, 2)})
         if on_attempt is not None:
             on_attempt(name, r)
         return r
@@ -1873,10 +1908,23 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
     rank = lambda r: attempt_rank(r.quality)
     risk = keep_builtins_reason(inst_set, photo.shape[:2])
     keep_why = risk if KEEP_BUILTINS_FIRST else ""
+    ai_best = None
+    if ai_fill is not None:
+        t_ai = time.perf_counter()
+        try:
+            ai_best = run("ia", False, "ia", CORE_DILATE)
+        except Exception as e:  # noqa: BLE001 - gerador sem memória, pesos corrompidos...: segue a geometria
+            _free_cuda()
+            attempts.append({"estrategia": "ia", "planejados_mantidos": False, "metodo": "ia", "nota": None,
+                             "aprovada": False, "erro": f"{type(e).__name__}: {str(e)[:300]}",
+                             "tempo_s": round(time.perf_counter() - t_ai, 2)})
+            ai_best = None
+        if ai_best is not None and (ai_best.quality is None or ai_best.quality.ok):
+            return _gate_finish(ai_best, inst_set, attempts, "", risk)
     geo = (GEOMETRY_FIRST if geometry is None else geometry) and room is not None \
         and getattr(room, "walls", None) is not None
     if geo:
-        return _gated_geometry(run, rank, inst_set, alternatives, risk, attempts)
+        return _gated_geometry(run, rank, inst_set, alternatives, risk, attempts, ai_best)
     if keep_why:
         best = run("planejados_mantidos", True, "planos", CORE_DILATE)
         best.warnings.append(f"planejados mantidos na foto por padrão ({keep_why}): a parede atrás deles seria "
@@ -1907,10 +1955,11 @@ def build_plate_gated(photo: np.ndarray, inst_set, seg, room=None, depth=None, i
         if best.quality.ok and best.info["estrategia_portao"] != first_name:
             best.warnings.append(f"sala vazia aprovada na tentativa \"{best.info['estrategia_portao']}\" "
                                  f"(a primeira reprovou: {'; '.join(first_reasons)})")
-    return _gate_finish(best, inst_set, attempts, keep_why, risk)
+    return _gate_finish(best, inst_set, attempts, keep_why, risk, ai_best)
 
 
-def _gated_geometry(run, rank, inst_set, alternatives: bool, risk: str, attempts: list) -> PlateResult:
+def _gated_geometry(run, rank, inst_set, alternatives: bool, risk: str, attempts: list,
+                    ai_best: PlateResult | None = None) -> PlateResult:
     """Sequência do portão com a sala refeita pela geometria (ver :func:`build_plate_gated`)."""
     best = run("crua_geometria", False, "geometria", CORE_DILATE)
     first_reasons = [] if best.quality is None else list(best.quality.reasons)
@@ -1936,10 +1985,17 @@ def _gated_geometry(run, rank, inst_set, alternatives: bool, risk: str, attempts
         if best.quality.ok and best.info["estrategia_portao"] != "crua_geometria":
             best.warnings.append(f"sala vazia aprovada na tentativa \"{best.info['estrategia_portao']}\" "
                                  f"(a primeira reprovou: {'; '.join(first_reasons)})")
-    return _gate_finish(best, inst_set, attempts, "", risk)
+    return _gate_finish(best, inst_set, attempts, "", risk, ai_best)
 
 
-def _gate_finish(best: PlateResult, inst_set, attempts: list, keep_why: str, risk: str) -> PlateResult:
+def _gate_finish(best: PlateResult, inst_set, attempts: list, keep_why: str, risk: str,
+                 ai_best: PlateResult | None = None) -> PlateResult:
+    if ai_best is not None and ai_best is not best and ai_best.quality is not None and best.quality is not None \
+            and attempt_rank(ai_best.quality) > attempt_rank(best.quality):
+        best = ai_best                      # todas reprovaram e a "ia" ficou mais perto
+    elif ai_best is not None and ai_best is not best and best.quality is not None and best.quality.ok:
+        best.warnings.append("sala vazia por IA reprovada (" + "; ".join(ai_best.quality.reasons or ["erro"])
+                             + f"): ficou a tentativa \"{best.info.get('estrategia_portao')}\"")
     best.info["tentativas"] = attempts
     best.info["planejados_por_padrao"] = keep_why or None
     best.info["risco_planejados"] = risk or None
